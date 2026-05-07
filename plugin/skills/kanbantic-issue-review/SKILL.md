@@ -162,7 +162,7 @@ The diff scope depends on `reviewLevel`:
 **Feature-level** — diff scoped to the Feature's commits only:
 ```bash
 # Find the SHA where this Feature's first Task moved to InProgress (commit prefix matches Feature-Code)
-FEATURE_FIRST=$(git log --oneline | grep -E "\(<FEATURE-CODE>\)" | tail -1 | awk '{print $1}^')
+FEATURE_FIRST=$(git log --oneline | grep -E "\(<FEATURE-CODE>\)" | tail -1 | awk '{print $1}')^
 git diff $FEATURE_FIRST..HEAD --stat
 git diff $FEATURE_FIRST..HEAD
 ```

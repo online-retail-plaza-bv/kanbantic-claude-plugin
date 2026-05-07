@@ -57,7 +57,7 @@ These ship in tandem with the plugin and are required for the new flow:
 - **`assign_features_to_phase(phaseId, featureIds[])`** — bulk variant, transactional (alle-of-niets).
 - **`list_features_by_phase(phaseId)`** — list Features assigned to a Phase, sorted by Code.
 
-All three exposed as MCP tools (`Kanbantic.Mcp/IssueTools.cs`) and HTTP endpoints (`IssueController` PATCH/POST/GET via ABP convention).
+All three exposed as MCP tools (`Kanbantic.Mcp/Tools/ImplementationPlanTools.cs`) and HTTP endpoints (`IssueController` PATCH/POST/GET via ABP convention).
 
 ## Backwards-compat
 

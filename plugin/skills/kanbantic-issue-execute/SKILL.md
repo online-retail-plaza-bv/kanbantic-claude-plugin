@@ -323,6 +323,12 @@ Before starting any Feature, verify the parent Epic-issue is **InProgress**. The
 
 For each Feature in `list_features_by_phase(phaseId)` (in their `order` / Code order):
 
+**Skip already-finished Features.** When resuming after a crashed session, the
+`list_features_by_phase` response may include Features that are already `Done`
+or `Cancelled` from a prior walk. Skip those — `claim_issue` is idempotent and
+would not break, but re-walking completed work is a waste. Only walk Features
+whose status is `Prepared`, `InProgress`, or `Triaged` (legacy intake).
+
 #### 4A.2-new.a: Sub-claim the Feature
 
 Each Feature is claimed and walked individually so it gets its own audit-trail. The same agent claims the parent Epic and each child Feature — `claim_issue` is idempotent for same-principal (KBT-SR258).
