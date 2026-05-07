@@ -1,7 +1,7 @@
 {
   "name": "kanbantic-claude-plugin",
-  "version": "2.3.0",
-  "description": "Kanbantic issue lifecycle skills: intake (report / request / propose), triage, prepare, execute, review — all artifacts via Kanbantic MCP. v2.3.0 introduces the InDeployment status (KBT-F236): kanbantic-issue-review now transitions Review → InDeployment on merge instead of directly to Done. The InDeployment → Done transition is operational (deploy webhooks + manual update_issue_status) until KBT-INI032 Epic D ships GateEvaluationService for auto-promotion. v2.2.0 introduced Prepared (KBT-F235). See RELEASE_NOTES_v2.3.0.md.",
+  "version": "2.4.0",
+  "description": "Kanbantic issue lifecycle skills: intake (report / request / propose), triage, prepare, execute, review — all artifacts via Kanbantic MCP. v2.4.0 introduces Phase-of-Features-of-Tasks Epic shape (KBT-F250): Epics group Features into Phases instead of Tasks; each Feature has its own audit-trail. kanbantic-issue-execute auto-detects per-Phase shape (new vs legacy) — no forced migration. kanbantic-issue-review now works at three levels (Feature / Phase / Epic). Three new MCP tools enable clean Phase ↔ Feature querying: assign_feature_to_phase, assign_features_to_phase, list_features_by_phase. v2.3.0 introduced InDeployment (KBT-F236), v2.2.0 introduced Prepared (KBT-F235). See RELEASE_NOTES_v2.4.0.md.",
   "author": {
     "name": "Kanbantic"
   }

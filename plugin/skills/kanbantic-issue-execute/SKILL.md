@@ -1,6 +1,6 @@
 ---
 name: kanbantic-issue-execute
-description: "Use when a Kanbantic issue needs to be implemented (status Prepared, or Triaged with isReadyToClaim for legacy issues that pre-date KBT-F235). Calls claim_issue which atomically promotes Prepared/Triaged → InProgress (KBT-RL052). For Epics: executes the Implementation Plan phase by phase with per-phase push. For Features/Bugs: executes tasks directly without phases. Ends at status Review — handoff to kanbantic-issue-review for merge/close."
+description: "Use when a Kanbantic issue needs to be implemented (status Prepared, or Triaged with isReadyToClaim for legacy issues that pre-date KBT-F235). Calls claim_issue which atomically promotes Prepared/Triaged → InProgress (KBT-RL052). For Epics: executes the Implementation Plan phase by phase with per-phase push. Per-Phase shape auto-detected (KBT-RL057, KBT-F250 v2.4.0): legacy Phase→Tasks vs new Phase→Features→Tasks. For Features/Bugs: executes tasks directly without phases. Ends at status Review — handoff to kanbantic-issue-review for merge/close."
 ---
 
 # Kanbantic Issue Execute
@@ -232,7 +232,48 @@ Do NOT launch Explore agents or do broad codebase exploration. The plan (tasks +
 
 Use this step for **Epics** that have an Implementation Plan with phases.
 
-For each unlocked phase:
+### 4A.0: Auto-detect Phase shape per Phase (KBT-RL057, KBT-F250)
+
+A Phase can hold work in one of two shapes. The skill **auto-detects** per Phase, **without operator input**:
+
+| Detection | Shape | Flow |
+|---|---|---|
+| `featureCount > 0 && taskCount == 0` | **New shape** (Phase → Features → Tasks) | Use 4A.2-new |
+| `featureCount == 0 && taskCount > 0` | **Legacy shape** (Phase → Tasks direct) | Use 4A.2-legacy |
+| `featureCount > 0 && taskCount > 0` | **Mixed — ERROR** | STOP, report to operator |
+| `featureCount == 0 && taskCount == 0` | **Empty — ERROR** | STOP, redirect to `kanbantic-issue-prepare` |
+
+For each unlocked Phase, before executing:
+
+```
+MCP: mcp__kanbantic__list_features_by_phase(phaseId)   // → featureCount + features[]
+MCP: mcp__kanbantic__list_tasks(phaseId)               // → tasks where Task.PhaseId == phaseId; legacy-shape Tasks
+```
+
+Then decide:
+
+```text
+if featureCount > 0 && taskCount == 0:
+    Report: "Phase {code} — detected new shape (Phase → Features → Tasks). N features."
+    Continue with 4A.2-new
+elif featureCount == 0 && taskCount > 0:
+    Report: "Phase {code} — detected legacy shape (Phase → Tasks direct). N tasks."
+    Continue with 4A.2-legacy
+elif featureCount > 0 && taskCount > 0:
+    STOP with error:
+      "Phase {code} has BOTH directly-attached Tasks AND assigned Features.
+       Mixed shape is not supported. Cleanup required:
+       - Either move the directly-attached Tasks under one of the assigned Features
+         (set IssueTask.IssueId to the Feature's id and clear PhaseId), or
+       - Remove the Feature assignment from this Phase (assign_feature_to_phase null).
+       Re-run kanbantic-issue-execute after cleanup."
+else:
+    STOP with error:
+      "Phase {code} has neither Tasks nor Features. The Implementation Plan
+       is incomplete. Run kanbantic-issue-prepare to add work."
+```
+
+This detection is per-Phase: an Epic MAY mix legacy-shape Phases (older work) with new-shape Phases (newer work) within the same plan, as long as no individual Phase is itself mixed.
 
 ### 4A.1: Unlock Phase (if needed)
 
@@ -241,42 +282,150 @@ First phase is auto-unlocked. Subsequent phases unlock after the previous is app
 MCP: mcp__kanbantic__unlock_phase(issueId, phaseId)
 ```
 
-### 4A.2: Execute Tasks
+### 4A.2-legacy: Execute Tasks directly (legacy shape)
+
+Use this when 4A.0 detected `legacy shape` for the current Phase.
 
 <IMPORTANT>
-Before starting any task, verify the issue is **InProgress**. If not, go back to Step 2 and claim it first.
+Before starting any task, verify the parent Epic-issue is **InProgress**. If not, go back to Step 2 and claim it first.
 </IMPORTANT>
 
-For each task in the phase:
+For each task in the Phase (where `IssueTask.IssueId == EpicId` and `IssueTask.PhaseId == phaseId`):
 
 **Start:**
 ```
-MCP: mcp__kanbantic__update_task_status(issueId, taskId, status: "InProgress")
+MCP: mcp__kanbantic__update_task_status(issueId: <EpicId>, taskId, status: "InProgress")
 ```
 
-**Implement:**
-- Read the task description and the KnowledgeExtraction discussion entry for this phase
-- Write the code exactly as specified
-- Run build/test commands to verify
-- Fix any issues
+**Implement:** Read the task description and the KnowledgeExtraction discussion entry for this phase. Write the code, run build/tests, fix issues.
 
 **Complete:**
 ```
-MCP: mcp__kanbantic__update_task_status(issueId, taskId, status: "Done")
+MCP: mcp__kanbantic__update_task_status(issueId: <EpicId>, taskId, status: "Done")
 MCP: mcp__kanbantic__add_discussion_entry(
-  issueId,
+  issueId: <EpicId>,
   content: "**Task [title] completed.**\n\nChanges:\n- [files changed]\n\nVerification:\n- [build/test results]",
   entryType: "Comment"
 )
 ```
 
-**Commit after each task or logical group (conventional commits):**
-```bash
-git add <specific files>
-git commit -m "<type>(<issue-code>): <task description>"
+**Commit after each task or logical group** (conventional commits — see types below).
+
+When all Tasks in the Phase are `Done` or `Cancelled`, continue to 4A.3 (push + mark phase for review).
+
+### 4A.2-new: Execute Features → Tasks (new shape, KBT-F250)
+
+Use this when 4A.0 detected `new shape` for the current Phase.
+
+<IMPORTANT>
+Before starting any Feature, verify the parent Epic-issue is **InProgress**. The child Features stay on `Prepared` (or `Triaged` for legacy intake) until each is sub-claimed below.
+</IMPORTANT>
+
+For each Feature in `list_features_by_phase(phaseId)` (in their `order` / Code order):
+
+**Skip already-finished Features.** When resuming after a crashed session, the
+`list_features_by_phase` response may include Features that are already `Done`
+or `Cancelled` from a prior walk. Skip those — `claim_issue` is idempotent and
+would not break, but re-walking completed work is a waste. Only walk Features
+whose status is `Prepared`, `InProgress`, or `Triaged` (legacy intake).
+
+#### 4A.2-new.a: Sub-claim the Feature
+
+Each Feature is claimed and walked individually so it gets its own audit-trail. The same agent claims the parent Epic and each child Feature — `claim_issue` is idempotent for same-principal (KBT-SR258).
+
+```
+MCP: mcp__kanbantic__claim_issue(
+  issueId: <FeatureId>,
+  branch: "<same branch as the Epic — feature/KBT-Exxx-...>"
+)
 ```
 
-Use conventional-commit types:
+The Feature's `branch` field is set to the same branch as the parent Epic — there is **one branch per Epic-execution**, regardless of how many child Features it contains. This keeps the diff cohesive for review.
+
+#### 4A.2-new.b: Walk the Feature's Tasks
+
+For each Task on the Feature (where `IssueTask.IssueId == FeatureId`):
+
+**Start:**
+```
+MCP: mcp__kanbantic__update_task_status(issueId: <FeatureId>, taskId, status: "InProgress")
+```
+
+**Implement:** Read task + Feature description + Epic's KnowledgeExtraction entry for this Phase. Write the code.
+
+**Complete:**
+```
+MCP: mcp__kanbantic__update_task_status(issueId: <FeatureId>, taskId, status: "Done")
+MCP: mcp__kanbantic__add_discussion_entry(
+  issueId: <FeatureId>,
+  content: "**Task [title] completed.**\n\nChanges:\n- [files changed]\n\nVerification:\n- [build/test results]",
+  entryType: "Comment"
+)
+```
+
+Commit per Task or per logical group, attributed to the Feature in the commit message:
+
+```bash
+git add <files>
+git commit -m "<type>(<Feature-Code>): <task description>"
+```
+
+#### 4A.2-new.c: Mark Feature as Done
+
+When all Tasks of the Feature are `Done` or `Cancelled`:
+
+```
+MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "Done")
+```
+
+The backend's `OpenTasks` readiness check accepts `Done` and `Cancelled` per KBT-TRUL011. If a Cancelled Task lacks its Decision-justification, fix that first.
+
+#### 4A.2-new.d: Per-Feature mini-review (KBT-PR200)
+
+Optionally invoke `kanbantic-issue-review` scoped to this Feature for an early per-Feature code review:
+
+```
+Skill: kanbantic-issue-review
+arg:   <FeatureId>
+```
+
+The review-skill auto-detects Feature-level (vs Phase-level / Epic-level) from the issue argument. Critical/Important findings → reviewer creates fix-tasks on the Feature and the skill rolls the Feature back to `InProgress`; once fixed, mark Done again.
+
+This step is **recommended for Phases with ≥3 Features** to keep review-deltas small. For Phases with 1–2 Features, defer review to the Phase-level review in 4A.4.
+
+When all Features in the Phase are `Done`, continue to 4A.3.
+
+### 4A.3: Push Phase + Mark for Review
+
+After all Tasks (legacy shape) or all Features (new shape) in the Phase are Done, **push the branch** so the reviewer can fetch it:
+
+```bash
+git push origin <branch>
+```
+
+Then mark the Phase ready for review:
+```
+MCP: mcp__kanbantic__mark_phase_for_review(issueId: <EpicId>, phaseId)
+```
+
+### 4A.4: Request Code Review
+
+Invoke `kanbantic-issue-review` to review the Phase (which also handles merge/close on the final approve):
+```
+Skill: kanbantic-issue-review
+arg:   <PhaseId>  (or <EpicId> for the final whole-Epic review)
+```
+
+For new-shape Phases where each Feature was already mini-reviewed in 4A.2-new.d, the Phase-level review is a **lightweight coherence check** — the reviewer verifies that the Features in this Phase work together (no integration-gaps) and skips per-Task code-walk.
+
+### 4A.5: Handle Review Result
+
+- **Approved**: proceed to next Phase (unlock via 4A.1, repeat 4A.0–4A.4)
+- **Rejected**: read rejection reason, pick up the fix-tasks the reviewer added (on the Phase or on individual Features), fix, commit, push, re-submit
+
+### 4A.6: Conventional commits
+
+Use conventional-commit types in commit messages:
 - `feat` — new functionality
 - `fix` — bug fix (use for Bug issues)
 - `refactor` — refactor without behavior change
@@ -284,30 +433,14 @@ Use conventional-commit types:
 - `test` — tests only
 - `chore` — infrastructure / tooling
 
-### 4A.3: Push Phase + Mark for Review
-
-After all tasks in the phase are Done, **push the branch** so the reviewer can fetch it:
-
-```bash
-git push origin <branch>
+For new-shape Epics, attribute commits to the Feature whose Task is being implemented:
 ```
-
-Then mark the phase ready for review:
+git commit -m "feat(KBT-F262): add Issue.PhaseId column + EF migration"
 ```
-MCP: mcp__kanbantic__mark_phase_for_review(issueId, phaseId)
+For legacy-shape Epics, attribute to the Epic:
 ```
-
-### 4A.4: Request Code Review
-
-Invoke `kanbantic-issue-review` to review the phase (which also handles merge/close on the final approve):
+git commit -m "feat(KBT-E059): add Prepared status to IssueStatus enum"
 ```
-Skill: kanbantic-issue-review
-```
-
-### 4A.5: Handle Review Result
-
-- **Approved**: proceed to next phase (unlock via 4A.1, repeat)
-- **Rejected**: read rejection reason, pick up the fix tasks the reviewer added, fix issues, commit, push, re-submit the phase for review
 
 ## Step 4B: Execute Tasks Directly (Features / Bugs)
 

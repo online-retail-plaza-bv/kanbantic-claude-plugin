@@ -2,7 +2,7 @@
 
 Claude plugin for Kanbantic issue lifecycle management. All artifacts are created and managed through Kanbantic MCP tools — no local file output.
 
-## Skill ↔ Lane mapping (plugin v2.3.0)
+## Skill ↔ Lane mapping (plugin v2.4.0)
 
 Three intake-skills create issues; four lane-skills move them through the eight statuses; deploy webhooks complete the journey to production.
 
@@ -24,8 +24,13 @@ Three intake-skills create issues; four lane-skills move them through the eight 
 intake → New → triage → Triaged → prepare → Prepared → execute → InProgress → execute → Review → review → InDeployment → deploy → Done
 ```
 
-**Key invariants** (since plugin v2.3.0 / KBT-F236):
+**Key invariants** (since plugin v2.4.0 / KBT-F250):
 
+- An Epic's Implementation Plan can take two shapes — auto-detected per Phase by `kanbantic-issue-execute` (KBT-RL057):
+  - **New shape** (default for v2.4.0+ Epics): `Epic → Phase → Feature → Task`. Each Feature has its own audit-trail; Tasks attach to Features, not directly to Phases.
+  - **Legacy shape** (existing Epics): `Epic → Phase → Task`. Continues to work without restructuring.
+- `kanbantic-issue-review` works at three levels for new-shape Epics — Feature / Phase / Epic — auto-detected from the issue argument. Per-Feature mini-reviews keep deltas small; Epic-level review becomes a lightweight cross-Phase coherence check.
+- Three new MCP tools: `assign_feature_to_phase`, `assign_features_to_phase` (bulk), `list_features_by_phase`. Together they let `kanbantic-issue-prepare` and `kanbantic-issue-execute` query and mutate the Phase ↔ Feature relation cleanly.
 - `isReadyToClaim` is **derived** from status (`Prepared ⟺ true`) — it is no longer settable explicitly.
 - Direct `Triaged → InProgress` is **blocked** (use `/prepare-issue` first).
 - Direct `InDeployment → InProgress` and `InDeployment → Cancelled` are **blocked at the Domain layer** (use `Review` for rollback or `Done` for post-deploy completion).
@@ -34,9 +39,46 @@ intake → New → triage → Triaged → prepare → Prepared → execute → I
 
 ## Version history
 
+- **v2.4.0** — Phase-of-Features-of-Tasks Epic shape (KBT-F250): new-shape Epics group Features into Phases instead of Tasks; dual-mode auto-detection in execute; three review levels (Feature / Phase / Epic); three new MCP tools (`assign_feature_to_phase`, `assign_features_to_phase`, `list_features_by_phase`).
 - **v2.3.0** — InDeployment lane (KBT-F236): new status between Review and Done; `kanbantic-issue-review` transitions to InDeployment after merge.
 - **v2.2.0** — Prepared lane (KBT-F235): new status between Triaged and InProgress; `kanbantic-issue-prepare` transitions to Prepared on green readiness.
 - **v2.0.0** — Lane Workflow Skills (KBT-INI033): one skill per lane transition; consolidates the legacy `kanbantic-issue-design` + `kanbantic-issue-planning` + `kanbantic-debugging` into `kanbantic-issue-prepare`; renames `kanbantic-issue-executing` → `kanbantic-issue-execute` and `kanbantic-code-review` → `kanbantic-issue-review`.
+
+## Epic shape examples (v2.4.0)
+
+**New shape — Phase → Features → Tasks** (default for new Epics):
+
+```
+KBT-E060 — Add Workspace Search
+  └─ Implementation Plan
+        ├─ Phase 1 — Foundation
+        │    ├─ KBT-F261 (E060-Foundation)
+        │    │     ├─ KBT-T1801: add IndexBuilder service
+        │    │     ├─ KBT-T1802: EF migration for SearchIndex table
+        │    │     └─ KBT-T1803: DI wiring
+        │    └─ KBT-F262 (Search index population)
+        │          ├─ KBT-T1810: background job
+        │          └─ KBT-T1811: change-history trigger
+        └─ Phase 2 — Core capabilities
+             ├─ KBT-F263 (Search REST endpoint)
+             └─ KBT-F264 (Frontend search box)
+```
+
+Roll-up: Tasks Done → Feature Done → Phase ReadyForReview → Epic Review-ready.
+
+**Legacy shape — Phase → Tasks** (existing Epics; still supported):
+
+```
+KBT-E045 — Older Epic (pre-v2.4.0)
+  └─ Implementation Plan
+        ├─ Phase 1
+        │    ├─ KBT-T1500
+        │    └─ KBT-T1501
+        └─ Phase 2
+             └─ KBT-T1502
+```
+
+`kanbantic-issue-execute` auto-detects which shape each Phase uses and walks accordingly — no operator input, no flag.
 
 ## Architecture
 

@@ -1,6 +1,6 @@
 ---
 name: kanbantic-issue-review
-description: "Use after kanbantic-issue-execute marks an issue Review. Runs code review against Kanbantic specs + test cases. On approve: merges the feature branch to main, pushes, cleans up, transitions the issue to Done, and records an optional knowledge-extractie. On reject: leaves the issue on Review with fix tasks."
+description: "Use after kanbantic-issue-execute marks an issue Review (or to run an early per-Feature mini-review during Epic execution). Runs code review against Kanbantic specs + test cases. Auto-detects review level (Feature / Phase / Epic — KBT-PR200, KBT-F250 v2.4.0): per-Feature mini-review during Epic-walk, per-Phase coherence-review, whole-Epic final review. On Feature/Phase approve: records approval, returns control to executing flow. On Epic/standalone approve: merges the feature branch to main, pushes, cleans up, transitions the issue to InDeployment (KBT-F236), and records an optional knowledge-extractie. On reject: leaves the issue on Review/InProgress with fix tasks."
 ---
 
 # Kanbantic Issue Review
@@ -92,10 +92,43 @@ MCP: mcp__kanbantic__get_issue(issueId)
 
 Load the issue first so the status gate below can run on the actual current status, not a stale assumption.
 
-## Step 1.5: Status HARD-GATE
+## Step 1.5: Review-level detection (KBT-PR200, KBT-F250)
+
+Before status-gating, decide which **review-level** this invocation is for. The skill supports three levels for new-shape Epics plus the legacy Phase + Epic levels:
+
+| Argument resolves to | Level | Where it fires |
+|---|---|---|
+| `Issue` with `Type == Feature` AND `PhaseId != null` (child-Feature under an Epic's Phase) | **Feature** | During Epic-walk, after a child-Feature's Tasks are all Done. Status: `InProgress` of the Feature. |
+| `Phase` ID (resolves to an `IssuePhase`, not an `Issue`) | **Phase** | After all Features in the Phase are Done. Status: parent Epic on `InProgress`. |
+| `Issue` with `Type == Epic` | **Epic** | At the end of the whole Epic walk. Status: `Review`. |
+| `Issue` with `Type == Feature` AND `PhaseId == null` (standalone Feature) | **Standalone** | Status: `Review`. Acts like an Epic-level review for a single-Feature issue. |
+| `Issue` with `Type == Bug` | **Bug** | Status: `Review`. Acts like an Epic-level review for the bug. |
+
+Set `reviewLevel` from this lookup. Each level has different gating, different mutations, and different terminal behavior — annotated `(Feature)`, `(Phase)`, `(Epic / standalone / Bug)` in subsequent steps.
+
+For backward compatibility with **legacy-shape Epics** (Phase → Tasks direct, no intermediate Features): only Phase-level and Epic-level levels apply. Feature-level review is meaningless for legacy Epics because there are no child-Features.
+
+## Step 1.6: Status HARD-GATE (per level)
 
 <HARD-GATE>
-The review skill owns the **Review → Done** transition. Any other starting status is out of scope. Verify `issue.status == "Review"` before doing anything that costs resources (reviewer subagent, git diff, discussion entries).
+The review skill's scope is per-level:
+
+**Feature-level review:**
+- Required status: Feature is on `InProgress` (sub-claimed during Epic-walk) **OR** `Review` (rare; only if execute already promoted it).
+- Parent Epic is on `InProgress` (the Epic-walk is in progress).
+- Other statuses → STOP. Report: "Feature-level review only valid while the Feature is being walked (InProgress) or just after (Review)."
+
+**Phase-level review:**
+- Parent Epic must be on `InProgress`.
+- Phase must be on `ReadyForReview` (set by `mark_phase_for_review`).
+- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is ReadyForReview and its Epic is InProgress."
+
+**Epic / standalone-Feature / Bug review:**
+- Required status: `Review`.
+- Other statuses → STOP per the legacy gate below.
+</HARD-GATE>
+
+For Epic / standalone-Feature / Bug review, the legacy gate applies:
 
 - If `status == "Review"` → continue silently.
 - If `status == "New"` → STOP. Report: "Issue [CODE] is still in status `New`. Run `/triage-issue [CODE]` first to move it to Triaged."
@@ -104,10 +137,9 @@ The review skill owns the **Review → Done** transition. Any other starting sta
 - If `status == "Done"` → STOP. Report: "Issue [CODE] is already `Done`. No review needed — this skill is an idempotent no-op here."
 - If `status == "Cancelled"` → STOP. Report: "Issue [CODE] was `Cancelled`. Nothing to review."
 
-**On any STOP**: exit the skill immediately. Do **NOT** dispatch the reviewer subagent (Step 3), do **NOT** create discussion entries (Step 4), do **NOT** attempt a status transition. This gate prevents resource-waste and misleading audit-trail entries on issues that are not in the Review lane.
+**On any STOP**: exit the skill immediately. Do **NOT** dispatch the reviewer subagent (Step 3), do **NOT** create discussion entries (Step 4), do **NOT** attempt a status transition. This gate prevents resource-waste and misleading audit-trail entries on issues that are not in the right lane.
 
-No opt-out, no override — the skill's scope is by definition Review → Done.
-</HARD-GATE>
+No opt-out, no override — the skill's scope is by definition Review → InDeployment (Epic / standalone / Bug) or per-level intermediate review for Epic-walks.
 
 ## Step 1b: Load Review Context
 
@@ -123,20 +155,34 @@ Build a requirements checklist from specifications and test cases.
 
 Include Rules, Patterns, and Gotchas in the review context — the reviewer should verify code adheres to project rules and follows established patterns.
 
-## Step 2: Get Git Diff
+## Step 2: Get Git Diff (scope by review-level)
 
+The diff scope depends on `reviewLevel`:
+
+**Feature-level** — diff scoped to the Feature's commits only:
 ```bash
-# Diff for this phase (from phase start to current HEAD)
-git log --oneline -10
+# Find the SHA where this Feature's first Task moved to InProgress (commit prefix matches Feature-Code)
+FEATURE_FIRST=$(git log --oneline | grep -E "\(<FEATURE-CODE>\)" | tail -1 | awk '{print $1}')^
+git diff $FEATURE_FIRST..HEAD --stat
+git diff $FEATURE_FIRST..HEAD
+```
+
+If commits are not consistently prefixed, fall back to the diff between the parent-Epic-branch's previous-Feature endpoint and current HEAD.
+
+**Phase-level** — diff for this phase (from phase start to current HEAD):
+```bash
+git log --oneline -20
 git diff <phase-start-sha>..HEAD --stat
 git diff <phase-start-sha>..HEAD
 ```
 
-If reviewing the entire issue:
+**Epic / standalone-Feature / Bug review** — diff against main:
 ```bash
 git diff main..HEAD --stat
 git diff main..HEAD
 ```
+
+For new-shape Epics where each Feature was already mini-reviewed at Feature-level, the Epic-level review is a **lightweight cross-Phase coherence check** — focus on integration points between Phases, not per-Task code-walk.
 
 ## Step 3: Dispatch Reviewer Subagent
 
@@ -182,59 +228,82 @@ Feedback format:
 ### Verdict: APPROVE / REJECT
 ```
 
-## Step 5: Approve or Reject
+## Step 5: Approve or Reject (per level)
 
-### 5a: If no Critical or Important issues — APPROVE
+The approve/reject mechanism depends on `reviewLevel`:
 
+### 5a: APPROVE — if no Critical or Important issues
+
+**Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Instead, record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature **and** transition the Feature back to `Done`:
 ```
-MCP: mcp__kanbantic__approve_phase(issueId, phaseId)
+MCP: mcp__kanbantic__approve_review(
+  issueId: <FeatureId>,
+  verdict: "Approved" | "ApprovedWithComments",
+  reason: <≥20-char Feature-review summary>
+)
+MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "Done")
 ```
+Then **STOP** — no merge, no further steps. Control returns to the executing skill, which continues with the next Feature in the Phase.
 
-Proceed to Step 6.
+**Phase-level:**
+```
+MCP: mcp__kanbantic__approve_phase(issueId: <EpicId>, phaseId)
+```
+Then **STOP** unless this was the last Phase of the Epic; the executing skill unlocks the next Phase. Whole-Epic merge happens in a separate review-invocation at Epic-level.
 
-### 5b: If Critical or Important issues found — REJECT
+**Epic / standalone-Feature / Bug:**
+```
+MCP: mcp__kanbantic__approve_phase(issueId, phaseId)   // for Epics with phases
+```
+Or — for standalone Features and Bugs where there is no phase — skip directly to Step 6 (final-approve gate).
+
+Proceed to Step 6 (which routes Phase-level back to STOP and Epic/standalone/Bug to Step 7).
+
+### 5b: REJECT — if Critical or Important issues found
 
 <IMPORTANT>
 Rejection MUST always include a clear justification. The reason is recorded as a discussion entry and must explain what failed and what needs to change.
 </IMPORTANT>
 
-Create fix tasks:
-```
-MCP: mcp__kanbantic__add_task(
-  issueId,
-  title: "Fix: [issue description]",
-  description: "[what to fix and how]",
-  priority: "High"
-)
-```
+Create fix tasks **on the right entity**:
 
-Then reject with detailed reason:
-```
-MCP: mcp__kanbantic__reject_phase(
-  issueId, phaseId,
-  reason: "[N] critical and [N] important issues found: [list each issue briefly]. Fix tasks created."
-)
-```
+- **Feature-level reject**: fix-tasks on the Feature; transition Feature back to `InProgress`:
+  ```
+  MCP: mcp__kanbantic__add_task(issueId: <FeatureId>, title: "Fix: ...", priority: "High")
+  MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "InProgress")
+  ```
+- **Phase-level reject**: fix-tasks on the Epic (or on individual Features in the Phase if the issue is per-Feature), then `reject_phase`:
+  ```
+  MCP: mcp__kanbantic__add_task(issueId: <EpicId or FeatureId>, title: "Fix: ...", priority: "High")
+  MCP: mcp__kanbantic__reject_phase(issueId: <EpicId>, phaseId, reason: "...")
+  ```
+- **Epic / standalone-Feature / Bug reject**: fix-tasks on the issue, then `reject_phase` on the issue's main phase:
+  ```
+  MCP: mcp__kanbantic__add_task(issueId, title: "Fix: ...", priority: "High")
+  MCP: mcp__kanbantic__reject_phase(issueId, phaseId, reason: "...")
+  ```
 
 <HARD-GATE>
-On REJECT the skill stops here. Do NOT proceed to Step 6/7/8/9. No merge, no Done-transition, no knowledge-extractie. The issue stays on `Review` (or the backend may bounce it to `InProgress` automatically — follow the backend's default), and the implementer runs `kanbantic-issue-execute` again to pick up the fix tasks.
+On REJECT the skill stops here. Do NOT proceed to Step 6/7/8/9. No merge, no Done-transition, no knowledge-extractie. The issue (or Feature) stays on `Review` / `InProgress`, and the implementer runs `kanbantic-issue-execute` again to pick up the fix tasks.
 </HARD-GATE>
 
 Report:
-**"Review rejected for [ISSUE CODE]. [N] fix tasks created. Implementer can resume via `kanbantic-issue-execute` to address them."**
+**"Review rejected for [ISSUE CODE / FEATURE CODE]. [N] fix tasks created. Implementer can resume via `kanbantic-issue-execute` to address them."**
 
-## Step 6: Verify Final-Approve Gate
+## Step 6: Verify Final-Approve Gate (per level)
 
 <HARD-GATE>
-The merge step only runs when the approved phase is the **final** approval needed for the whole issue. Tussentijdse phase-approvals in een Epic tonen voortgang maar leiden niet tot merge.
+The merge step only runs at the **final** approval of the whole issue. Intermediate per-Feature and per-Phase approvals show progress but never trigger a merge.
 
+- **Feature-level**: STOP after Step 5a — no merge, no status-transition past `Done` for this Feature. Control returns to the executing skill.
+- **Phase-level**: STOP after Step 5a `approve_phase` unless ALL phases of the Epic are now `Approved`. If so, the next review-invocation at Epic-level handles the merge — do not merge from this Phase-level invocation.
 - **Epic**: merge only when **every** phase in the implementation plan has status `Approved`. Re-run `get_implementation_plan(issueId)` and verify all phases are approved.
-- **Feature / Bug**: the first `approve_phase` on the issue-level is also the final approve — proceed to merge.
+- **Standalone Feature / Bug**: the first `approve_phase` on the issue-level is also the final approve — proceed to merge.
 
-If this is **not** the final approve (Epic with remaining phases), report:
-> "Phase [N/M] approved for [ISSUE CODE]. Remaining phases: [list]. No merge yet. Implementer continues with the next phase via `kanbantic-issue-execute`."
+If this is **not** the final approve, report:
+> "Approval recorded for [LEVEL]: [CODE]. Remaining: [list]. No merge yet."
 
-Then STOP. Do NOT proceed to Step 7/8/9. The issue stays on its current status (`Review` for the phase being approved; Kanbantic manages phase-vs-issue status internally).
+Then STOP. Do NOT proceed to Step 7/8/9.
 </HARD-GATE>
 
 ## Step 7: Merge + Push + Cleanup
@@ -402,11 +471,13 @@ Report:
 
 - **Specs are the checklist** — review against Kanbantic specifications, not just "does it look good"
 - **Categorize issues** — Critical / Important / Minor
-- **Create fix tasks on reject** — don't just reject, tell them what to fix
+- **Auto-detect review-level** — Feature / Phase / Epic / Standalone-Feature / Bug — no operator-input needed (KBT-PR200)
+- **Create fix tasks on reject** — don't just reject, tell them what to fix; fix-tasks land on the **right** entity (Feature for Feature-level, Epic for Phase/Epic-level)
 - **Justify rejections** — always provide a clear, detailed reason explaining what failed
 - **Push back if wrong** — if reviewer feedback is incorrect, explain why with evidence
-- **Merge only after final approve** — no half-merged Epics
-- **Done-transitie alleen na merge + push** — never set `Done` on a local-only merge
-- **Approval before Done** — every Review→Done transition is preceded by a `ReviewApproval` row via `approve_review` (KBT-F170 / KBT-PR191)
+- **Merge only after final approve** — no half-merged Epics; Feature-level and Phase-level approvals never merge
+- **InDeployment-transitie alleen na merge + push** — never set `InDeployment` on a local-only merge
+- **Approval before Done** — every Review→InDeployment→Done flow is preceded by a `ReviewApproval` row via `approve_review` (KBT-F170 / KBT-PR191)
+- **Per-Feature mini-review keeps deltas small** — review-skill is meant to be re-invoked at multiple levels during a single Epic-walk, not just once at the end
 - **Knowledge is optional, not forced** — "nothing to capture" is a valid answer
 - **Record everything** — all feedback and decisions go to Kanbantic discussion
