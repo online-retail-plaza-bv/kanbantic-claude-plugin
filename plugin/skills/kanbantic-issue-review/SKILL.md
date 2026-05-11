@@ -360,6 +360,30 @@ If `approve_review` fails (e.g. the issue is no longer in `Review` status
 because someone bounced it back), stop the skill and report the error. Do
 NOT proceed to Step 8 — the gate cannot clear without a successful approval.
 
+### Fallback if `approve_review` is unavailable (KBT-B200)
+
+If `tools/list` does NOT include `approve_review` in this MCP session (e.g.
+because the plugin proxy is connected to a stale or partial backend bundle),
+do **not** silently leave the issue on Review. The original failure mode
+(2026-05-02, KBT-B200) was an agent stuck on Review with no automated path
+forward. Required actions:
+
+1. **Confirm drift** — run `npm run check:drift --prefix C:/GitHub/kanbantic-claude-plugin`
+   (or invoke `node plugin/scripts/check-bundle-tool-drift.js` directly with
+   `KANBANTIC_MCP_URL` + `KANBANTIC_API_KEY` set). The script exits non-zero
+   and names the missing tool if drift is real.
+2. **Escalate** — either (a) ask the operator to restart the host so the
+   plugin re-fetches `tools/list`, or (b) log a new Bug referencing KBT-B200
+   and the missing tool. Do not invent a workaround that bypasses
+   `approve_review`; that defeats the KBT-F170 / KBT-PR191 audit-trail
+   intent.
+3. **Stop the skill** at this step — leave the issue on Review, record a
+   `Comment` discussion entry with the drift evidence and the escalation
+   chosen, and exit.
+
+The drift detector is also runnable on demand against any backend by setting
+`KANBANTIC_MCP_URL` (defaults to `https://kanbantic.com/mcp`).
+
 ## Step 8: Transition to InDeployment
 
 <IMPORTANT>
