@@ -6,6 +6,7 @@
   "description": "Test harness for the Kanbantic Claude Code Plugin proxy. Zero runtime deps — uses only Node built-ins (node:test). Not published. Plugin itself is shipped from plugin/.",
   "scripts": {
     "test": "node --test \"plugin/tests/*.test.js\"",
+    "test:signals:docker": "sh plugin/scripts/run-signal-tests-in-docker.sh",
     "check:drift": "node plugin/scripts/check-bundle-tool-drift.js"
   },
   "engines": {
