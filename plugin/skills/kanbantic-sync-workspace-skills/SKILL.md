@@ -1,23 +1,23 @@
 ---
 name: kanbantic-sync-workspace-skills
-description: "Materialize the active Kanbantic workspace's Toolkit Skill/Command/Subagent items as on-disk .claude/commands/*.md and .claude/agents/*.md files, with a .kanbantic-sync.json manifest for drift detection. Idempotent — re-run is a no-op when nothing changed. Refuses to overwrite locally-edited mirror files unless --force is passed. Per KBT-TRUL014 the Toolkit is the source-of-truth; this skill is the canonical mechanism for keeping the on-disk mirrors aligned (KBT-F265)."
+description: "Materialize the active Kanbantic workspace's Toolkit Skill and Subagent items as on-disk .claude/commands/*.md and .claude/agents/*.md files, with a .kanbantic-sync.json manifest for drift detection. Idempotent — re-run is a no-op when nothing changed. Refuses to overwrite locally-edited mirror files unless --force is passed. Per KBT-TRUL014 the Toolkit is the source-of-truth; this skill is the canonical mechanism for keeping the on-disk mirrors aligned (KBT-F265 + KBT-B250). Command toolkit-items are reference-only snippets per KBT-BD086 and stay Toolkit-only (no disk mirror)."
 ---
 
 # Kanbantic Sync Workspace Skills
 
 ## Overview
 
-This skill keeps your repo's on-disk `.claude/commands/*.md` and `.claude/agents/*.md` files in sync with the workspace Toolkit categories `Skill`, `Command`, and `Subagent`. Per **KBT-TRUL014** the Toolkit is the source-of-truth; the on-disk files are derived mirrors that Claude Code's loader actually reads.
+This skill keeps your repo's on-disk `.claude/commands/*.md` and `.claude/agents/*.md` files in sync with the workspace Toolkit categories `Skill` and `Subagent`. Per **KBT-TRUL014** the Toolkit is the source-of-truth; the on-disk files are derived mirrors that Claude Code's loader actually reads. `Command` toolkit-items are intentionally NOT materialized (per **KBT-BD086** — they are reference-only snippets, not invocable slash-commands).
 
 **Principle:** Toolkit → manifest-aware diff → on-disk files. Drift is detected via SHA-256 hashes recorded in `.kanbantic-sync.json` at the repo root.
 
-**Announce at start:** "I'm using the kanbantic-sync-workspace-skills skill to materialize the workspace Toolkit's Skill/Command/Subagent items as local .claude/ files."
+**Announce at start:** "I'm using the kanbantic-sync-workspace-skills skill to materialize the workspace Toolkit's Skill and Subagent items as local .claude/ files."
 
 ## Scope
 
 This skill is **not** a lane-verwerker — it does not transition any Kanbantic issue. It is a maintenance utility that you run:
 
-- After a new Skill/Command/Subagent toolkit item is added or updated.
+- After a new Skill or Subagent toolkit item is added or updated.
 - When cloning a fresh repo for the first time.
 - Whenever the `kanbantic-issue-execute` Step 0 detects the workspace has Toolkit-Skill changes since the last sync (future automation hook).
 
@@ -33,14 +33,16 @@ The skill writes only to:
 
 | Path | Purpose |
 |---|---|
-| `.claude/commands/<slug>.md` | Mirror for Toolkit categories `Skill` and `Command` |
+| `.claude/commands/<slug>.md` | Mirror for Toolkit category `Skill` |
 | `.claude/agents/<slug>.md`   | Mirror for Toolkit category `Subagent` |
 | `.kanbantic-sync.json`       | Manifest with source/target SHA-256 hashes |
 | `.gitignore`                 | Appends the three patterns above when missing |
 
+`Command` toolkit-items are **NOT** materialized to disk — per **KBT-BD086** they are reference-only snippets (single shell-command + one-line uitleg), not invocable slash-commands. To read a Command's content, an agent calls `mcp__kanbantic__list_toolkit_items(workspaceId, category: "Command")` directly. Materializing them under `.claude/commands/` would make Claude Code's command-loader expose them as `/foo`-style commands, which is semantically wrong and pollutes the slash-command namespace (the regression that motivated KBT-B250).
+
 ## Slug convention (per KBT-PR209)
 
-For each Toolkit item the slug is computed from its `title`:
+For each Toolkit item **of category `Skill` or `Subagent`** the slug is computed from its `title`:
 
 1. Take the prefix before the first em-dash `—` (U+2014); if there is no em-dash, use the whole title.
 2. Strip a leading `/` if present.
@@ -86,6 +88,8 @@ Concatenate the three result arrays into one flat list of items. Each item must 
 
 <IMPORTANT>
 Some MCP responses include extra fields (tags, createdAt, etc.) — the sync script ignores anything it doesn't recognise, so passing the full payload through is fine.
+
+`Command`-items can also be passed through verbatim; the sync script silently skips them (per **KBT-B250** / **KBT-BD086**, they are reference-only and not materialized to disk). A future optimization could filter Command-category server-side before the pipe, but pulling all three categories keeps the orchestrator code symmetrical with the SKILL.md checklist.
 </IMPORTANT>
 
 ## Step 3: Run the sync script
@@ -172,6 +176,9 @@ For each manifest entry whose slug is no longer in the active toolkit-items list
 
 - **KBT-TRUL014** — Toolkit is source-of-truth; `.claude/` files are derived mirrors. Rationale for this skill's existence.
 - **KBT-F264** — Companion feature: `bootstrap_agent` also returns Skill/Command/Subagent arrays so agents can pull metadata without falling back to disk.
-- **KBT-PR209 / KBT-SR310 / KBT-BD083** — Acceptance criteria, manifest schema, and filesystem boundary.
-- **KBT-US553** — User story driving this feature.
+- **KBT-PR209 / KBT-SR310 / KBT-BD083** — Acceptance criteria, manifest schema, and filesystem boundary (original v2.5.0 scope).
+- **KBT-B250 / KBT-SR320 / KBT-BD086** — Bug + system requirement + boundary that narrowed the materialization scope to `Skill` + `Subagent` only (v2.5.1). Command-items remain Toolkit-only.
+- **KBT-US553** — Original user story driving this feature.
+- **KBT-US557** — User story for the v2.5.1 scope-narrowing (no slash-command namespace pollution).
 - **KBT-TC1933 / 1934 / 1935 / 1936 / 1937 / 1938 / 1939** — Test cases covering fresh-sync, idempotency, update, slug collision, isActive-false removal, local-edit warning, `.gitignore` management.
+- **KBT-TC1967 / 1968 / 1969** — Regression tests for the Command-skip behavior (v2.5.1).

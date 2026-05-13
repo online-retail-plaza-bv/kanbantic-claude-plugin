@@ -491,3 +491,97 @@ test('full lifecycle: create → unchanged → update → deactivate', () => {
     cleanup(root);
   }
 });
+
+// ---------------------------------------------------------------------------
+// KBT-B250 — Command-category is reference-only, not materialized to disk
+// ---------------------------------------------------------------------------
+
+test('KBT-TC1967: buildPlan skips Command-category items — no plan entry, no manifest entry, no on-disk file', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Skill',    title: '/sample-tool — A sample skill', code: 'KBT-SKIL999' }),
+      item({ category: 'Command',  title: 'Solution Bouwen',               code: 'KBT-CMND999', content: 'dotnet build Kanbantic.sln\n' }),
+      item({ category: 'Subagent', title: 'Test Specialist',               code: 'KBT-SAGN999' }),
+    ];
+    const s = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    // Only Skill + Subagent counted toward created.
+    assert.equal(s.created, 2, 'expected created=2 (Skill + Subagent), got ' + s.created);
+    assert.equal(s.warnings, 0, 'expected warnings=0 (Command-skip is silent, not a warning)');
+    assert.equal(s.forced, 0);
+
+    // Manifest must not contain a Command entry.
+    const manifest = readManifest(root);
+    assert.equal(manifest.items.length, 2);
+    const categories = manifest.items.map(i => i.category).sort();
+    assert.deepEqual(categories, ['Skill', 'Subagent']);
+    assert.equal(manifest.items.find(i => i.category === 'Command'), undefined);
+
+    // Disk: Skill + Subagent file exist, Command file does NOT.
+    assert.ok(fs.existsSync(path.join(root, '.claude/commands/sample-tool.md')));
+    assert.ok(fs.existsSync(path.join(root, '.claude/agents/test-specialist.md')));
+    assert.equal(fs.existsSync(path.join(root, '.claude/commands/solution-bouwen.md')), false,
+      'Command-category item must not produce an on-disk file (KBT-BD086)');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC1968: Command-item with empty-slug title does NOT throw EMPTY_SLUG (category-filter runs before slug-validation)', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Skill',   title: '/test-tool — A test', code: 'KBT-SKIL777' }),
+      // Title that slugify() would normalize to "" — only Command, so must be silently skipped
+      // without triggering EMPTY_SLUG.
+      item({ category: 'Command', title: '...',                code: 'KBT-CMND777', content: 'noop\n' }),
+    ];
+
+    // The call must succeed — no exception thrown.
+    let s;
+    assert.doesNotThrow(
+      () => { s = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW }); },
+      'Command with empty-slug-title must be filtered out before slug-validation — no EMPTY_SLUG'
+    );
+
+    assert.equal(s.created, 1, 'only the Skill should be created');
+    assert.equal(s.warnings, 0);
+
+    // Sanity: the bad-slug Command produced no manifest entry.
+    const manifest = readManifest(root);
+    assert.equal(manifest.items.length, 1);
+    assert.equal(manifest.items[0].category, 'Skill');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC1969 (CLI): mixed Skill+Command+Subagent input materializes only Skill+Subagent files; exit 0; no EMPTY_SLUG for bad-slug Command', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Skill',    title: '/sample — Sample skill',     code: 'KBT-SKIL888' }),
+      item({ category: 'Command',  title: 'npm run build',              code: 'KBT-CMND888', content: 'npm run build\n' }),
+      item({ category: 'Command',  title: '---',                        code: 'KBT-CMND889', content: 'bad-slug Command\n' }),
+      item({ category: 'Subagent', title: 'Sample Agent',               code: 'KBT-SAGN888' }),
+    ];
+    const inputPath = path.join(root, 'items.json');
+    fs.writeFileSync(inputPath, JSON.stringify(items), 'utf8');
+
+    const r = spawnSync(process.execPath, [SCRIPT, '--input', inputPath, '--root', root, '--workspace', 'kanbantic'], {
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}. stderr: ${r.stderr}`);
+    assert.match(r.stdout, /created=2 updated=0 unchanged=0 deleted=0 warnings=0 forced=0/);
+    assert.equal(r.stderr.trim(), '', `expected empty stderr, got: ${r.stderr}`);
+
+    // Disk: only Skill + Subagent materialized.
+    assert.ok(fs.existsSync(path.join(root, '.claude/commands/sample.md')));
+    assert.ok(fs.existsSync(path.join(root, '.claude/agents/sample-agent.md')));
+    // Neither Command (one with valid slug, one with empty-slug-title) produced a file.
+    assert.equal(fs.existsSync(path.join(root, '.claude/commands/npm-run-build.md')), false);
+  } finally {
+    cleanup(root);
+  }
+});
