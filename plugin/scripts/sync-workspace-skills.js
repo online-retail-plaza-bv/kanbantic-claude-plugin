@@ -64,13 +64,26 @@ function slugify(title) {
 /**
  * Decide the on-disk target path for a toolkit item of the given category.
  *
- * - Skill, Command  → .claude/commands/<slug>.md
- * - Subagent        → .claude/agents/<slug>.md
+ * - Skill     → .claude/commands/<slug>.md
+ * - Subagent  → .claude/agents/<slug>.md
  *
- * Returns null for an unknown category.
+ * Returns null for an unknown or non-materializable category.
+ *
+ * Command toolkit-items intentionally do NOT materialize to disk: they are
+ * reference-only snippets (single shell-command + one-line note), not
+ * invocable slash-commands. Materializing them under .claude/commands/ would
+ * make Claude Code's command-loader expose them as `/foo`-style commands,
+ * which is semantically wrong and pollutes the slash-command namespace.
+ * See KBT-B250 + KBT-BD086 for the full rationale.
+ *
+ * The PRIMARY filter for non-materializable categories lives in buildPlan
+ * (which skips them before slug-validation, so a Command item with a bad
+ * title can never produce an EMPTY_SLUG error). This function's null-return
+ * branch is defense-in-depth — if buildPlan's filter is ever bypassed by a
+ * caller, targetPathFor still refuses to assign Command items a target path.
  */
 function targetPathFor(category, slug) {
-  if (category === 'Skill' || category === 'Command') {
+  if (category === 'Skill') {
     return path.posix.join('.claude', 'commands', `${slug}.md`);
   }
   if (category === 'Subagent') {
@@ -171,6 +184,12 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
   const bySlug = new Map();
   for (const item of items) {
     if (!item || item.isActive === false) continue;
+    // KBT-B250: skip categories that don't materialize to disk (e.g. Command —
+    // reference-only snippets per KBT-BD086, plus ClaudeMd/Pattern/Gotcha/Rule/
+    // RepoContext/Custom which have no on-disk target). This filter runs
+    // BEFORE slug-validation so a non-materializable item with an empty-slug
+    // title cannot produce a spurious EMPTY_SLUG error.
+    if (item.category !== 'Skill' && item.category !== 'Subagent') continue;
     const slug = slugify(item.title || '');
     if (!slug) {
       throw new SyncError(
@@ -179,7 +198,7 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
       );
     }
     const target = targetPathFor(item.category, slug);
-    if (!target) continue; // ignore unrelated categories
+    if (!target) continue; // ignore unrelated categories (defense-in-depth — buildPlan filter above is primary)
     const entry = {
       slug, category: item.category,
       sourceId: item.id || '',
