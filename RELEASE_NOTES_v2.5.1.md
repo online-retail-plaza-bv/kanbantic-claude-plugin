@@ -51,9 +51,20 @@ After (v2.5.1):
 
 ## What this does NOT do
 
-- **No retroactive cleanup.** `.claude/commands/*.md` files that v2.5.0 wrote for Commands are NOT auto-removed by v2.5.1 — operators clean those up manually (or leave them; future syncs simply won't update them since the manifest never tracked them as `Skill`-category).
 - **No new flag.** There is no `--include-commands` opt-in. The boundary is permanent per KBT-BD086 — to make a Command-item invocable, promote it to `Skill`-category in the Toolkit.
 - **No new target-dir** like `.claude/snippets/`. Commands stay in the Toolkit; an agent that needs the snippet inline calls `list_toolkit_items` directly.
+
+## What this DOES on the first v2.5.1 sync (auto-cleanup of v2.5.0 leftovers)
+
+When `/kanbantic-sync-workspace-skills` runs after upgrading from v2.5.0, the existing manifest entries for `Command`-category items end up in the "no longer active" branch of `buildPlan`'s deletion-loop (because Command items are filtered out before `seenSlugs` is built). The standard drift-detection then takes over:
+
+| State of the v2.5.0 mirror-file | What v2.5.1 does on first sync |
+|---|---|
+| File matches manifest hash (untouched) | **Auto-deleted** — file + manifest entry removed; counted in `summary.deleted`. |
+| File hash differs from manifest (locally edited) | **SKIP-LOCAL-EDIT warning** — file preserved, manifest entry preserved, counted in `summary.warnings`. Re-run with `--force` to discard the local edits. |
+| File already absent | Manifest entry silently cleaned up; counted in `summary.deleted`. |
+
+So operators on v2.5.0 do not need any explicit cleanup step — the next sync after upgrading materializes only Skill+Subagent (per the new filter) and cleans the Command leftovers as part of its normal manifest-reconciliation pass.
 
 ## Files changed
 
@@ -109,12 +120,19 @@ claude plugin install kanbantic-claude-plugin
 
 Re-install picks up the v2.5.1 tag automatically. Existing `/kanbantic-sync-workspace-skills` behavior is unchanged for Skill+Subagent items; only Command-handling changes.
 
-## Migration notes for operators on v2.5.0
+## Migration for operators on v2.5.0
 
-If you ran `/kanbantic-sync-workspace-skills` against the Kanbantic-monorepo on v2.5.0 and ended up with `.claude/commands/{backend-api-starten,frontend-dev-server-starten,solution-bouwen,database-bijwerken,ef-migratie-toevoegen,e2e-tests-uitvoeren,abp-pro-license-pre-flight-check-powershell}.md` files (plus 3 `.claude/agents/*.md` files), v2.5.1 will NOT touch those. Two choices:
+If you ran `/kanbantic-sync-workspace-skills` against the Kanbantic-monorepo on v2.5.0 and ended up with seven `.claude/commands/{backend-api-starten,frontend-dev-server-starten,solution-bouwen,database-bijwerken,ef-migratie-toevoegen,e2e-tests-uitvoeren,abp-pro-license-pre-flight-check-powershell}.md` files (Command-mirrors), upgrade to v2.5.1 and run the skill once. Expected result:
 
-1. **Leave them** — they continue to work as slash-commands. Harmless if a bit semantically off.
-2. **Delete them manually** + clean the corresponding entries from `.kanbantic-sync.json` (or just delete the whole `.kanbantic-sync.json` to restart from a clean state on the next sync). v2.5.1 will then correctly create only Skill+Subagent files on the next run.
+```
+sync-workspace-skills: created=N updated=M unchanged=K deleted=7 warnings=0 forced=0
+```
+
+The 7 Command-mirror files (and the 7 corresponding `.kanbantic-sync.json` entries) are auto-deleted because their slugs no longer appear in the active-items input (Command-items are filtered upstream). No manual cleanup needed.
+
+**Exception:** if you manually edited any of those mirror files after v2.5.0 wrote them, the on-disk hash will not match the manifest entry's `targetHash` — v2.5.1 then emits a `SKIP-LOCAL-EDIT` warning for that file and leaves it untouched. Either back-port the change into the actual Toolkit content (preferred, per KBT-TRUL014 — but a Command-item is the wrong place since it stays Toolkit-only) or re-run with `--force` to discard the local edit and delete the file.
+
+If you'd rather do a clean reset, deleting `.kanbantic-sync.json` and the seven Command-mirror files manually and then running v2.5.1 sync from a clean slate is also fine — both paths converge on the same end-state.
 
 ## References
 

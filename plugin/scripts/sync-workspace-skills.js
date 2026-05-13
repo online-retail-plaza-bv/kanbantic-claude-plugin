@@ -3,8 +3,9 @@
 
 //
 // sync-workspace-skills — KBT-F265 / KBT-PR209 / KBT-SR310 / KBT-BD083
+//                       — KBT-B250 / KBT-SR320 / KBT-BD086 (v2.5.1 scope-narrow)
 //
-// Materializes Kanbantic workspace Toolkit items (Skill / Command / Subagent)
+// Materializes Kanbantic workspace Toolkit items (Skill + Subagent only)
 // as on-disk `.claude/` mirror files, with a `.kanbantic-sync.json` manifest
 // for drift detection and idempotency.
 //
@@ -12,15 +13,20 @@
 // derived mirrors that Claude Code's loader actually reads. This script
 // keeps the two aligned without manual copy-paste.
 //
+// `Command` toolkit-items are intentionally NOT materialized (per KBT-BD086):
+// they are reference-only shell-snippets, not invocable slash-commands. An
+// agent that needs the snippet content calls
+// `mcp__kanbantic__list_toolkit_items(category: "Command")` directly.
+//
 // This module exports `runSync` as a pure function over input data (list of
 // toolkit items + target directory) so the test harness can drive it
 // deterministically without any MCP-proxy round-trip. The companion SKILL.md
 // is what actually invokes `list_toolkit_items` via the MCP plugin and then
 // shells out to this script.
 //
-// Filesystem footprint per KBT-BD083:
-//   - <root>/.claude/commands/<slug>.md   (Skill + Command categories)
-//   - <root>/.claude/agents/<slug>.md     (Subagent category)
+// Filesystem footprint per KBT-BD083 + KBT-BD086:
+//   - <root>/.claude/commands/<slug>.md   (Skill category only)
+//   - <root>/.claude/agents/<slug>.md     (Subagent category only)
 //   - <root>/.kanbantic-sync.json         (manifest)
 //   - <root>/.gitignore                   (append-only, when needed)
 //

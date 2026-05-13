@@ -1,23 +1,23 @@
 ---
 name: kanbantic-sync-workspace-skills
-description: "Materialize the active Kanbantic workspace's Toolkit Skill/Command/Subagent items as on-disk .claude/commands/*.md and .claude/agents/*.md files, with a .kanbantic-sync.json manifest for drift detection. Idempotent — re-run is a no-op when nothing changed. Refuses to overwrite locally-edited mirror files unless --force is passed. Per KBT-TRUL014 the Toolkit is the source-of-truth; this skill is the canonical mechanism for keeping the on-disk mirrors aligned (KBT-F265)."
+description: "Materialize the active Kanbantic workspace's Toolkit Skill and Subagent items as on-disk .claude/commands/*.md and .claude/agents/*.md files, with a .kanbantic-sync.json manifest for drift detection. Idempotent — re-run is a no-op when nothing changed. Refuses to overwrite locally-edited mirror files unless --force is passed. Per KBT-TRUL014 the Toolkit is the source-of-truth; this skill is the canonical mechanism for keeping the on-disk mirrors aligned (KBT-F265 + KBT-B250). Command toolkit-items are reference-only snippets per KBT-BD086 and stay Toolkit-only (no disk mirror)."
 ---
 
 # Kanbantic Sync Workspace Skills
 
 ## Overview
 
-This skill keeps your repo's on-disk `.claude/commands/*.md` and `.claude/agents/*.md` files in sync with the workspace Toolkit categories `Skill`, `Command`, and `Subagent`. Per **KBT-TRUL014** the Toolkit is the source-of-truth; the on-disk files are derived mirrors that Claude Code's loader actually reads.
+This skill keeps your repo's on-disk `.claude/commands/*.md` and `.claude/agents/*.md` files in sync with the workspace Toolkit categories `Skill` and `Subagent`. Per **KBT-TRUL014** the Toolkit is the source-of-truth; the on-disk files are derived mirrors that Claude Code's loader actually reads. `Command` toolkit-items are intentionally NOT materialized (per **KBT-BD086** — they are reference-only snippets, not invocable slash-commands).
 
 **Principle:** Toolkit → manifest-aware diff → on-disk files. Drift is detected via SHA-256 hashes recorded in `.kanbantic-sync.json` at the repo root.
 
-**Announce at start:** "I'm using the kanbantic-sync-workspace-skills skill to materialize the workspace Toolkit's Skill/Command/Subagent items as local .claude/ files."
+**Announce at start:** "I'm using the kanbantic-sync-workspace-skills skill to materialize the workspace Toolkit's Skill and Subagent items as local .claude/ files."
 
 ## Scope
 
 This skill is **not** a lane-verwerker — it does not transition any Kanbantic issue. It is a maintenance utility that you run:
 
-- After a new Skill/Command/Subagent toolkit item is added or updated.
+- After a new Skill or Subagent toolkit item is added or updated.
 - When cloning a fresh repo for the first time.
 - Whenever the `kanbantic-issue-execute` Step 0 detects the workspace has Toolkit-Skill changes since the last sync (future automation hook).
 
