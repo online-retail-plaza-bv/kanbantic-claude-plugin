@@ -147,6 +147,9 @@ async function dispatch(line) {
       postProcess(msg, r);
       send(r);
     }
+    // Side-effect (fire-and-forget): surface readiness-gate overrides so a second
+    // party can confirm them. Never blocks or alters the response above.
+    flagOverrideIfPresent(msg, responses).catch(() => {});
   } catch (err) {
     process.stderr.write(`[kanbantic-proxy] ${err.message}\n`);
     if (msg.id != null) {
@@ -259,6 +262,75 @@ function parseToolResult(response) {
     return JSON.parse(text);
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Readiness-gate override governance flag
+//
+// `update_issue_status` and `claim_issue` accept an `overrideReason` that bypasses
+// a failing readiness gate under both Soft AND Hard enforcement. That escape hatch
+// is what let an entire initiative reach Done with no review-approval, no test
+// results, and no merged-branch record (the "skew" that motivated this guard).
+//
+// The proxy cannot — and should not — block the call (it is a transparent bridge,
+// and the authoritative fix belongs in the backend's IssueReadinessService). What
+// it CAN do, centrally for every agent on every workstation regardless of
+// workspace, is make each override visible for second-party review: it posts a
+// greppable Comment on the affected issue. The server already records a passive
+// Decision audit entry; this is the actionable, aggregatable governance flag.
+//
+// Opt out with KANBANTIC_SKIP_OVERRIDE_FLAG=1 (mirrors KANBANTIC_SKIP_GIT_SYNC).
+// ---------------------------------------------------------------------------
+
+const OVERRIDE_FLAG_TOOLS = new Set(['update_issue_status', 'claim_issue']);
+const OVERRIDE_FLAG_MARKER = '[override-governance]';
+
+async function flagOverrideIfPresent(request, responses) {
+  if (process.env.KANBANTIC_SKIP_OVERRIDE_FLAG === '1') return;
+  if (!request || request.method !== 'tools/call' || !request.params) return;
+
+  const name = request.params.name;
+  const args = request.params.arguments;
+  if (!OVERRIDE_FLAG_TOOLS.has(name)) return;
+  if (!args || typeof args.overrideReason !== 'string' || args.overrideReason.trim() === '') return;
+  if (!args.issueId) return;
+
+  // Only flag when the override actually succeeded — match the response by id.
+  const resp = Array.isArray(responses)
+    ? responses.find((r) => r && r.id === request.id)
+    : null;
+  const parsed = resp ? parseToolResult(resp) : null;
+  if (!parsed || parsed.success !== true) return;
+
+  const target = parsed.issueCode || args.issueId;
+  const action =
+    name === 'claim_issue'
+      ? 'claim (Prepared → InProgress)'
+      : `status change to "${args.status}"`;
+
+  const content =
+    `⚠️ **${OVERRIDE_FLAG_MARKER}** A readiness gate was bypassed via \`overrideReason\` ` +
+    `on a ${action}.\n\n` +
+    `**Override reason given:** ${args.overrideReason.trim()}\n\n` +
+    `**Why this is flagged:** an \`overrideReason\` lets a single agent pass a gate that ` +
+    `would otherwise block (e.g. All Tests Passed / Review Approved / Specs Approved / ` +
+    `Child Issues Done). Per separation-of-duties this transition should be confirmed by a ` +
+    `second party who did not perform the work. Search \`${OVERRIDE_FLAG_MARKER}\` to review ` +
+    `every proxy-flagged override.\n\n` +
+    `_Auto-flagged by kanbantic-mcp-proxy. Set \`KANBANTIC_SKIP_OVERRIDE_FLAG=1\` to disable._`;
+
+  try {
+    await callInternalTool('add_discussion_entry', {
+      issueId: target,
+      entryType: 'Comment',
+      content,
+    });
+    process.stderr.write(`[kanbantic-proxy] flagged readiness-gate override on ${target} (${name})\n`);
+  } catch (e) {
+    process.stderr.write(
+      `[kanbantic-proxy] failed to flag override on ${target}: ${e.message}\n`
+    );
   }
 }
 
