@@ -69,12 +69,20 @@ Before starting, verify you have local access to the workspace's code repository
    Pick the repo linked to the issue's `applicationId`, or the first active repository.
    ```
    MCP: mcp__kanbantic__get_repository(repositoryId)
-   MCP: mcp__kanbantic__get_repository_credential(repositoryId)
    ```
-   Then clone (read-only access is enough for prepare) and stay on the default branch:
+   Then clone via the bundled credential helper so the PAT is fetched just-in-time
+   and never persisted to `.git/config` or this transcript — do **not** embed the
+   token in the URL or call `get_repository_credential` yourself (see KBT-B330).
+   Read-only access is enough for prepare; stay on the default branch:
    ```bash
-   git clone https://<credential>@github.com/<org>/<repo>.git
+   HELPER="!node \"$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-git-credential-helper.js\""
+   git clone \
+     -c credential.helper="$HELPER" \
+     -c kanbantic.repositoryId="<repositoryId>" \
+     https://github.com/<org>/<repo>.git
    cd <repo>
+   git config credential.helper "$HELPER"
+   git config kanbantic.repositoryId "<repositoryId>"
    git checkout main && git pull
    ```
 

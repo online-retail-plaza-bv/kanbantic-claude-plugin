@@ -44,15 +44,26 @@ Before starting, verify you have local access to the workspace's code repository
    If the issue has an `applicationId`, choose the repository linked to that application. Otherwise use the first active repository.
    ```
    MCP: mcp__kanbantic__get_repository(repositoryId)  // → includes cloneUrl, gitAuthorName, gitAuthorEmail
-   MCP: mcp__kanbantic__get_repository_credential(repositoryId)  // → PAT token for authentication
    ```
-   Then clone and configure:
+   Then clone and configure git to obtain the PAT **just-in-time** via the bundled
+   credential helper. Do **not** call `get_repository_credential` yourself and do
+   **not** embed the token in the clone URL — either path persists the secret
+   (into `.git/config`, shell history, the process list, or this transcript). The
+   helper feeds the token to git over stdin; see KBT-B330. Clone the **clean** URL:
    ```bash
-   git clone https://<credential>@github.com/<org>/<repo>.git
+   # Configure once, reuse for clone + the review's merge/push in this clone.
+   HELPER="!node \"$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-git-credential-helper.js\""
+   git clone \
+     -c credential.helper="$HELPER" \
+     -c kanbantic.repositoryId="<repositoryId>" \
+     https://github.com/<org>/<repo>.git
    cd <repo>
+   git config credential.helper "$HELPER"          # persist (remote URL stays clean — no token)
+   git config kanbantic.repositoryId "<repositoryId>"
    git config user.name "<gitAuthorName>"
    git config user.email "<gitAuthorEmail>"
    ```
+   (PowerShell: identical `git config` keys; only shell quoting differs.)
 4. Ensure you're on the branch being reviewed (`git checkout <feature-branch>`)
 
 <IMPORTANT>
