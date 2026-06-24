@@ -159,3 +159,89 @@ test('KBT-TC2729 (E2E): graduate mini-epic via real proxy — SKIPPED (requires 
     //   KANBANTIC_MCP_URL=<sandbox-url> KANBANTIC_API_KEY=<key> npm test
   }
 );
+
+// ---------------------------------------------------------------------------
+// KBT-TC2731 — Unit: one Draft Test Case per AC (KBT-F432 / T3137)
+// ---------------------------------------------------------------------------
+
+test('KBT-TC2731: SKILL.md Step 5 instructs one create_test_case per AC (not per story)', () => {
+  const content = fs.readFileSync(SKILL_PATH, 'utf8');
+  // Step 5 must exist and reference create_test_case on Feature level
+  assert.ok(content.includes('## Step 5'), 'SKILL.md must have a Step 5 section for Draft Test Cases');
+  assert.ok(content.includes('create_test_case'), 'Step 5 must call create_test_case');
+  // The call must be in a per-AC iteration context (not per-story)
+  const step5Start = content.indexOf('## Step 5');
+  const step6Start = content.indexOf('## Step 6');
+  const step5Body = content.substring(step5Start, step6Start);
+  assert.ok(
+    step5Body.includes('per AC') || step5Body.includes('each AC') || step5Body.includes('AC op'),
+    'Step 5 must describe creating one Draft Test Case per AC (not per story)'
+  );
+  assert.ok(
+    step5Body.includes('featureId') || step5Body.includes('Feature — Regel A'),
+    'Step 5 create_test_case must target the Feature (Regel A / KBT-RL121)'
+  );
+});
+
+test('KBT-TC2731: SKILL.md Step 5 uses issueId: featureId (not epicId) for create_test_case', () => {
+  const content = fs.readFileSync(SKILL_PATH, 'utf8');
+  const step5Start = content.indexOf('## Step 5');
+  const step6Start = content.indexOf('## Step 6');
+  const step5Body = content.substring(step5Start, step6Start);
+  // Must contain featureId as the issueId argument — anti-pattern is epicId
+  assert.ok(step5Body.includes('issueId: featureId'),
+    'create_test_case in Step 5 must use issueId: featureId (Regel A — not epicId)');
+  // Must contain userStoryId for traceability
+  assert.ok(step5Body.includes('userStoryId'),
+    'create_test_case in Step 5 must include userStoryId for US-level traceability');
+});
+
+// ---------------------------------------------------------------------------
+// KBT-TC2733 — Integration: description format has AC text + story code ref
+// ---------------------------------------------------------------------------
+
+test('KBT-TC2733: Step 5 description format includes both acText and [storyCode] (KBT-RL123)', () => {
+  const content = fs.readFileSync(SKILL_PATH, 'utf8');
+  const step5Start = content.indexOf('## Step 5');
+  const step6Start = content.indexOf('## Step 6');
+  const step5Body = content.substring(step5Start, step6Start);
+  // Description must reference acText (the AC content) and storyCode (the US reference)
+  assert.ok(step5Body.includes('acText'),
+    'Step 5 description must include acText — the full AC text is required by KBT-RL123');
+  assert.ok(step5Body.includes('storyCode'),
+    'Step 5 description must include storyCode — the US reference is required by KBT-RL123');
+  // Must use square brackets around storyCode per KBT-RL123 spec: "Afgeleide van AC op [KBT-US-XXX]"
+  assert.ok(
+    step5Body.includes('"Afgeleide van AC op ["') || step5Body.includes("'Afgeleide van AC op ['"),
+    'Step 5 description format must wrap storyCode in square brackets: "Afgeleide van AC op [" + storyCode + "]" (KBT-RL123)'
+  );
+});
+
+test('KBT-TC2733: Step 5 instructs not to create_test_case before create_user_story (storyCode dependency)', () => {
+  const content = fs.readFileSync(SKILL_PATH, 'utf8');
+  const step5Start = content.indexOf('## Step 5');
+  const step6Start = content.indexOf('## Step 6');
+  const step5Body = content.substring(step5Start, step6Start);
+  assert.ok(
+    step5Body.includes('create_user_story') || step5Body.includes('storyCode is needed'),
+    'Step 5 must note the dependency on create_user_story completing first (storyCode is required for traceable description)'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// KBT-TC2732 — E2E: skipped (requires live sandbox workspace)
+// ---------------------------------------------------------------------------
+
+test('KBT-TC2732 (E2E): story with 2 ACs → 2 Draft TCs on Feature — SKIPPED (requires sandbox)',
+  { skip: 'requires live Kanbantic sandbox workspace + running MCP proxy (KANBANTIC_MCP_URL + KANBANTIC_API_KEY)' },
+  async () => {
+    // E2E scenario (extension of KBT-TC2729):
+    // 1. Graduate a mini-epic via real proxy: 1 feature, 1 story, 2 ACs
+    // 2. Assert via list_test_cases(issueId: featureId) that exactly 2 Draft Test Cases exist
+    // 3. Assert each TC description matches: "Afgeleide van AC op [KBT-US-XXX]:\n\"<AC text>\""
+    // 4. Assert NO test cases exist on the Epic (list_test_cases(issueId: epicId).totalCount == 0)
+    // 5. Assert each TC has userStoryId pointing to the correct User Story
+    //
+    // Enable with: KANBANTIC_MCP_URL=<sandbox-url> KANBANTIC_API_KEY=<key> npm test
+  }
+);
