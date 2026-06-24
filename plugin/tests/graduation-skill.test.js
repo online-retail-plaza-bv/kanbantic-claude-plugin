@@ -32,7 +32,8 @@ test('KBT-TC2728: SKILL.md exists at expected path', () => {
 });
 
 test('KBT-TC2728: SKILL.md has YAML frontmatter with name and description', () => {
-  const content = fs.readFileSync(SKILL_PATH, 'utf8');
+  const raw = fs.readFileSync(SKILL_PATH, 'utf8');
+  const content = raw.replace(/\r\n/g, '\n'); // normalize CRLF (core.autocrlf=true on Windows)
   assert.ok(content.startsWith('---\n'), 'SKILL.md must start with YAML frontmatter ---');
   assert.match(content, /^name:\s+kanbantic-graduation/m, 'frontmatter must include name: kanbantic-graduation');
   assert.match(content, /^description:\s+".+"/m, 'frontmatter must include a non-empty description');
@@ -115,7 +116,8 @@ test('KBT-TC2730: mirror file exists at plugin/commands/kanbantic-graduation.md'
 });
 
 test('KBT-TC2730: mirror file has valid frontmatter with description', () => {
-  const content = fs.readFileSync(MIRROR_PATH, 'utf8');
+  const raw = fs.readFileSync(MIRROR_PATH, 'utf8');
+  const content = raw.replace(/\r\n/g, '\n'); // normalize CRLF (core.autocrlf=true on Windows)
   assert.ok(content.startsWith('---\n'), 'Mirror file must start with YAML frontmatter ---');
   assert.match(content, /^description:\s+".+"/m, 'Mirror frontmatter must have a non-empty description');
 });

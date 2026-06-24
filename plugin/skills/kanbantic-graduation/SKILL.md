@@ -260,7 +260,7 @@ MCP: create_test_case(
   issueId: featureId,              // Feature — Regel A
   userStoryId: storyId,
   title: "<AC short label> — Draft",
-  description: "Afgeleide van AC op " + storyCode + ":\n\"" + acText + "\"",
+  description: "Afgeleide van AC op [" + storyCode + "]:\n\"" + acText + "\"",
   testLevel: "None",               // set during Feature prepare
   priority: "Medium"
 )
