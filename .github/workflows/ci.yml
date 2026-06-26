@@ -1,0 +1,26 @@
+name: Plugin CI
+
+# KBT-F454 (KBT-E089): the plugin repo had no CI, so version drift between
+# marketplace.json and plugin.json shipped unnoticed. This workflow runs the
+# node:test suite (which includes the version-sync guard) plus an explicit
+# version-sync check on every push and PR.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22+ — `node --test` expands glob patterns natively (Node 20 does not,
+          # which made `npm test`'s "plugin/tests/*.test.js" glob fail to match).
+          node-version: "22"
+      - name: Run plugin test suite
+        run: npm test
+      - name: Version-sync guard (marketplace.json <-> plugin.json)
+        run: npm run check:version

@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-05-12",
-  "source": "deferred-tools list, proxy session — Kanbantic MCP server (proxy is transparent per KBT-B200, so this IS the live registry as observed by the plugin)",
+  "generatedAt": "2026-06-26",
+  "source": "deferred-tools list, proxy session — Kanbantic MCP server (proxy is transparent per KBT-B200, so this IS the live registry as observed by the plugin). KBT-E089: added the 6 wireframe tools (create/list/get/add_version/update_version/delete).",
   "regenerationCommand": "Run `mcp__plugin_kanbantic-claude-plugin_kanbantic__get_mcp_tool_registry` and extract the tool names, OR copy the `mcp__plugin_kanbantic-claude-plugin_kanbantic__*` deferred-tool list and strip the prefix. Update `generatedAt` and `source`. Commit the new snapshot whenever the bundle drifts.",
   "tools": [
     "acknowledge_finding",
@@ -8,6 +8,7 @@
     "add_finding",
     "add_issue_attachment",
     "add_task",
+    "add_wireframe_version",
     "approve_phase",
     "approve_review",
     "archive_application",
@@ -41,6 +42,7 @@
     "create_test_run",
     "create_toolkit_item",
     "create_user_story",
+    "create_wireframe",
     "delete_issue_attachment",
     "delete_library_category",
     "delete_repository",
@@ -48,6 +50,7 @@
     "delete_task",
     "delete_test_case",
     "delete_user_story",
+    "delete_wireframe",
     "dismiss_finding",
     "download_issue_attachment",
     "end_agent_session",
@@ -83,6 +86,7 @@
     "get_test_coverage",
     "get_user_story_with_requirements",
     "get_workspace_setup",
+    "get_wireframe",
     "heartbeat",
     "link_application_repository",
     "link_applications",
@@ -114,6 +118,7 @@
     "list_toolkit_items",
     "list_user_stories",
     "list_workspace_specialists",
+    "list_wireframes",
     "mark_phase_for_review",
     "open_channel",
     "override_gate_result",
@@ -160,6 +165,7 @@
     "update_toolkit_item",
     "update_user_story",
     "update_validation_status",
+    "update_wireframe_version",
     "validate_repository_credential",
     "wait_for_user"
   ]
