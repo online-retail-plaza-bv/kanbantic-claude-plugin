@@ -149,6 +149,8 @@ Gedrag (afgedwongen in `proxy/kanbantic-mcp-proxy.js`):
 
 Het patroon is **generiek**: de substitutie geldt voor elke `tools/call` met een `filePath`-argument, niet alleen `add_wireframe_version`. De proxy verrijkt bovendien de `tools/list`-respons zodat `filePath` als optionele parameter (met beschrijving) verschijnt op elke tool die een `content`-property heeft — `filePath` wordt nooit aan `required` toegevoegd. Geen extra dependencies; alleen Node built-ins.
 
+> **Trust boundary.** `filePath` laat een tool-aanroep elk lokaal bestand lezen waartoe het proxy-proces toegang heeft, en stuurt de inhoud naar de Kanbantic-server. Dat is exact het doel (de proxy draait lokaal met filesystem-rechten), maar het betekent dat een foutieve of kwaadaardige tool-aanroep in principe gevoelige bestanden zou kunnen inlezen. Geef alleen `filePath`-waarden door die je bedoelt te uploaden. De proxy legt bewust géén pad-allowlist of groottelimiet op — dat blijft een verantwoordelijkheid van de aanroeper. (Vergelijk de server-side `AddIssueAttachment`, KBT-SR224, die wél een 25MB-cap hanteert omdat die de payload base64 in het protocol stopt; de proxy-substitutie heeft die overhead niet.)
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) **or** Claude Desktop (Windows App)
