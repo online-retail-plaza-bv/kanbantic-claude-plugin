@@ -117,6 +117,38 @@ claude --dangerously-load-development-channels server:kanbantic
 
 Zonder de flag werken `register_agent_session` / `send_message` / `get_channel_messages` etc. nog steeds als gewone tools — maar de **push-richting** (user → agent) verloopt niet realtime. Polling vanuit de agent zelf via `check_messages` is mogelijk maar niet aanbevolen.
 
+## `filePath` — lokale bestandssubstitutie voor grote content (KBT-F464)
+
+De proxy draait lokaal met filesystem-toegang. Voor tools met een grote `content`-parameter (bijv. `add_wireframe_version` met een 154KB HTML-wireframe) hoeft Claude de inhoud niet langer in zijn context te laden: geef in plaats van `content` een **`filePath`** mee en de proxy resolvet het bestand vóór doorsturen.
+
+```jsonc
+// Claude roept aan:
+add_wireframe_version({
+  wireframeId: "3a221d1f-…",
+  filePath: "C:\\Users\\you\\Documents\\adminmeester-wireframes.html",
+  changesSummary: "Update nav + BTW schermen"
+})
+
+// De proxy substitueert vóór doorsturen naar de API:
+add_wireframe_version({
+  wireframeId: "3a221d1f-…",
+  content: "<html>…</html>",   // gelezen via fs.readFileSync(filePath, 'utf8')
+  changesSummary: "Update nav + BTW schermen"
+})
+```
+
+Gedrag (afgedwongen in `proxy/kanbantic-mcp-proxy.js`):
+
+| Argumenten | Proxy-gedrag |
+|---|---|
+| alleen `content` | byte-identiek doorgestuurd (ongewijzigd t.o.v. vroeger) |
+| `filePath` (geen `content`) | bestand lokaal gelezen → `content` gevuld, `filePath` verwijderd, dan doorgestuurd |
+| `filePath` **en** `content` | JSON-RPC-fout `-32602` (ambiguïteit) — **niet** doorgestuurd; geef precies één op |
+| `filePath` onleesbaar | JSON-RPC-fout `-32603` met pad + OS-reden (bijv. `ENOENT`) — **niet** doorgestuurd |
+| geen van beide | ongewijzigd doorgestuurd; de server valideert zelf |
+
+Het patroon is **generiek**: de substitutie geldt voor elke `tools/call` met een `filePath`-argument, niet alleen `add_wireframe_version`. De proxy verrijkt bovendien de `tools/list`-respons zodat `filePath` als optionele parameter (met beschrijving) verschijnt op elke tool die een `content`-property heeft — `filePath` wordt nooit aan `required` toegevoegd. Geen extra dependencies; alleen Node built-ins.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) **or** Claude Desktop (Windows App)
