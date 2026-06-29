@@ -141,9 +141,9 @@ Process bugs **one at a time**. Start the next bug only after the current one ha
 MCP: mcp__kanbantic__heartbeat(sessionId: <sessionId>)
 ```
 
-**Never skip a step** — even if the current issue content looks sufficient for the next lane. Every lane skill performs its own checks.
-
-**When in doubt about the workflow:** re-read what you fetched in Step 0d. Consult the Toolkit. Never skip a step on assumption.
+<HARD-GATE>
+Never skip a lane or step based on assumption — even if the current issue content looks sufficient for the next lane. Every lane skill performs its own checks. When in doubt about the workflow, re-read what you fetched in Step 0d and consult the Toolkit before proceeding.
+</HARD-GATE>
 
 ---
 
@@ -205,3 +205,13 @@ Track token counts by accumulating the `usage` fields after each API call (`inpu
 - Never use a heavier model when a lighter one suffices
 - Never close the session without `end_agent_session`
 - Never push commits without passing tests (unless the Toolkit explicitly permits it)
+
+## Key Principles
+
+- **Workflow is always live** — fetch it at runtime; never trust what the skill itself says about lane names
+- **Sequential, one bug at a time** — complete or document-as-blocked before starting the next
+- **Lightest model that fits** — switch per subtask; never lock in a heavy model for the whole run
+- **Blockers skip, not stop** — one blocked bug never halts the batch
+- **Kanbantic is source of truth** — status updates and Discussion entries before and after every lane transition
+- **Heartbeat keeps the session alive** — minimum every 60 seconds during long-running work
+- **Bootstrap before everything** — Step 0 is non-negotiable; no sub-step may be skipped
