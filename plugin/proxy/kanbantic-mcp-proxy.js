@@ -322,6 +322,13 @@ function augmentToolsListResponse(response) {
 
     props.filePath = { type: 'string', description: FILE_PATH_PROP_DESCRIPTION };
 
+    // Remove 'content' from required so Claude knows it may use filePath instead.
+    // Without this, Claude sees content as mandatory and fills it alongside filePath,
+    // which triggers the ambiguity guard in resolveFilePathArgument (KBT-B349).
+    if (Array.isArray(schema.required)) {
+      schema.required = schema.required.filter(r => r !== 'content');
+    }
+
     if (typeof tool.description === 'string' && !tool.description.includes('filePath')) {
       tool.description = tool.description.trimEnd() +
         "\n\nTip: for large content you may pass 'filePath' (an absolute local path) " +

@@ -10,9 +10,9 @@
   "plugins": [
     {
       "name": "kanbantic-claude-plugin",
-      "version": "2.10.0",
+      "version": "2.10.1",
       "source": "./plugin",
-      "description": "filePath parameter for large content in the MCP proxy (KBT-F464)."
+      "description": "Fix filePath ambiguity bug (KBT-B349): content removed from required when filePath is advertised."
     }
   ]
 }
