@@ -4,7 +4,7 @@ Claude plugin for Kanbantic issue lifecycle management. All artifacts are create
 
 ## Skill ↔ Lane mapping (plugin v2.4.0)
 
-Three intake-skills create issues; four lane-skills move them through the eight statuses; deploy webhooks complete the journey to production.
+Three intake-skills create issues; four lane-skills move them through the eight statuses; deploy webhooks complete the journey to production. An autopilot skill drives bugs end-to-end without manual handoffs.
 
 | Source lane | Target lane | Skill | Command | Mode |
 |-------------|-------------|-------|---------|------|
@@ -17,6 +17,7 @@ Three intake-skills create issues; four lane-skills move them through the eight 
 | InProgress | Review | `kanbantic-issue-execute` | (continues) | Lane-skill (implementation) |
 | Review | **InDeployment** | `kanbantic-issue-review` | *(auto via /loop-style chain)* | Lane-skill (merge + transition) |
 | InDeployment | Done | (deploy webhooks + manual `update_issue_status`) | — | Operational gate |
+| New *or* any lane | Done (batch) | `kanbantic-bug-autopilot` | `/bug-autopilot` | Autopilot (Bug, end-to-end) |
 
 **Lane-flow** (8 statuses; `Cancelled` is terminal from any non-Done, non-InDeployment status):
 
