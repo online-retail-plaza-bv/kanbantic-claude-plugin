@@ -1,6 +1,6 @@
 ---
 name: kanbantic-orchestrate
-description: "Orchestration lane-skill (KBT-F436). Given {workspace, initiative, repos}, decides WHICH issues to pick up (by initiative + priority), in WHICH order, and drives each one through the lane-skills (triage → prepare → execute → review) with explicit hand-offs. Owns sequencing only — it does NOT re-implement claim, per-phase push, or merge; those stay in kanbantic-issue-execute / kanbantic-issue-review."
+description: "Orchestration/sequencer skill (KBT-F436) — NOT a lane-skill. Given {workspace, initiative, repos}, decides WHICH issues to pick up (by initiative + priority), in WHICH order, and drives each one through the lane-skills (triage → prepare → execute → review) with explicit hand-offs. Owns sequencing only — it does NOT re-implement claim, per-phase push, or merge; those stay in kanbantic-issue-execute / kanbantic-issue-review."
 user_invocable: true
 command: kanbantic-orchestrate
 ---
@@ -178,11 +178,15 @@ can override it without touching the plugin:
    The sync mirrors every Skill item to `.claude/commands/<slug>.md` via
    `targetPathFor('Skill', slug)` → `.claude/commands/kanbantic-orchestrate.md`.
 
-**Precedence: the workspace override wins over the plugin baseline.** Both register
-the command name `kanbantic-orchestrate`; Claude Code resolves the workspace-local
-`.claude/commands/kanbantic-orchestrate.md` ahead of the plugin-bundled skill, so
-the Toolkit-item content takes effect. No new sync logic is required — the existing
-`sync-workspace-skills.js` already materializes Skill items by slug.
+**Precedence: the workspace override is intended to win over the plugin baseline.** Both
+register the command name `kanbantic-orchestrate`; the override mechanism *assumes* Claude
+Code resolves the workspace-local `.claude/commands/kanbantic-orchestrate.md` ahead of the
+plugin-bundled skill of the same command name. **This resolution order is assumed, not yet
+verified** — confirm against the running Claude Code version before relying on the override
+in production; if CC does not shadow a plugin skill with a same-named project command, the
+override will silently no-op and the baseline must instead be edited (or the plugin skill
+renamed). No new sync logic is required — the existing `sync-workspace-skills.js` already
+materializes Skill items by slug.
 
 To revert to the baseline, set the Toolkit Skill item `isActive: false` and re-run
 the sync (which deletes the mirror file), or delete the mirror and re-sync.
