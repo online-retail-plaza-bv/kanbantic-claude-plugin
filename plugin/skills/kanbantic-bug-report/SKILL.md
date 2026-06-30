@@ -33,7 +33,7 @@ Load workspace context:
 MCP: mcp__kanbantic__get_context
 ```
 
-Note the workspace ID, active releases, and applications.
+Note the workspace ID, active **versions** (per Application), and applications.
 
 Note the workspace's `TestCoverageEnforcement` and `ReadinessGateEnforcement` settings. If test cases are enforced (Soft or Hard), ensure you create a regression test case in Step 4b — it's not optional when enforcement is active.
 
@@ -52,6 +52,8 @@ The information you need:
 | URL or screenshot | No | "https://kanbantic.com/dashboard" |
 | Which workspace | No | Auto-detect from context; ask if multiple workspaces exist |
 | Which application | No | Auto-detect from context if possible |
+| Version | No | Target Version for the fix — must belong to the same Application (KBT-RL144) |
+| Affected version(s) | No | Which released Version(s) exhibit the bug — captured in the description (no dedicated MCP field) |
 
 Use `AskUserQuestion` with options where useful. For severity, offer:
 - **Critical** — System down, data loss, no workaround
@@ -81,6 +83,14 @@ Shall I create this bug?
 
 Wait for user confirmation before persisting.
 
+## Version handling (KBT-F318 / KBT-RL143–145)
+
+When the user supplies a target Version for the fix:
+- **Rename:** the parameter is now **`version`** (was `release`). If the user uses the legacy `release` term, accept it but emit the deprecation-warning: `⚠️ 'release' is hernoemd naar 'version' en wordt volgende cyclus verwijderd.` (KBT-RL143 — backward-compat, 1 cycle).
+- **Application-scope validation (KBT-RL144):** resolve the chosen Version via `list_versions(workspaceId)` filtered to the issue's Application. If the Version belongs to a different Application, refuse: `Version <code> hoort bij Application <X>, niet bij <issue.Application>. Kies een Version van de juiste Application.`
+- Pass the validated Version as `VersionId` on `create_issue` (omit for backlog).
+- **Affected Version(s):** for Bugs, optionally ask which released Version(s) exhibit the bug and capture them in the description's *Environment* section — there is no dedicated `affectsVersions` MCP field.
+
 ## Step 4: Persist to Kanbantic
 
 ### 4a: Create Bug Issue
@@ -90,7 +100,7 @@ Format the description as structured Markdown with bug details:
 ```
 MCP: mcp__kanbantic__create_issue(
   workspaceId: <workspace ID — REQUIRED to ensure correct workspace>,
-  releaseId: <active release>,
+  VersionId: <validated Version id — see Version handling; omit for backlog>,
   type: "Bug",
   title: <concise bug title>,
   description: <structured description — see template below>,

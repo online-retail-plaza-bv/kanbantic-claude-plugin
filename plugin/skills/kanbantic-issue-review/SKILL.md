@@ -182,6 +182,8 @@ MCP: mcp__kanbantic__list_toolkit_items(workspaceId, category: "Gotcha")
 
 Build a requirements checklist from specifications and test cases.
 
+**Version context (KBT-F318):** capture the issue's assigned Version so it can be surfaced in the merge-summary. From the `get_issue` response (Step 1) read `VersionId`; resolve its name + status via `list_versions(workspaceId)` (or `issue_version_lookup`). Store as `versionContext = { name, status, applicationName }`. If the issue has no Version, record `versionContext = "—"` (backlog). The Version name is shown in the merge commit message (Step 7) and the final report (Step 10).
+
 **Test-policy (Regel E / KBT-F442):** From the discussion entries, locate the entry whose content starts with `## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)`. Parse the table to extract, per level (Unit / Integration / E2E): Applicability (`Vereist` / `N.v.t.`) + Minimum count + N.v.t.-rationale. Also count the actual `Passed` test cases per level from `list_test_cases`. Store as `frozenPolicy` with actual counts.
 
 If no test-policy entry is found for a Feature / Bug issue, treat all three levels as Vereist/min=1 and flag the absence as a Critical review issue (the prepare-step was incomplete).
@@ -379,9 +381,11 @@ Execute the merge to main with a no-ff merge commit so the merge-historie zichtb
 ```bash
 git checkout main
 git pull origin main
-git merge --no-ff <feature-branch> -m "Merge <ISSUE-CODE>: <short summary>"
+git merge --no-ff <feature-branch> -m "Merge <ISSUE-CODE> (<versionContext.name>): <short summary>"
 git push origin main
 ```
+
+Include the Version name (`versionContext` from Step 1b) in the merge commit summary so the merge-historie ties the change to its version-milestone (KBT-F318). For a backlog issue (`versionContext == "—"`) omit the parenthetical.
 
 Then clean up the feature branch:
 
@@ -576,6 +580,7 @@ Report:
 
 **Summary:**
 - Verdict: APPROVE
+- Version: `<versionContext.name>` (`<versionContext.status>`) — or "— (backlog)"
 - Merged: `<feature-branch>` → `main` (`<merge commit sha>`)
 - Feature branch deleted (local + remote)
 - Knowledge: [N] toolkit items, [N] document impacts (or "none")

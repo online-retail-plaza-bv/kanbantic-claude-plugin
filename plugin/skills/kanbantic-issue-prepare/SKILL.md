@@ -400,7 +400,7 @@ For each Phase:
        title: "<capability name>",
        parentIssueId: <Epic ID>,
        applicationId: <Epic.applicationId>,
-       releaseId:    <Epic.releaseId>,
+       VersionId:    <Epic.VersionId>,
        initiativeId: <Epic.initiativeId>,
        priority: <inherits from Epic or set explicitly>,
        description: "<concrete scope of this Feature within the Epic>"
@@ -481,6 +481,18 @@ MCP: mcp__kanbantic__get_issue(issueId)
 ```
 
 Re-inspect `readinessChecks` for the `Triaged → Prepared` transition. The `isReadyToClaim` boolean on the DTO is now derived from `Status == Prepared` (KBT-SR266) — at this point it is still `false`; that flips to `true` after Step 6a transitions the issue.
+
+### 6.0: Version readiness — informational (KBT-F318 / KBT-RL144)
+
+As an **informational, non-gating** check, verify the issue's Application has a **Planned** Version it can claim against. This is a heads-up for `kanbantic-issue-execute`, whose claim-gate (KBT-RL145) is the actual enforcement point.
+
+```
+MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter to issue.applicationId + status == "Planned"
+```
+
+- **A Planned Version exists** and the issue already carries a `VersionId` of the **same** Application → report `Version: <name> ✓`.
+- **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Prepared transition on this.
+- **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Prepared transition.
 
 ### 6a: All checks green — transition to Prepared
 

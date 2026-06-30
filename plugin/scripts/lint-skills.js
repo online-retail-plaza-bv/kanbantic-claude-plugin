@@ -28,6 +28,17 @@
 //             `Review → Done` (with the exact unicode arrow). The review
 //             skill's exit-transition is `Review → InDeployment`
 //             per KBT-RL053.
+//   5. (v)  — version-awareness invariant (KBT-RL147 / KBT-F320). After the
+//             F10 release→version rename + the F12 known-mcp-tools sync, the
+//             lane-skills must carry NO stale release-domain tokens:
+//             `releaseId`, `release_id`, the capital-cased whole word
+//             `Release`, or any of the four removed release-tools
+//             (`create_release`, `list_releases`, `update_release`,
+//             `get_release_notes`). A line may opt out of this check with an
+//             explicit marker `lint-skills-allow-release` (e.g. a documented
+//             reference to a GitHub Release in prose). Complements invariant
+//             3: the prefixed `mcp__kanbantic__<version-tool>` refs restored
+//             in F12 are validated against the synced snapshot there.
 //
 // Exit codes (mirror `check-bundle-tool-drift.js`):
 //   0 — all invariants pass.
@@ -175,6 +186,40 @@ function main() {
       `InDeployment per KBT-RL053; the backend auto-promotes to Done on ` +
       `deploy-gate clear (KBT-F236). Use "Review → InDeployment".`);
     violations++;
+  }
+
+  // -------- Invariant 5: version-awareness (no stale release refs) -------
+  // KBT-RL147 / KBT-F320. The release concept was renamed to version in F10
+  // and the four release-tools were removed from the snapshot in F12. No
+  // lane-skill may reference the old release-domain tokens any more. A line
+  // carrying the `lint-skills-allow-release` marker is exempt (documented
+  // legitimate mention, e.g. a GitHub Release in prose).
+  const RELEASE_PATTERNS = [
+    { re: /releaseId/, label: '`releaseId`' },
+    { re: /release_id/, label: '`release_id`' },
+    { re: /\bRelease\b/, label: 'capital-cased `Release`' },
+    { re: /\b(?:create_release|list_releases|update_release|get_release_notes)\b/,
+      label: 'a removed release-tool (create_release/list_releases/update_release/get_release_notes)' },
+  ];
+  const ALLOW_MARKER = 'lint-skills-allow-release';
+  for (const skill of skills) {
+    const lines = skill.content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.includes(ALLOW_MARKER)) continue; // explicit opt-out
+      for (const { re, label } of RELEASE_PATTERNS) {
+        if (re.test(line)) {
+          fail(5, skill.file,
+            `Line ${i + 1} carries stale release-domain token (${label}): ` +
+            `"${line.trim().slice(0, 100)}". The release concept was renamed ` +
+            `to version (KBT-F318/F10) and the release-tools were removed from ` +
+            `the snapshot (KBT-F320/F12). Use the version-flow tools instead, ` +
+            `or add the \`${ALLOW_MARKER}\` marker on the line for a documented ` +
+            `legitimate mention. Per KBT-RL147 Invariant 5.`);
+          violations++;
+        }
+      }
+    }
   }
 
   if (violations === 0) {

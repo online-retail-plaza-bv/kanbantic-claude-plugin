@@ -1,6 +1,6 @@
 ---
 name: kanbantic-issue-triage
-description: "Use after an intake skill creates a new issue. Triage decides go / no-go: on go, sets priority / release / application / initiative / tags and moves the issue from New to Triaged. On no-go, records a ≥20-char reason as a Decision entry and moves the issue to Cancelled. Does not write specs, user stories, or test cases."
+description: "Use after an intake skill creates a new issue. Triage decides go / no-go: on go, sets priority / version / application / initiative / tags and moves the issue from New to Triaged. On no-go, records a ≥20-char reason as a Decision entry and moves the issue to Cancelled. Does not write specs, user stories, or test cases."
 user_invocable: true
 command: triage-issue
 ---
@@ -18,7 +18,7 @@ Dedicated lane-skill for the **New → Triaged** (or **New → Cancelled**) tran
 ## Scope
 
 - Moves an issue from `New` to `Triaged` (go) or `Cancelled` (no-go).
-- Sets/updates `priority`, `releaseId`, `applicationId`, `initiativeId`, and `tags` when the user decides go.
+- Sets/updates `priority`, `VersionId`, `applicationId`, `initiativeId`, and `tags` when the user decides go.
 - Does **not** create specifications, user stories, test cases, phases, tasks, or implementation plans — those belong to `kanbantic-issue-prepare`.
 - Does **not** call embeddings or vector-search endpoints. Duplicate check is a lightweight heuristic on `list_issues`.
 
@@ -29,7 +29,8 @@ The triage skill uses **only** the following MCP tools. Any other MCP call is ou
 
 - `get_issue`
 - `list_issues` (for duplicate heuristic)
-- `update_issue` (for metadata: priority, release, application, initiative, tags)
+- `update_issue` (for metadata: priority, version, application, initiative, tags)
+- `list_versions` (resolve + Application-scope-validate the chosen Version — KBT-RL144)
 - `update_issue_status` (Triaged or Cancelled)
 - `add_discussion_entry` (Decision entry for no-go reason)
 
@@ -42,7 +43,7 @@ Forbidden: `create_specification`, `create_test_case`, `create_user_story`, `cre
 2. **Gate-check** — status must be `New` (HARD GATE)
 3. **Duplicate heuristic** — top-3 recent issues on the same application
 4. **Go / no-go dialogue** — single `AskUserQuestion` with two options
-5. **If go** — collect metadata (priority / release / application / initiative / tags), update, transition to Triaged
+5. **If go** — collect metadata (priority / version / application / initiative / tags), update, transition to Triaged
 6. **If no-go** — collect ≥20-char reason, record Decision entry, transition to Cancelled
 7. **Handoff** — point at `kanbantic-issue-prepare` (go) or stop (no-go)
 
@@ -52,7 +53,7 @@ Forbidden: `create_specification`, `create_test_case`, `create_user_story`, `cre
 MCP: mcp__kanbantic__get_issue(issueId)
 ```
 
-Capture existing metadata that the intake skill already filled in: title, description, `type`, `applicationId`, `releaseId`, `initiativeId`, `priority`, `tags`. These are shown back to the user in Step 4 and **not** re-prompted unless the user wants to change them (per the Decision: respect intake output).
+Capture existing metadata that the intake skill already filled in: title, description, `type`, `applicationId`, `VersionId`, `initiativeId`, `priority`, `tags`. These are shown back to the user in Step 4 and **not** re-prompted unless the user wants to change them (per the Decision: respect intake output).
 
 ## Step 2: Gate-check — status must be `New`
 
@@ -112,20 +113,22 @@ For each field, show the current value and ask the user if it should change. Use
 | Field | Required | Options |
 |-------|----------|---------|
 | Priority | Yes | Critical / High / Medium / Low |
-| Release | No | Active releases from workspace, or `backlog` (null) |
+| Version | No | Active Versions of the issue's Application, or `backlog` (null). Must belong to the issue's Application (KBT-RL144). Legacy `release` term accepted with a deprecation-warning (KBT-RL143) |
 | Application | Yes for Feature/Bug; optional for Epic | Active applications in workspace |
 | Initiative | No | Active initiatives, or none |
 | Tags | No | Free-form, comma-separated |
 
 Skip fields the intake already set correctly, unless the user explicitly wants to change them (per the Decision on respecting intake output).
 
-### 5b: Update metadata (single call)
+### 5b: Validate Version scope + update metadata (single call)
+
+**Version Application-scope validation (KBT-RL144):** if the user set/changed the Version, resolve it via `list_versions(workspaceId)` and confirm it belongs to the issue's Application. A Version of another Application is refused: `Version <code> hoort bij Application <X>, niet bij <issue.Application>. Kies een Version van de juiste Application.` Backward-compat: if the user used the legacy `release` term, accept it as `version` and emit `⚠️ 'release' is hernoemd naar 'version' en wordt volgende cyclus verwijderd.` (KBT-RL143, 1 cycle).
 
 ```
 MCP: mcp__kanbantic__update_issue(
   issueId,
   priority: <priority>,
-  releaseId: <release id or null>,
+  VersionId: <validated version id or null>,
   applicationId: <application id>,
   initiativeId: <initiative id or null>,
   tags: <array of tags or omit>
@@ -147,7 +150,7 @@ Report:
 
 **"Issue [CODE] is now Triaged. Metadata locked in:**
 - Priority: [priority]
-- Release: [release or backlog]
+- Version: [version or backlog]
 - Application: [application]
 - Initiative: [initiative or —]
 
