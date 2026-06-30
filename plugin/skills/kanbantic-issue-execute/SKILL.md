@@ -22,7 +22,8 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 ## Checklist
 
 1. **Gate-check** — verify issue is `Prepared` (preferred) or `Triaged` + ready to claim (legacy) (HARD GATE)
-2. **Claim issue** — atomically sets status to InProgress + records branch (single MCP call, KBT-RL052)
+1.5. **Version claim-gate** — issue's Application MUST have a Planned Version, else block the claim with a clear error + `preview_next_version` suggestion (HARD GATE, KBT-F318 / KBT-RL145)
+2. **Claim issue** — atomically sets status to InProgress + records branch (single MCP call, KBT-RL052); auto-assigns the Planned Version
 3. **Load plan + knowledge** — get phases/tasks AND project patterns from Kanbantic
 4. **Execute** — depends on issue type:
    - **Epic** (has Implementation Plan): execute per phase with per-phase push + review gates
@@ -182,6 +183,30 @@ Inspect the response:
 </HARD-GATE>
 
 This gate prevents execution of half-designed issues and couples this skill to the output of `kanbantic-issue-triage` + `kanbantic-issue-prepare`.
+
+## Step 1.5: Version claim-gate — Application must have a Planned Version (KBT-F318 / KBT-RL145, per F4)
+
+<HARD-GATE>
+Before `claim_issue` (Step 2), verify the issue's Application has a **Planned** Version. F4 requires every claimed issue to map to a Planned Version so the work is attributable to a concrete version-milestone. This gate runs **after** the Step 1 status gate-check and **before** the first state-mutating call.
+
+1. Determine `issue.applicationId` from the `get_issue` response in Step 1. (Epics may be cross-application — gate on the Epic's primary `applicationId`; each child Feature carries — and is gated on — its own Application when it is sub-claimed in Step 4A.2-new.a.)
+2. Resolve Planned Versions for that Application:
+   ```
+   MCP: list_versions(workspaceId)   // live version tool; filter to issue.applicationId + status == "Planned"
+   ```
+3. **No Planned Version for the Application** → STOP. Do **not** call `claim_issue` (no partial state — the issue stays on `Prepared` / `Triaged`). Fetch the suggested bump and report verbatim:
+   ```
+   MCP: preview_next_version(applicationId: <issue.applicationId>)
+   // → { proposed, rationale, bumpLevel } — quote `proposed` as the recommended new Version
+   ```
+   > **Geen Planned Version voor Application `<X>`.** De claim is geblokkeerd (per F4 / KBT-RL145).
+   > Maak eerst een Planned Version aan — `preview_next_version` stelt **`<proposed>`** voor (`<bumpLevel>`: `<rationale>`). Gebruik `create_version` (of het `/kanbantic-version-...` command) en her-invoke deze skill.
+
+   Add the block as a `Comment` discussion entry on the issue for the audit-trail, then exit cleanly.
+4. **A Planned Version exists** → continue to Step 2. `claim_issue` auto-assigns the issue to that Planned Version — no separate `update_issue(VersionId)` is needed.
+</HARD-GATE>
+
+**Tool note (LIVE registry, KBT-RL145):** the original scope named `assess_version_readiness`; that tool does **not** exist. The live check uses `list_versions` (for the Planned-check) + `preview_next_version` (for the suggested bump). Do **not** reference `assess_version_readiness`, `archive_version`, or `add/remove_affects_version`.
 
 ## Step 2: Claim Issue and Create Branch
 

@@ -1,6 +1,6 @@
 ---
 name: kanbantic-feature-request
-description: "Use when the user wants to propose a new Feature. Lightweight intake: captures title, short description, application, release (optional), priority — then creates a Feature issue in status New. Does not create specs, user stories, or test cases; those come later via kanbantic-issue-prepare."
+description: "Use when the user wants to propose a new Feature. Lightweight intake: captures title, short description, application, version (optional), priority — then creates a Feature issue in status New. Does not create specs, user stories, or test cases; those come later via kanbantic-issue-prepare."
 user_invocable: true
 command: request-feature
 ---
@@ -36,7 +36,7 @@ Lightweight Feature intake. Capture the minimum needed to create a Feature issue
 MCP: mcp__kanbantic__get_context
 ```
 
-Note the workspace ID, active releases, and applications — needed for the `create_issue` call.
+Note the workspace ID, active **versions** (per Application), and applications — needed for the `create_issue` call.
 
 ## Step 2: Gather
 
@@ -47,7 +47,7 @@ Ask **at most 5 questions**, one at a time, via `AskUserQuestion` with multiple-
 | Title | Yes | Short, action-oriented |
 | Short description | Yes | 2–5 sentences on what + why |
 | Application | **Yes** | Every Feature is scoped to an application (per the intake Decision) |
-| Release | No | Omit → issue lands in backlog |
+| Version | No | Target Version — must belong to the same Application (KBT-RL144); omit → backlog |
 | Priority | No | Critical / High / Medium / Low — default Medium |
 
 <HARD-GATE>
@@ -58,6 +58,12 @@ If Title, Short description, or Application is missing after the dialogue, the s
 The skill MUST NOT call `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, or `create_implementation_plan`. Intake captures nothing but the issue itself — everything else is `kanbantic-issue-prepare`'s territory.
 </HARD-GATE>
 
+## Version handling (KBT-F318 / KBT-RL143–144)
+
+- **Rename:** the parameter is now **`version`** (was `release`). If the user uses the legacy `release` term, accept it but emit the deprecation-warning: `⚠️ 'release' is hernoemd naar 'version' en wordt volgende cyclus verwijderd.` (KBT-RL143 — backward-compat, 1 cycle).
+- **Application-scope validation (KBT-RL144):** resolve the chosen Version via `list_versions(workspaceId)` filtered to the Feature's Application. If the Version belongs to a different Application, refuse: `Version <code> hoort bij Application <X>, niet bij <Feature.Application>. Kies een Version van de juiste Application.`
+- Pass the validated Version as `VersionId` on `create_issue` (null → backlog).
+
 ## Step 3: Confirm
 
 Present a short summary:
@@ -65,7 +71,7 @@ Present a short summary:
 ```
 **Feature:** [title]
 **Application:** [application name]
-**Release:** [release name or "backlog"]
+**Version:** [version name or "backlog"]
 **Priority:** [priority]
 
 [description]
@@ -82,7 +88,7 @@ Exactly **one** MCP call:
 ```
 MCP: mcp__kanbantic__create_issue(
   workspaceId: <workspace ID>,
-  releaseId: <release id or null for backlog>,
+  VersionId: <validated version id or null for backlog>,
   type: "Feature",
   title: <title>,
   description: <description>,
@@ -99,7 +105,7 @@ Report:
 
 **"Feature [CODE] has been created in status New. Next steps in the v0.10.0 lane-flow (8 statuses, 4 lane-skills):**
 
-1. **Triage** — run `kanbantic-issue-triage` for the go / no-go decision (`New → Triaged`); sets priority / release / application details.
+1. **Triage** — run `kanbantic-issue-triage` for the go / no-go decision (`New → Triaged`); sets priority / version / application details.
 2. **Prepare** — once Triaged, run `kanbantic-issue-prepare` to work out specs, user stories, and test cases (`Triaged → Prepared` on green readiness — Prepared is the dedicated ready-to-claim status since plugin v2.2.0 / KBT-F235).
 3. **Execute** — finally `kanbantic-issue-execute` claims the Prepared issue (atomic `Prepared → InProgress`) and drives it through to `Review` when all tasks are Done and tests Passed.
 4. **Review + Deploy** — `kanbantic-issue-review` reviews + merges + transitions to `InDeployment` (since plugin v2.3.0 / KBT-F236); the operational deploy webhooks + manual `update_issue_status(status: \"Done\")` complete the journey to `Done`."
