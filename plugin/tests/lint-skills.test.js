@@ -101,6 +101,46 @@ test('negative 4 (state-machine): inserting "Review → Done" into review fails 
   assert.match(r.stdout, /FAIL invariant 4/);
 });
 
+test('negative 5 (version-awareness): "Create a Release" in a lane fails invariant 5', () => {
+  // KBT-F320 / KBT-RL147 / KBT-TC2360 — case-sensitive capital `Release`.
+  const dir = makeTmpSkills();
+  mutate(dir, 'kanbantic-issue-prepare',
+    s => s + '\n\nThen Create a Release for the issue.\n');
+  const r = runLint({ SKILLS_DIR: dir });
+  assert.equal(r.status, 1, `expected exit 1, got ${r.status}\nSTDOUT: ${r.stdout}`);
+  assert.match(r.stdout, /FAIL invariant 5/);
+});
+
+test('negative 5 (version-awareness): a removed release-tool ref fails invariant 5', () => {
+  const dir = makeTmpSkills();
+  mutate(dir, 'kanbantic-issue-execute',
+    s => s + '\n\nCall `get_release_notes` afterwards.\n');
+  const r = runLint({ SKILLS_DIR: dir });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /FAIL invariant 5/);
+});
+
+test('positive 5 (version-awareness): lowercase "release notes" does NOT hard-fail', () => {
+  // TC2360 design-choice: only the capital-cased whole word `Release`,
+  // `releaseId`/`release_id`, and the removed tool-names trip the lint.
+  // Lowercase prose like "release notes" is allowed (no hard fail).
+  const dir = makeTmpSkills();
+  mutate(dir, 'kanbantic-issue-prepare',
+    s => s + '\n\nGenerate the release notes for the version.\n');
+  const r = runLint({ SKILLS_DIR: dir });
+  assert.equal(r.status, 0,
+    `lowercase "release" must not hard-fail; got ${r.status}\nSTDOUT: ${r.stdout}`);
+});
+
+test('positive 5 (opt-out): a line carrying the allow-marker is exempt', () => {
+  const dir = makeTmpSkills();
+  mutate(dir, 'kanbantic-issue-review',
+    s => s + '\n\nThe F6-handler creates a GitHub Release. <!-- lint-skills-allow-release -->\n');
+  const r = runLint({ SKILLS_DIR: dir });
+  assert.equal(r.status, 0,
+    `allow-marker line must be exempt; got ${r.status}\nSTDOUT: ${r.stdout}`);
+});
+
 test('infrastructure: missing snapshot exits 2', () => {
   const fakeSnapshot = path.join(os.tmpdir(), `no-such-snapshot-${Date.now()}.json`);
   // Ensure absence.

@@ -93,7 +93,11 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(() => process.exit(0));
+// Only run when executed directly; `require`-ing the module (unit-test of the
+// pure renderer) must not trigger stdin-reading `main()`.
+if (require.main === module) {
+  main().catch(() => process.exit(0));
+}
 
 // Exported for unit-testing the pure renderer.
 module.exports = { formatSummary };

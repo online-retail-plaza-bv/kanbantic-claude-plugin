@@ -247,7 +247,12 @@ async function main() {
   return allow();
 }
 
-main().catch(() => allow());
+// Only run the hook when executed directly (`node …blocker.js`). When the
+// module is `require`d (e.g. by the unit-test to exercise the pure helpers)
+// `main()` must NOT fire — it would read the test-runner's stdin and hang.
+if (require.main === module) {
+  main().catch(() => allow());
+}
 
 // Exported for unit-testing the pure helpers without spawning a process.
 module.exports = {
