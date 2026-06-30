@@ -10,9 +10,9 @@
   "plugins": [
     {
       "name": "kanbantic-claude-plugin",
-      "version": "2.10.1",
+      "version": "2.11.0",
       "source": "./plugin",
-      "description": "Fix filePath ambiguity bug (KBT-B349): content removed from required when filePath is advertised."
+      "description": "KBT-E087 Agent-orchestratie & modelbeleid: /kanbantic-orchestrate sequencer skill (F436), launch-orchestrator script (F438), context-aware lane-skill gates for Cowork/no-repo (F447), and sync `model:` frontmatter for the new Subagent Model field (F437)."
     }
   ]
 }
