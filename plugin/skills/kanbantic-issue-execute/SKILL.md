@@ -76,10 +76,27 @@ Before starting, verify you have local access to the workspace's code repository
 - If the repo is already cloned, run `git pull` to get the latest code. Branch creation happens in Step 2.
 </IMPORTANT>
 
-## Step 0.5: Worktree HARD-GATE
+## Step 0.5: Worktree HARD-GATE (context-aware)
 
 <HARD-GATE>
-Before any status-mutating or code-changing step, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; working in the main tree on a feature branch risks conflicts with other concurrent agents or manual commits.
+This gate is **context-aware** per the decision rule `shouldEnforceWorktreeGate({ hasGitRepo, touchesFilesystem })` in `plugin/scripts/gate-context.js` (KBT-F447). Evaluate it first:
+
+- **No git repository in this environment** (`hasGitRepo: false` — Cowork/desktop, MCP-only run, no repository configured per Step 0) → **skip the gate**. There is no main-tree/worktree distinction to protect.
+- **In a git repo but this run is MCP-only** (`touchesFilesystem: false` — the issue requires no code reads/writes, only Kanbantic-artifact work via MCP) → **skip the gate**.
+- **In a git repo AND the run touches the filesystem/code** (`hasGitRepo: true && touchesFilesystem: true`) → **enforce the gate** (below).
+
+When you **skip** the gate, log it as a Comment discussion-entry — a mirror of the existing `KANBANTIC_SKIP_GIT_SYNC` opt-out pattern (KBT-F238):
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(issueId, entryType: "Comment",
+  content: "Worktree HARD-GATE skipped: <no git repository in this environment | MCP-only run, no filesystem/code work>. Decision per shouldEnforceWorktreeGate (gate-context.js, KBT-F447). Mirrors the KANBANTIC_SKIP_GIT_SYNC opt-out.")
+```
+
+<CRITICAL>
+Execute almost always writes code. **Whenever this run touches the filesystem/code in a repo, the gate stays fully enforced — no opt-out, no override (KBT-BD155 scope boundary).** The relaxation above applies *only* to the no-repo / MCP-only paths; it must never weaken the code-in-a-repo path. The strict worktree gate is the load-bearing parallel-agent-safety guarantee (KBT-TRUL004): two agents committing on the same main working tree corrupt each other's branches. If in doubt, treat the run as code-touching and enforce.
+</CRITICAL>
+
+When the gate is **enforced**, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; working in the main tree on a feature branch risks conflicts with other concurrent agents or manual commits.
 
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
@@ -94,9 +111,9 @@ fi
 
 `<ISSUE-CODE>` is the code of the issue this skill is processing (e.g. `KBT-F123`).
 
-**No opt-out, no override.** This is a working-tree safety check, not a readiness-artifact check. Working in the main tree is wrong even if the specific bullet reasons don't apply right now — parallel agents are the norm, not the exception.
+**No opt-out, no override on the enforced path.** This is a working-tree safety check, not a readiness-artifact check. Working in the main tree is wrong even if the specific bullet reasons don't apply right now — parallel agents are the norm, not the exception.
 
-If the check passes (paths differ → you are in a worktree), continue silently.
+If the gate is enforced and the check passes (paths differ → you are in a worktree), continue silently.
 </HARD-GATE>
 
 ## Step 0.6: Sync check — base must not be stale vs origin (KBT-F238 / KBT-SR302)

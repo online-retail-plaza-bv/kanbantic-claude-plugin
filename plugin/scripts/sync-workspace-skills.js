@@ -160,10 +160,15 @@ function renderFile(item) {
   const escDesc = description.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const source = item.code || item.sourceCode || '';
   const sourceLine = source ? `source: "${source}"\n` : '';
+  // KBT-F437: emit a `model:` frontmatter line when the toolkit item carries a
+  // model preference. Alias = lowercase of the enum name (Opus→opus, etc.).
+  // MCP `ListToolkitItems` may surface the field as either `model` or `Model`.
+  const model = item.model || item.Model || '';
+  const modelLine = model ? `model: ${String(model).toLowerCase()}\n` : '';
   const body = (item.content || '').replace(/\r\n/g, '\n');
   // Ensure exactly one trailing newline.
   const trimmed = body.endsWith('\n') ? body : body + '\n';
-  return `---\ndescription: "${escDesc}"\n${sourceLine}---\n\n${trimmed}`;
+  return `---\ndescription: "${escDesc}"\n${sourceLine}${modelLine}---\n\n${trimmed}`;
 }
 
 /**
@@ -211,6 +216,9 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
       sourceCode: item.code || '',
       title: item.title || '',
       content: item.content || '',
+      // KBT-F437: carry the model preference so renderFile can emit a `model:`
+      // frontmatter line. MCP may surface it as `model` or `Model`.
+      model: item.model || item.Model || '',
       targetPath: target,
     };
     slugged.push(entry);
@@ -243,7 +251,9 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
     seenSlugs.add(entry.slug);
     const body = renderFile(entry);
     const newTargetHash = sha256(body);
-    const newSourceHash = sha256(entry.content);
+    // KBT-F437: fold the model into the source-hash so a model-only change
+    // (same content, different model) registers as an UPDATE, not UNCHANGED.
+    const newSourceHash = sha256(entry.content + ' ' + (entry.model || ''));
     const prev = prevByEntrySlug.get(entry.slug);
     const onDisk = diskHashes[entry.targetPath];
 

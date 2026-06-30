@@ -111,6 +111,80 @@ test('renderFile: emits frontmatter with description and source', () => {
 });
 
 // ---------------------------------------------------------------------------
+// KBT-F437 — model frontmatter + model-aware drift hash
+// ---------------------------------------------------------------------------
+
+test('KBT-F437: Subagent item with model:"Opus" renders a `model: opus` frontmatter line', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Subagent', title: 'Opus Specialist', content: 'Opus body.\n', code: 'KBT-SAGN701', model: 'Opus' }),
+    ];
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const agnFile = readFileOrNull(path.join(root, '.claude/agents/opus-specialist.md'));
+    assert.ok(agnFile, '.claude/agents/opus-specialist.md must exist');
+    assert.match(agnFile, /\nmodel: opus\n/);
+    // The model line sits after the source line, before the closing delimiter.
+    assert.match(agnFile, /\nsource: "KBT-SAGN701"\nmodel: opus\n---\n/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-F437: renderFile accepts the MCP `Model` field casing too', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Sonnet Specialist', content: 'x\n', code: 'KBT-SAGN702', Model: 'Sonnet' }));
+  assert.match(body, /\nmodel: sonnet\n/);
+});
+
+test('KBT-F437: item without a model produces NO model frontmatter line', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Subagent', title: 'Plain Specialist', content: 'Plain body.\n', code: 'KBT-SAGN703' }),
+    ];
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const agnFile = readFileOrNull(path.join(root, '.claude/agents/plain-specialist.md'));
+    assert.ok(agnFile);
+    assert.doesNotMatch(agnFile, /\nmodel:/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-F437: a model-only change yields an `update` op (not `unchanged`)', () => {
+  const v1 = item({ category: 'Subagent', title: 'Drift Specialist', content: 'Same body.\n', code: 'KBT-SAGN704' });
+  // First plan from a fresh manifest → create.
+  const first = sync.buildPlan({
+    items: [v1], prevManifest: null, diskHashes: {}, options: {},
+  });
+  const created = first.plan.find(p => p.slug === 'drift-specialist');
+  assert.ok(created);
+  assert.equal(created.op, 'create');
+
+  // Simulate the manifest + disk after that create.
+  const prevManifest = {
+    version: 1, workspace: 'kanbantic', lastSyncedAt: FIXED_NOW,
+    items: [{
+      slug: created.slug, category: created.category,
+      sourceId: created.sourceId, sourceCode: created.sourceCode,
+      sourceHash: created.sourceHash, targetPath: created.targetPath,
+      targetHash: created.targetHash, syncedAt: FIXED_NOW,
+    }],
+  };
+  const diskHashes = { [created.targetPath]: created.targetHash };
+
+  // Same content, but now a model is set → must be an UPDATE.
+  const v2 = Object.assign({}, v1, { model: 'Opus' });
+  const second = sync.buildPlan({
+    items: [v2], prevManifest, diskHashes, options: {},
+  });
+  const step = second.plan.find(p => p.slug === 'drift-specialist');
+  assert.ok(step);
+  assert.equal(step.op, 'update', `expected update on model-only change, got ${step.op}`);
+  assert.notEqual(step.sourceHash, created.sourceHash);
+});
+
+// ---------------------------------------------------------------------------
 // KBT-TC1933 — fresh-repo sync writes one file per active item
 // ---------------------------------------------------------------------------
 

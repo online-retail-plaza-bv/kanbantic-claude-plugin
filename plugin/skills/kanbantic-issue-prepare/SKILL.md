@@ -62,7 +62,8 @@ Before starting, verify you have local access to the workspace's code repository
 
 1. Run `git remote -v` to check if you're in a git repository
 2. If already in the correct repository, skip to Step 1
-3. If no repository or wrong repository:
+3. **No git repo at all (Cowork/desktop, MCP-only run):** prepare reads the codebase only for context and never writes code. When there is no git repository in this environment, **skip the clone entirely** and proceed with MCP-only artifact work (specs, test cases, decisions). This is the context-aware path of the decision rule `shouldEnforceWorktreeGate` in `plugin/scripts/gate-context.js` (`hasGitRepo: false` → gate not enforced). Record the skip as a Comment discussion-entry (see Step 0.5), mirroring the `KANBANTIC_SKIP_GIT_SYNC` opt-out pattern.
+4. If no repository or wrong repository (and a repo IS available to clone):
    ```
    MCP: mcp__kanbantic__list_repositories(workspaceId)
    ```
@@ -90,10 +91,23 @@ Before starting, verify you have local access to the workspace's code repository
 Prepare does not create branches or commits. It only reads the codebase for context and writes to Kanbantic via MCP.
 </IMPORTANT>
 
-## Step 0.5: Worktree HARD-GATE
+## Step 0.5: Worktree HARD-GATE (context-aware)
 
 <HARD-GATE>
-Before any status-mutating or artifact-creating step, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; prepare may write code instructions and temporary files — working in the main tree on a feature branch risks conflicts with other concurrent agents.
+This gate is **context-aware** per the decision rule `shouldEnforceWorktreeGate({ hasGitRepo, touchesFilesystem })` in `plugin/scripts/gate-context.js` (KBT-F447). Evaluate it first:
+
+- **No git repository in this environment** (`hasGitRepo: false` — Cowork/desktop, MCP-only run) → **skip the gate**. There is no main-tree/worktree distinction to protect.
+- **In a git repo but this is an MCP-only run** (`touchesFilesystem: false` — prepare only reads the codebase and writes Kanbantic artifacts via MCP, no branches/commits/temp files) → **skip the gate**.
+- **In a git repo and the run touches the filesystem/code** (`hasGitRepo: true && touchesFilesystem: true`) → **enforce the gate** (below).
+
+When you **skip** the gate, log it as a Comment discussion-entry — a mirror of the existing `KANBANTIC_SKIP_GIT_SYNC` opt-out pattern (KBT-F238):
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(issueId, entryType: "Comment",
+  content: "Worktree HARD-GATE skipped: <no git repository in this environment | MCP-only run, no filesystem/code work>. Decision per shouldEnforceWorktreeGate (gate-context.js, KBT-F447). Mirrors the KANBANTIC_SKIP_GIT_SYNC opt-out.")
+```
+
+When the gate is **enforced**, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; prepare may write code instructions and temporary files — working in the main tree on a feature branch risks conflicts with other concurrent agents.
 
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
@@ -108,9 +122,9 @@ fi
 
 `<ISSUE-CODE>` is the code of the issue this skill is processing (e.g. `KBT-F123`).
 
-**No opt-out, no override.** This is a working-tree safety check, not a readiness-artifact check. Working in the main tree is wrong even if the specific bullet reasons don't apply right now — parallel agents are the norm, not the exception.
+**No opt-out, no override on the enforced path.** Once the gate applies (real code work in a repo), it is a working-tree safety check, not a readiness-artifact check. Working in the main tree is wrong even if the specific bullet reasons don't apply right now — parallel agents are the norm, not the exception. The skip is permitted **only** for the no-repo / MCP-only paths above; it never weakens the code-in-a-repo path.
 
-If the check passes (paths differ → you are in a worktree), continue silently.
+If the gate is enforced and the check passes (paths differ → you are in a worktree), continue silently.
 </HARD-GATE>
 
 ## Step 1: Gate-check — Triaged

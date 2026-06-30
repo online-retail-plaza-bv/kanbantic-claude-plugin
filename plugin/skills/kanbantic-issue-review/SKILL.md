@@ -72,10 +72,27 @@ Before starting, verify you have local access to the workspace's code repository
 - If the repo is already cloned, ensure you're on the branch being reviewed before proceeding.
 </IMPORTANT>
 
-## Step 0.5: Worktree HARD-GATE
+## Step 0.5: Worktree HARD-GATE (context-aware)
 
 <HARD-GATE>
-Before any status-mutating, merge, or push step, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; review performs `git merge --no-ff` and `git push origin main` — working in the main tree here risks overwriting concurrent changes or pushing unrelated state.
+This gate is **context-aware** per the decision rule `shouldEnforceWorktreeGate({ hasGitRepo, touchesFilesystem })` in `plugin/scripts/gate-context.js` (KBT-F447). Evaluate it first:
+
+- **No git repository in this environment** (`hasGitRepo: false` — Cowork/desktop, MCP-only run, or no repository configured per Step 0) → **skip the gate**. The review still runs against the spec + diff artifacts in Kanbantic; merge/push simply cannot and will not execute (warn the user, skip Step 7–8). There is no main-tree/worktree distinction to protect.
+- **In a git repo but this run is MCP-only** (`touchesFilesystem: false` — an artifact-only review with no merge/push) → **skip the gate**.
+- **In a git repo AND the run touches the filesystem/code** (`hasGitRepo: true && touchesFilesystem: true` — i.e. the review will `git merge --no-ff` / `git push origin main`) → **enforce the gate** (below).
+
+When you **skip** the gate, log it as a Comment discussion-entry — a mirror of the existing `KANBANTIC_SKIP_GIT_SYNC` opt-out pattern (KBT-F238):
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(issueId, entryType: "Comment",
+  content: "Worktree HARD-GATE skipped: <no git repository in this environment | MCP-only review, no merge/push>. Decision per shouldEnforceWorktreeGate (gate-context.js, KBT-F447). Mirrors the KANBANTIC_SKIP_GIT_SYNC opt-out.")
+```
+
+<CRITICAL>
+The merge/push path is real code work in a repo. **Whenever a merge or push will run, the gate stays fully enforced — no opt-out, no override (KBT-BD155 scope boundary).** The relaxation above applies *only* to the no-repo / MCP-only-review paths; it must never weaken the merge-in-a-repo path (parallel-agent safety, KBT-TRUL004). If in doubt about whether a merge will run, enforce.
+</CRITICAL>
+
+When the gate is **enforced**, verify you are **not** in the main working tree. Agents often run in parallel on the same clone; review performs `git merge --no-ff` and `git push origin main` — working in the main tree here risks overwriting concurrent changes or pushing unrelated state.
 
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
@@ -90,9 +107,9 @@ fi
 
 `<ISSUE-CODE>` is the code of the issue this skill is reviewing (e.g. `KBT-F123`).
 
-**No opt-out, no override.** This is a working-tree safety check, not a readiness-artifact check. The merge step specifically re-enters the main branch to integrate; doing that from a worktree keeps the main clone untouched by the reviewer's local state.
+**No opt-out, no override on the enforced path.** This is a working-tree safety check, not a readiness-artifact check. The merge step specifically re-enters the main branch to integrate; doing that from a worktree keeps the main clone untouched by the reviewer's local state.
 
-If the check passes (paths differ → you are in a worktree), continue silently.
+If the gate is enforced and the check passes (paths differ → you are in a worktree), continue silently.
 </HARD-GATE>
 
 ## Step 1: Load Context
