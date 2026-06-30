@@ -10,9 +10,9 @@
   "plugins": [
     {
       "name": "kanbantic-claude-plugin",
-      "version": "2.3.0",
+      "version": "2.10.0",
       "source": "./plugin",
-      "description": "Issue lifecycle skills: intake (report / request / propose), triage, prepare, execute, review — all artifacts via Kanbantic MCP. v2.3.0 adds the InDeployment lane status (KBT-F236) between Review and Done."
+      "description": "Issue lifecycle skills: intake (report / request / propose), triage, prepare, execute, review — all artifacts via Kanbantic MCP. v2.10.0 completes the version-aware track (KBT-E066 / F318-F320): release→Version rename, known-mcp-tools.json synced to the live registry (12 Version-flow tools in, 4 legacy release-tools out), lint Invariant 5 against stale release tokens, and two zero-dep hooks (locked-version-blocker on claim_issue + Stop version-summary). First Application self-released through the new Version-flow."
     }
   ]
 }
