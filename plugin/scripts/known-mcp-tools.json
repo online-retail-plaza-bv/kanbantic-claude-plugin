@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-06-30",
-  "source": "live registry via get_mcp_tool_registry (KBT-F320 sync): release-concept tools (create_release/list_releases/update_release/get_release_notes) removed after the F10 release→version rename; 12 Version-flow tools added. Proxy is transparent per KBT-B200, so this IS the live registry as observed by the plugin.",
-  "regenerationCommand": "Run `mcp__plugin_kanbantic-claude-plugin_kanbantic__get_mcp_tool_registry` and extract the tool names, OR copy the `mcp__plugin_kanbantic-claude-plugin_kanbantic__*` deferred-tool list and strip the prefix. Update `generatedAt` and `source`. Commit the new snapshot whenever the bundle drifts.",
+  "source": "Curated subset of the live registry via get_mcp_tool_registry (KBT-F320 sync): the 12 Version-flow tools are added. The 4 legacy release-concept tools (create_release/list_releases/update_release/get_release_notes) are still LIVE but DEPRECATED post the F10 release→version rename, and are INTENTIONALLY EXCLUDED here (known-mcp-tools.test.js asserts their absence). So this snapshot is a curated subset, not a raw mirror of the live registry.",
+  "regenerationCommand": "Run `mcp__plugin_kanbantic-claude-plugin_kanbantic__get_mcp_tool_registry` (or copy the `mcp__plugin_kanbantic-claude-plugin_kanbantic__*` deferred-tool list and strip the prefix), THEN apply the curation step: remove the 4 deprecated release-concept tools (create_release/list_releases/update_release/get_release_notes) — they remain live but must NOT be re-added or known-mcp-tools.test.js breaks. Update `generatedAt` and `source`. Commit whenever the bundle drifts.",
   "tools": [
     "acknowledge_finding",
     "add_discussion_entry",
