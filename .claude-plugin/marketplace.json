@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "kanbantic-claude-plugin",
-      "version": "2.13.0",
+      "version": "2.14.0",
       "source": "./plugin",
       "description": "v2.13.0 (KBT-F470) completes app-scoped Version-CRUD on the plugin surface: adds /kanbantic-version-create (non-destructive wrapper around the app-scoped create_version) and /kanbantic-version-delete (mutating-confirm wrapper around the new delete_version tool, warning that delete cascades to the Version's associated issues — KBT-BD158), and re-syncs known-mcp-tools.json to add delete_version (4 legacy release-tools still excluded). v2.12.0 completes the version-aware track (KBT-E066 / F318-F320): release→Version rename across the lane-skills, known-mcp-tools.json curated to the live Version tools (12 in, 4 legacy release-tools out), lint Invariant 5 against stale release tokens, and two zero-dep hooks (locked-version-blocker on claim_issue + Stop version-summary). First Application self-released through the new Version-flow. KBT-E087 Agent-orchestratie & modelbeleid: /kanbantic-orchestrate sequencer skill (F436), launch-orchestrator script (F438), context-aware lane-skill gates for Cowork/no-repo (F447), and sync `model:` frontmatter for the new Subagent Model field (F437)."
     }

@@ -1,7 +1,7 @@
 {
   "name": "kanbantic-claude-plugin-tests",
   "private": true,
-  "version": "2.13.0",
+  "version": "2.14.0",
   "type": "commonjs",
   "description": "Test harness for the Kanbantic Claude Code Plugin proxy. Zero runtime deps — uses only Node built-ins (node:test). Not published. Plugin itself is shipped from plugin/.",
   "scripts": {
