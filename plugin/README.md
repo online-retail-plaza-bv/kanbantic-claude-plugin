@@ -155,6 +155,14 @@ Het patroon is **generiek**: de substitutie geldt voor elke `tools/call` met een
 
 > **Trust boundary.** `filePath` laat een tool-aanroep elk lokaal bestand lezen waartoe het proxy-proces toegang heeft, en stuurt de inhoud naar de Kanbantic-server. Dat is exact het doel (de proxy draait lokaal met filesystem-rechten), maar het betekent dat een foutieve of kwaadaardige tool-aanroep in principe gevoelige bestanden zou kunnen inlezen. Geef alleen `filePath`-waarden door die je bedoelt te uploaden. De proxy legt bewust géén pad-allowlist of groottelimiet op — dat blijft een verantwoordelijkheid van de aanroeper. (Vergelijk de server-side `AddIssueAttachment`, KBT-SR224, die wél een 25MB-cap hanteert omdat die de payload base64 in het protocol stopt; de proxy-substitutie heeft die overhead niet.)
 
+> **⚠️ Client-ondersteuning — `filePath` is proxy-only (KBT-B395).** `filePath` wordt **uitsluitend** geresolved door de gebundelde `kanbantic-mcp-proxy.js`, die lokaal met filesystem-toegang draait. Alleen clients die via die proxy verbinden krijgen deze feature:
+>
+> - ✅ **Claude Code** — altijd (de gebundelde `plugin/.mcp.json` bedraadt de proxy).
+> - ✅ **Claude Desktop (Windows App)** — alleen wanneer geconfigureerd met de gebundelde proxy volgens [Setup — Claude Desktop](#setup--claude-desktop-windows-app). De `mcp-remote`-variant resolvet `filePath` **niet** (dat is een generieke bridge, niet deze proxy).
+> - ❌ **Cowork / elke direct-connect** (`"type": "http"`, "Add Custom Connector") — die bereiken `https://kanbantic.com/mcp` **zonder** de lokale proxy, die geen toegang tot je schijf heeft. De server ontvangt `filePath` daardoor nooit, kan het niet honoreren, en `tools/list` adverteert het er ook niet. Dit is architectureel onvermijdelijk: een remote server kan geen lokaal bestand lezen.
+>
+> Sinds **KBT-B395** slaat een `content: ""` (of een `filePath` die de server nooit resolvet) **niet langer stilzwijgend een lege versie op** — de server weigert lege/whitespace-content met een duidelijke fout die naar deze beperking terugverwijst. Geef op een direct-connect client de `content` inline mee.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) **or** Claude Desktop (Windows App)
