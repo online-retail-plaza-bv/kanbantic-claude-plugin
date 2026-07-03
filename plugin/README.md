@@ -41,6 +41,21 @@ intake → New → triage → Triaged → prepare → Prepared → execute → I
 - The `kanbantic-issue-review` skill transitions to `InDeployment` after merge — the Done-transition is a separate operational step (deploy webhooks + smoke + manual `update_issue_status(status: "Done")`). Auto-transition via `GateEvaluationService` is deferred to KBT-INI032 Epic D.
 - Existing `Triaged-with-isReadyToClaim=true` and `Review-with-merged-branch` issues are migrated automatically by the backend `PreparedStatusBackfillSeeder` and `InDeploymentBackfillSeeder` on first post-deploy startup.
 
+## Specialist run skills (plugin v2.7.0+, KBT-F382)
+
+Four user-invocable skills run a Kanbantic specialist against a workspace / release / issue / application. They are **not** lane-skills — they drive a specialist run, not an issue transition.
+
+| Skill | Command | Specialist | Subagent |
+|-------|---------|-----------|----------|
+| `kanbantic-specialist-test-coverage` | `/specialist-test-coverage` | SPEC001 Test Coverage | `test-specialist` |
+| `kanbantic-specialist-documentation` | `/specialist-documentation` | SPEC002 Documentation | `documentation-specialist` |
+| `kanbantic-specialist-security` | `/specialist-security` | SPEC003 Security | `security-specialist` |
+| `kanbantic-specialist-project-manager` | `/specialist-project-manager` | SPEC004 Project Manager | `project-manager-specialist` |
+
+Each is a thin wrapper over one shared definition — `skills/specialist-run-shared/lifecycle-core.md` — which owns the full run lifecycle: resolve the enabled workspace specialist → `start_specialist_run` → delegate analysis to the matching subagent → `add_finding` per finding → deterministic health score → `complete_specialist_run` (status **New**) → handoff.
+
+**Safety:** the skills refuse to run a disabled specialist (KBT-RL101) and **never** auto-review or auto-convert findings (KBT-RL100) — the human review gate stays the only path from finding to issue. Health scores are computed, not estimated (KBT-SR419).
+
 ## Version history
 
 - **v2.4.0** — Phase-of-Features-of-Tasks Epic shape (KBT-F250): new-shape Epics group Features into Phases instead of Tasks; dual-mode auto-detection in execute; three review levels (Feature / Phase / Epic); three new MCP tools (`assign_feature_to_phase`, `assign_features_to_phase`, `list_features_by_phase`).
