@@ -264,6 +264,32 @@ function contentFieldFor(toolName) {
   return CONTENT_FIELD_BY_TOOL[toolName] || 'content';
 }
 
+// KBT-B398: the wireframe-content tools store raw HTML. Their filePath source must
+// never be a serialized MCP *response* that was saved to disk by mistake.
+const WIREFRAME_CONTENT_TOOLS = new Set(['add_wireframe_version', 'create_wireframe']);
+
+// KBT-B398: recognise a serialized get_wireframe / add_wireframe_version /
+// create_wireframe response that was saved to disk and then mistakenly re-used as an
+// upload source. The fingerprint is a JSON object whose `.version` is an object
+// carrying a string `content` (or `initialContent`) — a shape that raw wireframe
+// HTML (which starts with `<`, not `{`) can never take. Detecting it lets the proxy
+// refuse the upload loudly instead of silently double-wrapping the wireframe.
+function looksLikeSavedWireframeResponse(text) {
+  if (typeof text !== 'string') return false;
+  const trimmed = text.trimStart();
+  if (trimmed[0] !== '{') return false; // raw HTML never starts with '{'
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false; // not JSON → genuine content, leave it alone
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const version = parsed.version;
+  if (!version || typeof version !== 'object' || Array.isArray(version)) return false;
+  return typeof version.content === 'string' || typeof version.initialContent === 'string';
+}
+
 function resolveFilePathArgument(msg) {
   if (!msg || msg.method !== 'tools/call' || !msg.params) return {};
   const args = msg.params.arguments;
@@ -299,6 +325,27 @@ function resolveFilePathArgument(msg) {
         message:
           `Failed to read filePath '${filePath}' for tool '${toolName}': ` +
           `${e.code || e.name || 'Error'}: ${e.message}. The call was not forwarded.`,
+      },
+    };
+  }
+
+  // KBT-B398: guard against a silently double-wrapped upload. If the file for a
+  // wireframe-content tool is itself a serialized MCP response envelope
+  // ({"success":...,"version":{"content":...}}) rather than raw HTML, the caller
+  // almost certainly saved a get_wireframe / add_wireframe_version response to disk
+  // by mistake. Storing it verbatim buries the real HTML one level deep and the
+  // wireframe preview renders JSON. Refuse loudly — consistent with the ambiguity
+  // guard above ("refuse rather than silently pick"), never silently corrupt.
+  if (WIREFRAME_CONTENT_TOOLS.has(toolName) && looksLikeSavedWireframeResponse(fileContent)) {
+    return {
+      error: {
+        code: -32602,
+        message:
+          `The file at filePath '${filePath}' for tool '${toolName}' looks like a saved ` +
+          `Kanbantic API response ({"success":...,"version":{"content":...}}), not raw ` +
+          `wireframe HTML. Storing it would double-wrap the wireframe — the real HTML ends ` +
+          `up buried one level deep and the preview renders JSON. Upload the raw HTML ` +
+          `instead (the value of the response's .version.content field). The call was not forwarded.`,
       },
     };
   }

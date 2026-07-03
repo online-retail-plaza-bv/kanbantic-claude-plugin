@@ -489,3 +489,99 @@ test('KBT-B390 (e2e): tools/list augments create_wireframe with optional filePat
     teardown(p, stub);
   }
 });
+
+// ===========================================================================
+// KBT-B398 — double-wrap guard.
+//
+// A wireframe upload via filePath must never store a serialized MCP *response*
+// that was saved to disk by mistake ({"success":...,"version":{"content":...}}).
+// Storing it verbatim buries the real HTML one level deep and the preview renders
+// JSON. The proxy detects the response fingerprint and refuses (‑32602, not
+// forwarded) instead of silently corrupting the wireframe. Raw HTML — which starts
+// with `<`, not `{` — is never misdetected, and the guard is scoped to the
+// wireframe-content tools so other tools may still upload JSON via filePath.
+// ===========================================================================
+
+const SAVED_ENVELOPE = JSON.stringify({
+  success: true,
+  version: { versionNumber: 11, content: '<!DOCTYPE html>\n<html lang="nl"><body>real</body></html>' },
+});
+
+test('KBT-TC2937 (unit): add_wireframe_version filePath pointing at a saved API envelope → -32602, no mutation', () => {
+  const file = writeTempFile(SAVED_ENVELOPE);
+  try {
+    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } } };
+    const result = proxy.resolveFilePathArgument(msg);
+
+    assert.ok(result.error, 'returns an error rather than mutating');
+    assert.equal(result.error.code, -32602, 'invalid-params code');
+    assert.match(result.error.message, /saved/i, 'message flags a saved API response');
+    assert.match(result.error.message, /\.version\.content/, 'message points at the real HTML field');
+    assert.equal('content' in msg.params.arguments, false, 'content not filled from the envelope');
+    assert.equal(msg.params.arguments.filePath, file, 'filePath retained (call not forwarded)');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-TC2937 (unit): create_wireframe filePath pointing at a saved envelope → -32602 (initialContent not filled)', () => {
+  const file = writeTempFile(SAVED_ENVELOPE);
+  try {
+    const msg = { method: 'tools/call', params: { name: 'create_wireframe', arguments: { applicationId: 'app-1', name: 'x', filePath: file } } };
+    const result = proxy.resolveFilePathArgument(msg);
+
+    assert.ok(result.error, 'returns an error');
+    assert.equal(result.error.code, -32602);
+    assert.equal('initialContent' in msg.params.arguments, false, 'initialContent not filled from the envelope');
+    assert.equal(msg.params.arguments.filePath, file, 'filePath retained');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-TC2937 (unit): raw HTML containing JSON-like text still uploads (no false positive)', () => {
+  const html = '<!DOCTYPE html>\n<html><body><pre>{"success":true,"version":{"content":"x"}}</pre></body></html>';
+  const file = writeTempFile(html);
+  try {
+    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } } };
+    const result = proxy.resolveFilePathArgument(msg);
+    assert.deepEqual(result, { mutated: true }, 'raw HTML is not misdetected as an envelope');
+    assert.equal(msg.params.arguments.content, html, 'content holds the raw HTML');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-TC2937 (unit): envelope guard is scoped to wireframe tools — other tools may upload JSON via filePath', () => {
+  const file = writeTempFile(SAVED_ENVELOPE);
+  try {
+    const msg = { method: 'tools/call', params: { name: 'add_discussion_entry', arguments: { issueId: 'x', filePath: file } } };
+    const result = proxy.resolveFilePathArgument(msg);
+    assert.deepEqual(result, { mutated: true }, 'non-wireframe tool is not subject to the guard');
+    assert.equal(msg.params.arguments.content, SAVED_ENVELOPE, 'content forwarded verbatim for non-wireframe tools');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-TC2938 (integration): a saved-envelope filePath is rejected by the real proxy and NOT forwarded', async () => {
+  const stub = await startStubBackend();
+  const p = spawnProxy(stub.port);
+  const file = writeTempFile(SAVED_ENVELOPE);
+
+  try {
+    await initProxy(p);
+
+    const resp = await p.rpc('tools/call', { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } }, 2);
+    assert.ok(resp.error, 'proxy returns a JSON-RPC error');
+    assert.equal(resp.error.code, -32602);
+
+    // Give any (erroneous) forward time to land, then assert the backend saw nothing.
+    await new Promise((r) => setTimeout(r, 200));
+    const forwarded = stub.received.some((r) => r.method === 'tools/call');
+    assert.equal(forwarded, false, 'envelope upload was not forwarded to the backend');
+  } finally {
+    fs.unlinkSync(file);
+    teardown(p, stub);
+  }
+});
