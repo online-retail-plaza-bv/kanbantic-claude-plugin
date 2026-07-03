@@ -217,7 +217,7 @@ Before `claim_issue` (Step 2), verify the issue's Application has a **Planned** 
    // → { proposed, rationale, bumpLevel } — quote `proposed` as the recommended new Version
    ```
    > **Geen Planned Version voor Application `<X>`.** De claim is geblokkeerd (per F4 / KBT-RL145).
-   > Maak eerst een Planned Version aan — `preview_next_version` stelt **`<proposed>`** voor (`<bumpLevel>`: `<rationale>`). Gebruik `create_version` (of het `/kanbantic-version-...` command) en her-invoke deze skill.
+   > Maak eerst een Planned Version aan — `preview_next_version` stelt **`<proposed>`** voor (`<bumpLevel>`: `<rationale>`). Gebruik `create_version` (of het `/kanbantic-version-...` command) en her-invoke deze skill. `create_version` is **app-scoped**: geef de `applicationId` van het issue verplicht mee (PR #242); de nieuwe Version start in `Planned`.
 
    Add the block as a `Comment` discussion entry on the issue for the audit-trail, then exit cleanly.
 4. **A Planned Version exists** → continue to Step 2. `claim_issue` auto-assigns the issue to that Planned Version — no separate `update_issue(VersionId)` is needed.
