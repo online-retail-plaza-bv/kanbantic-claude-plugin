@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-03",
-  "source": "live tools/list from https://kanbantic.com/mcp (regenerated via check-bundle-tool-drift transport). Adds the KBT-E094 parent/child bundling tools (bundle_issue, unbundle_issue, bundle_issues_into_epic, get_epic_children); curates out the 4 legacy release-tools and stale non-existent names per known-mcp-tools.test.js.",
+  "generatedAt": "2026-07-07",
+  "source": "live tools/list from https://kanbantic.com/mcp (regenerated via check-bundle-tool-drift transport). Adds add_wireframe_version_files (KBT-F487 — multi-file wireframe fileset in one MCP call). Also carries the KBT-E094 parent/child bundling tools (bundle_issue, unbundle_issue, bundle_issues_into_epic, get_epic_children); curates out the 4 legacy release-tools and stale non-existent names per known-mcp-tools.test.js.",
   "regenerationCommand": "Run `mcp__plugin_kanbantic-claude-plugin_kanbantic__get_mcp_tool_registry` (or copy the `mcp__plugin_kanbantic-claude-plugin_kanbantic__*` deferred-tool list and strip the prefix), THEN apply the curation step: remove the 4 deprecated release-concept tools (create_release/list_releases/update_release/get_release_notes) — they remain live but must NOT be re-added or known-mcp-tools.test.js breaks. Update `generatedAt` and `source`. Commit whenever the bundle drifts.",
   "tools": [
     "acknowledge_finding",
@@ -10,6 +10,7 @@
     "add_issue_attachment",
     "add_task",
     "add_wireframe_version",
+    "add_wireframe_version_files",
     "app_version_at_date",
     "approve_phase",
     "approve_review",
