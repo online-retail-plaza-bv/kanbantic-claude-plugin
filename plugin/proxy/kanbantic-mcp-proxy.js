@@ -296,6 +296,98 @@ function looksLikeSavedWireframeResponse(text) {
   return typeof version.content === 'string' || typeof version.initialContent === 'string';
 }
 
+// ---------------------------------------------------------------------------
+// KBT-B411 — confine the local filePath read channel.
+//
+// resolveFilePathArgument reads filePath from disk and forwards the bytes to the
+// remote server through a channel deliberately kept OUT of the model transcript
+// (KBT-F464). A prompt-injected filePath could therefore point at a secret
+// (~/.ssh/id_rsa, .env) and exfiltrate it invisibly. Before reading we now:
+//   - canonicalize with realpathSync (defeats symlink escape),
+//   - reject anything but a regular file and cap the size,
+//   - refuse known secret/credential files (denylist), and
+//   - audit every read to stderr so the channel is never silent.
+// ---------------------------------------------------------------------------
+const MAX_FILEPATH_BYTES = 25 * 1024 * 1024; // 25 MiB — generous vs. real wireframe filesets
+
+// Sensitive directory anywhere in the path (e.g. ~/.ssh/id_rsa, ~/.aws/credentials).
+const SECRET_PATH_SEGMENTS = new Set(['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker']);
+// Exact credential filenames.
+const SECRET_BASENAMES = new Set([
+  '.env', '.npmrc', '.netrc', '.pgpass', '.git-credentials', '.credentials.json',
+  '.claude.json', 'credentials', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+]);
+// Key / certificate extensions.
+const SECRET_EXTENSIONS = new Set(['.pem', '.key', '.pfx', '.p12', '.keystore', '.ppk']);
+
+// Returns a human reason string if the canonical path looks like a secret, else null.
+function secretFileReason(canonicalPath) {
+  const norm = canonicalPath.replace(/\\/g, '/').toLowerCase();
+  const segments = norm.split('/').filter(Boolean);
+  const base = segments[segments.length - 1] || '';
+
+  for (const seg of segments) {
+    if (SECRET_PATH_SEGMENTS.has(seg)) return `path traverses a sensitive directory ('${seg}')`;
+  }
+  if (SECRET_BASENAMES.has(base)) return `filename '${base}' is a known credential file`;
+  if (base === '.env' || base.startsWith('.env.')) return `filename '${base}' is a dotenv secret file`;
+  const dot = base.lastIndexOf('.');
+  const ext = dot >= 0 ? base.slice(dot) : '';
+  if (SECRET_EXTENSIONS.has(ext)) return `extension '${ext}' is a private key / certificate file`;
+  return null;
+}
+
+// Screens a filePath before it is read. Returns { path, bytes } on success or
+// { error: {code,message} } (JSON-RPC error) on refusal — never throws.
+function screenFilePathRead(filePath, toolName) {
+  const readFail = (verb, e) => ({
+    error: {
+      code: -32603,
+      message:
+        `Failed to ${verb} filePath '${filePath}' for tool '${toolName}': ` +
+        `${e.code || e.name || 'Error'}: ${e.message}. The call was not forwarded.`,
+    },
+  });
+
+  let canonical;
+  try {
+    canonical = fs.realpathSync(filePath); // resolve symlinks + relative segments
+  } catch (e) {
+    return readFail('read', e);
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(canonical);
+  } catch (e) {
+    return readFail('stat', e);
+  }
+
+  if (!stat.isFile()) {
+    return { error: { code: -32602, message:
+      `filePath '${filePath}' for tool '${toolName}' is not a regular file. The call was not forwarded.` } };
+  }
+  if (stat.size > MAX_FILEPATH_BYTES) {
+    return { error: { code: -32602, message:
+      `filePath '${filePath}' for tool '${toolName}' is ${stat.size} bytes, over the ` +
+      `${MAX_FILEPATH_BYTES}-byte limit. The call was not forwarded.` } };
+  }
+
+  const secret = secretFileReason(canonical);
+  if (secret) {
+    return { error: { code: -32602, message:
+      `Refused to read filePath '${filePath}' for tool '${toolName}': ${secret}. The proxy will ` +
+      `not upload secret/credential files. The call was not forwarded.` } };
+  }
+
+  // KBT-B411 audit: this read channel is intentionally invisible to the transcript,
+  // so surface it on stderr (operator log) — the channel is never silent.
+  process.stderr.write(
+    `[kanbantic-mcp-proxy] filePath read for '${toolName}': ${canonical} (${stat.size} bytes)\n`);
+
+  return { path: canonical, bytes: stat.size };
+}
+
 function resolveFilePathArgument(msg) {
   if (!msg || msg.method !== 'tools/call' || !msg.params) return {};
   const args = msg.params.arguments;
@@ -321,9 +413,14 @@ function resolveFilePathArgument(msg) {
     };
   }
 
+  // KBT-B411 — screen the path before reading: canonicalize, cap size, refuse
+  // secret/credential files, and audit to stderr.
+  const screen = screenFilePathRead(filePath, toolName);
+  if (screen.error) return { error: screen.error };
+
   let fileContent;
   try {
-    fileContent = fs.readFileSync(filePath, 'utf8');
+    fileContent = fs.readFileSync(screen.path, 'utf8');
   } catch (e) {
     return {
       error: {
@@ -773,4 +870,8 @@ module.exports = {
   resolveFilePathArgument,
   augmentToolsListResponse,
   parseToolResult,
+  // KBT-B411 — exported for unit testing the filePath read confinement.
+  screenFilePathRead,
+  secretFileReason,
+  MAX_FILEPATH_BYTES,
 };
