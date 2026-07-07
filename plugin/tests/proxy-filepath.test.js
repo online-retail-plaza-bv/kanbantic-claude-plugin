@@ -151,6 +151,57 @@ test('augmentToolsListResponse: content-bearing tool gains optional filePath; ot
   assert.equal(/filePath/.test(withoutContent.description), false, 'description of non-content tool untouched');
 });
 
+// ---- KBT-B417: filePath offload must cover add_wireframe_version_files (`filesJson`) ----
+
+test('KBT-B417 (unit): filePath on add_wireframe_version_files → file read into filesJson, filePath removed', () => {
+  const filesJson = JSON.stringify([
+    { path: 'index.html', content: '<html><link href="style.css"></html>' },
+    { path: 'style.css', content: 'body{margin:0}' },
+  ]);
+  const file = writeTempFile(filesJson);
+  try {
+    const msg = {
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'add_wireframe_version_files', arguments: { wireframeId: 'wf-1', filePath: file, changesSummary: 'big fileset' } },
+    };
+    const result = proxy.resolveFilePathArgument(msg);
+    assert.deepEqual(result, { mutated: true }, 'reports a mutation');
+    assert.equal(msg.params.arguments.filesJson, filesJson, 'filesJson holds the file contents');
+    assert.equal('filePath' in msg.params.arguments, false, 'filePath is removed');
+    assert.equal(msg.params.arguments.wireframeId, 'wf-1', 'other args preserved');
+    assert.equal(msg.params.arguments.changesSummary, 'big fileset', 'other args preserved');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-B417 (unit): filePath + inline filesJson both present → ambiguity error naming filesJson', () => {
+  const file = writeTempFile('[{"path":"index.html","content":"x"}]');
+  try {
+    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version_files', arguments: { wireframeId: 'x', filePath: file, filesJson: '[{"path":"a.html","content":"y"}]' } } };
+    const result = proxy.resolveFilePathArgument(msg);
+    assert.ok(result.error, 'returns an error');
+    assert.equal(result.error.code, -32602, 'invalid-params code');
+    assert.match(result.error.message, /filesJson/, 'message names the filesJson field');
+    assert.equal(msg.params.arguments.filePath, file, 'filePath untouched (not forwarded)');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('KBT-B417 (unit): augmentToolsListResponse advertises filePath on add_wireframe_version_files (filesJson)', () => {
+  const response = { result: { tools: [
+    { name: 'add_wireframe_version_files', description: 'Add a fileset version.', inputSchema: { type: 'object', properties: { wireframeId: { type: 'string' }, filesJson: { type: 'string' } }, required: ['wireframeId', 'filesJson'] } },
+  ] } };
+  proxy.augmentToolsListResponse(response);
+  const t = response.result.tools[0];
+  assert.ok(t.inputSchema.properties.filePath, 'filePath advertised');
+  assert.equal(t.inputSchema.properties.filePath.type, 'string', 'filePath is a string');
+  assert.equal(t.inputSchema.required.includes('filesJson'), false, 'filesJson removed from required');
+  assert.equal(t.inputSchema.required.includes('filePath'), false, 'filePath is NOT required');
+  assert.match(t.description, /filePath/, 'description mentions filePath');
+});
+
 test('augmentToolsListResponse: idempotent + tolerant of malformed responses', () => {
   // Idempotent: pre-existing filePath property is not clobbered.
   const custom = { type: 'string', description: 'custom' };

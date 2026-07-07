@@ -258,6 +258,12 @@ function postProcess(request, response) {
 // every other tool defaults to `content`.
 const CONTENT_FIELD_BY_TOOL = {
   create_wireframe: 'initialContent',
+  // KBT-B417: the multi-file fileset tool carries its whole payload in `filesJson`
+  // (a JSON-array string), not `content`. Mapping it here lets the same filePath
+  // offload keep large filesets OUT of the MCP tools/call message — the exact
+  // client-side message-size cap (~60-90KB) that KBT-F464 solved for `content`.
+  // The file at filePath must contain the filesJson value (the JSON array text).
+  add_wireframe_version_files: 'filesJson',
 };
 
 function contentFieldFor(toolName) {
