@@ -41,6 +41,21 @@ intake → New → triage → Triaged → prepare → Prepared → execute → I
 - The `kanbantic-issue-review` skill transitions to `InDeployment` after merge — the Done-transition is a separate operational step (deploy webhooks + smoke + manual `update_issue_status(status: "Done")`). Auto-transition via `GateEvaluationService` is deferred to KBT-INI032 Epic D.
 - Existing `Triaged-with-isReadyToClaim=true` and `Review-with-merged-branch` issues are migrated automatically by the backend `PreparedStatusBackfillSeeder` and `InDeploymentBackfillSeeder` on first post-deploy startup.
 
+## Specialist run skills (plugin v2.7.0+, KBT-F382)
+
+Four user-invocable skills run a Kanbantic specialist against a workspace / release / issue / application. They are **not** lane-skills — they drive a specialist run, not an issue transition.
+
+| Skill | Command | Specialist | Subagent |
+|-------|---------|-----------|----------|
+| `kanbantic-specialist-test-coverage` | `/specialist-test-coverage` | SPEC001 Test Coverage | `test-specialist` |
+| `kanbantic-specialist-documentation` | `/specialist-documentation` | SPEC002 Documentation | `documentation-specialist` |
+| `kanbantic-specialist-security` | `/specialist-security` | SPEC003 Security | `security-specialist` |
+| `kanbantic-specialist-project-manager` | `/specialist-project-manager` | SPEC004 Project Manager | `project-manager-specialist` |
+
+Each is a thin wrapper over one shared definition — `skills/specialist-run-shared/lifecycle-core.md` — which owns the full run lifecycle: resolve the enabled workspace specialist → `start_specialist_run` → delegate analysis to the matching subagent → `add_finding` per finding → deterministic health score → `complete_specialist_run` (status **New**) → handoff.
+
+**Safety:** the skills refuse to run a disabled specialist (KBT-RL101) and **never** auto-review or auto-convert findings (KBT-RL100) — the human review gate stays the only path from finding to issue. Health scores are computed, not estimated (KBT-SR419).
+
 ## Version history
 
 - **v2.4.0** — Phase-of-Features-of-Tasks Epic shape (KBT-F250): new-shape Epics group Features into Phases instead of Tasks; dual-mode auto-detection in execute; three review levels (Feature / Phase / Epic); three new MCP tools (`assign_feature_to_phase`, `assign_features_to_phase`, `list_features_by_phase`).
@@ -154,6 +169,14 @@ Gedrag (afgedwongen in `proxy/kanbantic-mcp-proxy.js`):
 Het patroon is **generiek**: de substitutie geldt voor elke `tools/call` met een `filePath`-argument, niet alleen `add_wireframe_version`. De proxy verrijkt bovendien de `tools/list`-respons zodat `filePath` als optionele parameter (met beschrijving) verschijnt op elke tool die een `content`-property heeft — `filePath` wordt nooit aan `required` toegevoegd. Geen extra dependencies; alleen Node built-ins.
 
 > **Trust boundary.** `filePath` laat een tool-aanroep elk lokaal bestand lezen waartoe het proxy-proces toegang heeft, en stuurt de inhoud naar de Kanbantic-server. Dat is exact het doel (de proxy draait lokaal met filesystem-rechten), maar het betekent dat een foutieve of kwaadaardige tool-aanroep in principe gevoelige bestanden zou kunnen inlezen. Geef alleen `filePath`-waarden door die je bedoelt te uploaden. De proxy legt bewust géén pad-allowlist of groottelimiet op — dat blijft een verantwoordelijkheid van de aanroeper. (Vergelijk de server-side `AddIssueAttachment`, KBT-SR224, die wél een 25MB-cap hanteert omdat die de payload base64 in het protocol stopt; de proxy-substitutie heeft die overhead niet.)
+
+> **⚠️ Client-ondersteuning — `filePath` is proxy-only (KBT-B395).** `filePath` wordt **uitsluitend** geresolved door de gebundelde `kanbantic-mcp-proxy.js`, die lokaal met filesystem-toegang draait. Alleen clients die via die proxy verbinden krijgen deze feature:
+>
+> - ✅ **Claude Code** — altijd (de gebundelde `plugin/.mcp.json` bedraadt de proxy).
+> - ✅ **Claude Desktop (Windows App)** — alleen wanneer geconfigureerd met de gebundelde proxy volgens [Setup — Claude Desktop](#setup--claude-desktop-windows-app). De `mcp-remote`-variant resolvet `filePath` **niet** (dat is een generieke bridge, niet deze proxy).
+> - ❌ **Cowork / elke direct-connect** (`"type": "http"`, "Add Custom Connector") — die bereiken `https://kanbantic.com/mcp` **zonder** de lokale proxy, die geen toegang tot je schijf heeft. De server ontvangt `filePath` daardoor nooit, kan het niet honoreren, en `tools/list` adverteert het er ook niet. Dit is architectureel onvermijdelijk: een remote server kan geen lokaal bestand lezen.
+>
+> Sinds **KBT-B395** slaat een `content: ""` (of een `filePath` die de server nooit resolvet) **niet langer stilzwijgend een lege versie op** — de server weigert lege/whitespace-content met een duidelijke fout die naar deze beperking terugverwijst. Geef op een direct-connect client de `content` inline mee.
 
 ## Requirements
 

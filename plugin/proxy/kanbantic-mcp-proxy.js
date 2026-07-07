@@ -224,8 +224,8 @@ function postProcess(request, response) {
     agentChannelId = null;
   }
 
-  // 4. KBT-F464: advertise `filePath` as an optional alternative to `content`
-  //    on every content-bearing tool in the tools/list response.
+  // 4. KBT-F464: advertise `filePath` as an optional alternative to each tool's
+  //    inline content field on every content-bearing tool in the tools/list response.
   if (request.method === 'tools/list' && response.result) {
     augmentToolsListResponse(response);
   }
@@ -250,6 +250,46 @@ function postProcess(request, response) {
 //   { error: {code,message} } — respond with this JSON-RPC error, do not forward
 // ---------------------------------------------------------------------------
 
+// Most content-bearing tools carry their large payload in a `content` argument,
+// but some use a differently-named field — e.g. `create_wireframe` seeds version 1
+// from `initialContent`, not `content` (KBT-B390). The filePath machinery reads the
+// file into whichever field the tool actually expects. This alias table is the
+// single source of truth for tools whose content-field is not literally `content`;
+// every other tool defaults to `content`.
+const CONTENT_FIELD_BY_TOOL = {
+  create_wireframe: 'initialContent',
+};
+
+function contentFieldFor(toolName) {
+  return CONTENT_FIELD_BY_TOOL[toolName] || 'content';
+}
+
+// KBT-B398: the wireframe-content tools store raw HTML. Their filePath source must
+// never be a serialized MCP *response* that was saved to disk by mistake.
+const WIREFRAME_CONTENT_TOOLS = new Set(['add_wireframe_version', 'create_wireframe']);
+
+// KBT-B398: recognise a serialized get_wireframe / add_wireframe_version /
+// create_wireframe response that was saved to disk and then mistakenly re-used as an
+// upload source. The fingerprint is a JSON object whose `.version` is an object
+// carrying a string `content` (or `initialContent`) — a shape that raw wireframe
+// HTML (which starts with `<`, not `{`) can never take. Detecting it lets the proxy
+// refuse the upload loudly instead of silently double-wrapping the wireframe.
+function looksLikeSavedWireframeResponse(text) {
+  if (typeof text !== 'string') return false;
+  const trimmed = text.trimStart();
+  if (trimmed[0] !== '{') return false; // raw HTML never starts with '{'
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false; // not JSON → genuine content, leave it alone
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const version = parsed.version;
+  if (!version || typeof version !== 'object' || Array.isArray(version)) return false;
+  return typeof version.content === 'string' || typeof version.initialContent === 'string';
+}
+
 function resolveFilePathArgument(msg) {
   if (!msg || msg.method !== 'tools/call' || !msg.params) return {};
   const args = msg.params.arguments;
@@ -259,17 +299,18 @@ function resolveFilePathArgument(msg) {
   if (typeof filePath !== 'string' || filePath.trim() === '') return {};
 
   const toolName = msg.params.name || '(unknown tool)';
+  const contentField = contentFieldFor(toolName);
 
-  // Ambiguity: both a filePath and a non-empty content were supplied. Refuse
-  // rather than silently pick one — a silent precedence hides a caller mistake.
-  if (typeof args.content === 'string' && args.content.length > 0) {
+  // Ambiguity: both a filePath and a non-empty inline content field were supplied.
+  // Refuse rather than silently pick one — a silent precedence hides a caller mistake.
+  if (typeof args[contentField] === 'string' && args[contentField].length > 0) {
     return {
       error: {
         code: -32602,
         message:
-          `Ambiguous arguments for tool '${toolName}': both 'filePath' and 'content' ` +
+          `Ambiguous arguments for tool '${toolName}': both 'filePath' and '${contentField}' ` +
           `were provided. Use exactly one — 'filePath' to have the proxy read the file ` +
-          `from disk, or 'content' to pass the value inline. The call was not forwarded.`,
+          `from disk, or '${contentField}' to pass the value inline. The call was not forwarded.`,
       },
     };
   }
@@ -288,7 +329,28 @@ function resolveFilePathArgument(msg) {
     };
   }
 
-  args.content = fileContent;
+  // KBT-B398: guard against a silently double-wrapped upload. If the file for a
+  // wireframe-content tool is itself a serialized MCP response envelope
+  // ({"success":...,"version":{"content":...}}) rather than raw HTML, the caller
+  // almost certainly saved a get_wireframe / add_wireframe_version response to disk
+  // by mistake. Storing it verbatim buries the real HTML one level deep and the
+  // wireframe preview renders JSON. Refuse loudly — consistent with the ambiguity
+  // guard above ("refuse rather than silently pick"), never silently corrupt.
+  if (WIREFRAME_CONTENT_TOOLS.has(toolName) && looksLikeSavedWireframeResponse(fileContent)) {
+    return {
+      error: {
+        code: -32602,
+        message:
+          `The file at filePath '${filePath}' for tool '${toolName}' looks like a saved ` +
+          `Kanbantic API response ({"success":...,"version":{"content":...}}), not raw ` +
+          `wireframe HTML. Storing it would double-wrap the wireframe — the real HTML ends ` +
+          `up buried one level deep and the preview renders JSON. Upload the raw HTML ` +
+          `instead (the value of the response's .version.content field). The call was not forwarded.`,
+      },
+    };
+  }
+
+  args[contentField] = fileContent;
   delete args.filePath;
   return { mutated: true };
 }
@@ -298,16 +360,17 @@ function resolveFilePathArgument(msg) {
 //
 // Tool schemas are served by the remote MCP server; the plugin cannot change them
 // server-side. So the proxy enriches the tools/list response: every tool that
-// accepts a `content` argument also advertises an optional `filePath` alternative
-// (KBT-SR482). Generic — driven by the presence of a `content` property, never a
-// hardcoded tool list (KBT-RL134). `filePath` is never added to `required`.
+// accepts an inline content field also advertises an optional `filePath` alternative
+// (KBT-SR482). Driven by the presence of the tool's content field — `content` for
+// most tools, or a mapped alias like `initialContent` for create_wireframe (KBT-B390)
+// — never a hardcoded tool list (KBT-RL134). `filePath` is never added to `required`.
 // ---------------------------------------------------------------------------
 
 const FILE_PATH_PROP_DESCRIPTION =
-  "Optional alternative to 'content': an absolute local file path. The " +
-  'kanbantic-mcp-proxy reads the file locally and substitutes its contents into ' +
-  "'content' before forwarding, so large files never enter the model's context. " +
-  "Provide either 'filePath' or 'content', not both.";
+  "Optional alternative to passing the content inline: an absolute local file path. " +
+  'The kanbantic-mcp-proxy reads the file locally and substitutes its contents into ' +
+  "the tool's content field before forwarding, so large files never enter the model's " +
+  "context. Provide either 'filePath' or the inline content field, not both.";
 
 function augmentToolsListResponse(response) {
   const tools = response && response.result && response.result.tools;
@@ -317,22 +380,27 @@ function augmentToolsListResponse(response) {
     const schema = tool && tool.inputSchema;
     const props = schema && schema.properties;
     if (!props || typeof props !== 'object') continue;
-    if (!props.content) continue;       // only content-bearing tools
+
+    // Resolve the tool's content-bearing field: the alias table for tools that use
+    // a non-standard name (e.g. create_wireframe → initialContent), else the
+    // conventional `content` (KBT-B390). Only augment tools that actually expose it.
+    const contentField = contentFieldFor(tool.name);
+    if (!props[contentField]) continue; // only content-bearing tools
     if (props.filePath) continue;       // already advertised — don't clobber
 
     props.filePath = { type: 'string', description: FILE_PATH_PROP_DESCRIPTION };
 
-    // Remove 'content' from required so Claude knows it may use filePath instead.
-    // Without this, Claude sees content as mandatory and fills it alongside filePath,
-    // which triggers the ambiguity guard in resolveFilePathArgument (KBT-B349).
+    // Remove the content field from required so Claude knows it may use filePath
+    // instead. Without this, Claude sees content as mandatory and fills it alongside
+    // filePath, which triggers the ambiguity guard in resolveFilePathArgument (KBT-B349).
     if (Array.isArray(schema.required)) {
-      schema.required = schema.required.filter(r => r !== 'content');
+      schema.required = schema.required.filter(r => r !== contentField);
     }
 
     if (typeof tool.description === 'string' && !tool.description.includes('filePath')) {
       tool.description = tool.description.trimEnd() +
-        "\n\nTip: for large content you may pass 'filePath' (an absolute local path) " +
-        "instead of 'content'; the proxy reads the file locally so it never enters context.";
+        `\n\nTip: for large content you may pass 'filePath' (an absolute local path) ` +
+        `instead of '${contentField}'; the proxy reads the file locally so it never enters context.`;
     }
   }
 }

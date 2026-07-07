@@ -492,7 +492,7 @@ MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter t
 
 - **A Planned Version exists** and the issue already carries a `VersionId` of the **same** Application → report `Version: <name> ✓`.
 - **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Prepared transition on this.
-- **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Prepared transition.
+- **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Prepared transition. Let op: `create_version` is **app-scoped** — de `applicationId` is verplicht (PR #242) en nieuwe Versions starten in `Planned`.
 
 ### 6a: All checks green — transition to Prepared
 
