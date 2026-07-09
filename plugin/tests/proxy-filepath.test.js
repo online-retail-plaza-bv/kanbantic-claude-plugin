@@ -414,16 +414,17 @@ test('KBT-TC2815 (integration): ambiguity error round-trips through the real pro
 });
 
 // ===========================================================================
-// create_wireframe uses `initialContent`, not `content` (KBT-B390 / KBT-TC2871)
+// create_wireframe uses `filesJson`, not `content` (KBT-B390 / KBT-F519)
 //
 // The filePath machinery must target whichever field a tool actually uses for its
-// inline body. create_wireframe seeds version 1 from `initialContent`, so the proxy
-// must (a) read filePath into `initialContent` (not `content`) at call-time, and
-// (b) advertise filePath + drop `initialContent` from required in tools/list.
+// inline body. Since KBT-F519, create_wireframe seeds version 1 from a fileset in
+// `filesJson` (the legacy `initialContent` was removed), so the proxy must (a) read
+// filePath into `filesJson` (not `content`) at call-time, and (b) advertise filePath
+// + drop `filesJson` from required in tools/list.
 // ===========================================================================
 
-test('KBT-B390 (unit): create_wireframe filePath → read into initialContent, filePath removed', () => {
-  const body = '<html><body>~130KB self-contained wireframe</body></html>';
+test('KBT-B390 (unit): create_wireframe filePath → read into filesJson, filePath removed', () => {
+  const body = '[{"path":"index.html","content":"<html><body>~130KB self-contained wireframe</body></html>"}]';
   const file = writeTempFile(body);
   try {
     const msg = {
@@ -436,7 +437,7 @@ test('KBT-B390 (unit): create_wireframe filePath → read into initialContent, f
     const result = proxy.resolveFilePathArgument(msg);
 
     assert.deepEqual(result, { mutated: true }, 'reports a mutation');
-    assert.equal(msg.params.arguments.initialContent, body, 'initialContent holds the file contents');
+    assert.equal(msg.params.arguments.filesJson, body, 'filesJson holds the file contents');
     assert.equal('content' in msg.params.arguments, false, 'content field is NOT populated for create_wireframe');
     assert.equal('filePath' in msg.params.arguments, false, 'filePath is removed');
     assert.equal(msg.params.arguments.applicationId, 'app-1', 'other args preserved');
@@ -446,29 +447,29 @@ test('KBT-B390 (unit): create_wireframe filePath → read into initialContent, f
   }
 });
 
-test('KBT-B390 (unit): create_wireframe filePath + initialContent both → ambiguity error naming initialContent', () => {
-  const file = writeTempFile('<html>file</html>');
+test('KBT-B390 (unit): create_wireframe filePath + filesJson both → ambiguity error naming filesJson', () => {
+  const file = writeTempFile('[{"path":"index.html","content":"file"}]');
   try {
-    const msg = { method: 'tools/call', params: { name: 'create_wireframe', arguments: { applicationId: 'app-1', name: 'x', filePath: file, initialContent: '<html>inline</html>' } } };
+    const msg = { method: 'tools/call', params: { name: 'create_wireframe', arguments: { applicationId: 'app-1', name: 'x', filePath: file, filesJson: '[{"path":"index.html","content":"inline"}]' } } };
     const result = proxy.resolveFilePathArgument(msg);
 
     assert.ok(result.error, 'returns an error');
     assert.equal(result.error.code, -32602, 'invalid-params code');
     assert.match(result.error.message, /filePath/, 'message names filePath');
-    assert.match(result.error.message, /initialContent/, 'message names initialContent (not content)');
-    // arguments untouched — initialContent not overwritten, filePath retained.
-    assert.equal(msg.params.arguments.initialContent, '<html>inline</html>', 'initialContent untouched');
+    assert.match(result.error.message, /filesJson/, 'message names filesJson (not content)');
+    // arguments untouched — filesJson not overwritten, filePath retained.
+    assert.equal(msg.params.arguments.filesJson, '[{"path":"index.html","content":"inline"}]', 'filesJson untouched');
     assert.equal(msg.params.arguments.filePath, file, 'filePath untouched');
   } finally {
     fs.unlinkSync(file);
   }
 });
 
-test('KBT-B390 (unit): augmentToolsListResponse advertises filePath on create_wireframe + drops initialContent from required', () => {
+test('KBT-B390 (unit): augmentToolsListResponse advertises filePath on create_wireframe + drops filesJson from required', () => {
   const response = {
     result: {
       tools: [
-        { name: 'create_wireframe', description: 'Create a wireframe with its first version.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, name: { type: 'string' }, initialContent: { type: 'string' } }, required: ['applicationId', 'name', 'initialContent'] } },
+        { name: 'create_wireframe', description: 'Create a wireframe with its first version.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, name: { type: 'string' }, filesJson: { type: 'string' } }, required: ['applicationId', 'name', 'filesJson'] } },
         { name: 'list_wireframes', description: 'List wireframes.', inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' } } } },
       ],
     },
@@ -480,17 +481,17 @@ test('KBT-B390 (unit): augmentToolsListResponse advertises filePath on create_wi
   assert.ok(createWf.inputSchema.properties.filePath, 'filePath added to create_wireframe');
   assert.equal(createWf.inputSchema.properties.filePath.type, 'string', 'filePath is a string');
   assert.equal(createWf.inputSchema.required.includes('filePath'), false, 'filePath is NOT required');
-  assert.equal(createWf.inputSchema.required.includes('initialContent'), false, 'initialContent dropped from required');
+  assert.equal(createWf.inputSchema.required.includes('filesJson'), false, 'filesJson dropped from required');
   assert.deepEqual(createWf.inputSchema.required, ['applicationId', 'name'], 'other required fields preserved');
   assert.match(createWf.description, /filePath/, 'description mentions filePath');
 
   assert.equal('filePath' in listWf.inputSchema.properties, false, 'tool without a content field is untouched');
 });
 
-test('KBT-B390 (integration): create_wireframe filePath read end-to-end → backend receives initialContent, not content/filePath', async () => {
+test('KBT-B390 (integration): create_wireframe filePath read end-to-end → backend receives filesJson, not content/filePath', async () => {
   const stub = await startStubBackend();
   const p = spawnProxy(stub.port);
-  const body = '<html><body>real proxy round-trip for v1</body></html>';
+  const body = '[{"path":"index.html","content":"<html><body>real proxy round-trip for v1</body></html>"}]';
   const file = writeTempFile(body);
 
   try {
@@ -501,7 +502,7 @@ test('KBT-B390 (integration): create_wireframe filePath read end-to-end → back
 
     const call = stub.received.find((r) => r.method === 'tools/call' && r.params && r.params.name === 'create_wireframe');
     assert.ok(call, 'backend received the tools/call');
-    assert.equal(call.params.arguments.initialContent, body, 'backend received initialContent read from disk');
+    assert.equal(call.params.arguments.filesJson, body, 'backend received filesJson read from disk');
     assert.equal('content' in call.params.arguments, false, 'backend never sees a content field');
     assert.equal('filePath' in call.params.arguments, false, 'backend never sees filePath');
     assert.equal(call.params.arguments.applicationId, 'app-9', 'other args forwarded intact');
@@ -511,11 +512,11 @@ test('KBT-B390 (integration): create_wireframe filePath read end-to-end → back
   }
 });
 
-test('KBT-B390 (e2e): tools/list augments create_wireframe with optional filePath; initialContent no longer required', async () => {
+test('KBT-B390 (e2e): tools/list augments create_wireframe with optional filePath; filesJson no longer required', async () => {
   const stub = await startStubBackend();
   stub.setToolsList({
     tools: [
-      { name: 'create_wireframe', description: 'Create a wireframe with its first version.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, name: { type: 'string' }, initialContent: { type: 'string' } }, required: ['applicationId', 'name', 'initialContent'] } },
+      { name: 'create_wireframe', description: 'Create a wireframe with its first version.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, name: { type: 'string' }, filesJson: { type: 'string' } }, required: ['applicationId', 'name', 'filesJson'] } },
       { name: 'list_wireframes', description: 'List wireframes.', inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' } } } },
     ],
   });
@@ -532,7 +533,7 @@ test('KBT-B390 (e2e): tools/list augments create_wireframe with optional filePat
     assert.ok(createWf.inputSchema.properties.filePath, 'create_wireframe advertises filePath');
     assert.equal(createWf.inputSchema.properties.filePath.type, 'string');
     assert.equal(createWf.inputSchema.required.includes('filePath'), false, 'filePath is optional');
-    assert.equal(createWf.inputSchema.required.includes('initialContent'), false, 'initialContent no longer required');
+    assert.equal(createWf.inputSchema.required.includes('filesJson'), false, 'filesJson no longer required');
     assert.match(createWf.description, /filePath/, 'description documents filePath');
 
     assert.equal('filePath' in listWf.inputSchema.properties, false, 'tool without a content field is untouched');
@@ -558,24 +559,24 @@ const SAVED_ENVELOPE = JSON.stringify({
   version: { versionNumber: 11, content: '<!DOCTYPE html>\n<html lang="nl"><body>real</body></html>' },
 });
 
-test('KBT-TC2937 (unit): add_wireframe_version filePath pointing at a saved API envelope → -32602, no mutation', () => {
+test('KBT-TC2937 (unit): add_wireframe_version_files filePath pointing at a saved API envelope → -32602, no mutation', () => {
   const file = writeTempFile(SAVED_ENVELOPE);
   try {
-    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } } };
+    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version_files', arguments: { wireframeId: 'wf-1', filePath: file } } };
     const result = proxy.resolveFilePathArgument(msg);
 
     assert.ok(result.error, 'returns an error rather than mutating');
     assert.equal(result.error.code, -32602, 'invalid-params code');
     assert.match(result.error.message, /saved/i, 'message flags a saved API response');
     assert.match(result.error.message, /\.version\.content/, 'message points at the real HTML field');
-    assert.equal('content' in msg.params.arguments, false, 'content not filled from the envelope');
+    assert.equal('filesJson' in msg.params.arguments, false, 'filesJson not filled from the envelope');
     assert.equal(msg.params.arguments.filePath, file, 'filePath retained (call not forwarded)');
   } finally {
     fs.unlinkSync(file);
   }
 });
 
-test('KBT-TC2937 (unit): create_wireframe filePath pointing at a saved envelope → -32602 (initialContent not filled)', () => {
+test('KBT-TC2937 (unit): create_wireframe filePath pointing at a saved envelope → -32602 (filesJson not filled)', () => {
   const file = writeTempFile(SAVED_ENVELOPE);
   try {
     const msg = { method: 'tools/call', params: { name: 'create_wireframe', arguments: { applicationId: 'app-1', name: 'x', filePath: file } } };
@@ -583,21 +584,21 @@ test('KBT-TC2937 (unit): create_wireframe filePath pointing at a saved envelope 
 
     assert.ok(result.error, 'returns an error');
     assert.equal(result.error.code, -32602);
-    assert.equal('initialContent' in msg.params.arguments, false, 'initialContent not filled from the envelope');
+    assert.equal('filesJson' in msg.params.arguments, false, 'filesJson not filled from the envelope');
     assert.equal(msg.params.arguments.filePath, file, 'filePath retained');
   } finally {
     fs.unlinkSync(file);
   }
 });
 
-test('KBT-TC2937 (unit): raw HTML containing JSON-like text still uploads (no false positive)', () => {
-  const html = '<!DOCTYPE html>\n<html><body><pre>{"success":true,"version":{"content":"x"}}</pre></body></html>';
-  const file = writeTempFile(html);
+test('KBT-TC2937 (unit): a filesJson array containing JSON-like text still uploads (no false positive)', () => {
+  const filesJson = '[{"path":"index.html","content":"<!DOCTYPE html><html><body><pre>{\\"success\\":true,\\"version\\":{\\"content\\":\\"x\\"}}</pre></body></html>"}]';
+  const file = writeTempFile(filesJson);
   try {
-    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } } };
+    const msg = { method: 'tools/call', params: { name: 'add_wireframe_version_files', arguments: { wireframeId: 'wf-1', filePath: file } } };
     const result = proxy.resolveFilePathArgument(msg);
-    assert.deepEqual(result, { mutated: true }, 'raw HTML is not misdetected as an envelope');
-    assert.equal(msg.params.arguments.content, html, 'content holds the raw HTML');
+    assert.deepEqual(result, { mutated: true }, 'a filesJson array is not misdetected as an envelope');
+    assert.equal(msg.params.arguments.filesJson, filesJson, 'filesJson holds the file contents');
   } finally {
     fs.unlinkSync(file);
   }
@@ -623,7 +624,7 @@ test('KBT-TC2938 (integration): a saved-envelope filePath is rejected by the rea
   try {
     await initProxy(p);
 
-    const resp = await p.rpc('tools/call', { name: 'add_wireframe_version', arguments: { wireframeId: 'wf-1', filePath: file } }, 2);
+    const resp = await p.rpc('tools/call', { name: 'add_wireframe_version_files', arguments: { wireframeId: 'wf-1', filePath: file } }, 2);
     assert.ok(resp.error, 'proxy returns a JSON-RPC error');
     assert.equal(resp.error.code, -32602);
 

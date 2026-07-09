@@ -9,7 +9,6 @@
     "add_golden_case",
     "add_issue_attachment",
     "add_task",
-    "add_wireframe_version",
     "add_wireframe_version_files",
     "app_version_at_date",
     "approve_phase",
