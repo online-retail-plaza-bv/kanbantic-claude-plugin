@@ -53,14 +53,8 @@ function readRegistryEnv(name) {
   }
 }
 
-// Read lazily: the Workstation Daemon's env is present at spawn, but tests and
-// re-initialize need the current value rather than one frozen at module load.
-function readEnv(name) {
-  return process.env[name] || readRegistryEnv(name);
-}
-
 const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
-let API_KEY = readEnv('KANBANTIC_API_KEY');
+let API_KEY = process.env.KANBANTIC_API_KEY || readRegistryEnv('KANBANTIC_API_KEY');
 
 let sessionId = null;            // MCP transport session (Mcp-Session-Id header)
 let stdinEnded = false;
@@ -257,19 +251,26 @@ function postProcess(request, response) {
 // ---------------------------------------------------------------------------
 
 // Central read of the startup env-vars the Workstation Daemon passes in.
+//
+// Deliberately process.env only — no HKCU\Environment fallback. The registry
+// fallback exists for the API key alone, because GUI-launched hosts inherit a
+// stale environment and the key must be resolvable without a sign-out cycle. The
+// auto-register context is different: the Daemon always injects it at spawn, so
+// a machine-wide KANBANTIC_WORKSPACE_ID could only come from a developer's own
+// profile — and would silently auto-register every manually-started plugin,
+// which is exactly what KBT-US771 forbids. Keeping this to process.env also
+// keeps the guard testable without depending on the dev machine (cf. KBT-B438).
 function autoRegisterEnv() {
   return {
-    workspaceId: readEnv('KANBANTIC_WORKSPACE_ID'),
-    workstationId: readEnv('KANBANTIC_WORKSTATION_ID'),
-    host: readEnv('KANBANTIC_HOST'),
-    spawnCommandId: readEnv('KANBANTIC_SPAWN_COMMAND_ID'),
+    workspaceId: process.env.KANBANTIC_WORKSPACE_ID,
+    workstationId: process.env.KANBANTIC_WORKSTATION_ID,
+    host: process.env.KANBANTIC_HOST,
+    spawnCommandId: process.env.KANBANTIC_SPAWN_COMMAND_ID,
   };
 }
 
 function shouldAutoRegister() {
-  return !autoRegisterStarted
-    && !!autoRegisterEnv().workspaceId
-    && !!(API_KEY || readEnv('KANBANTIC_API_KEY'));
+  return !autoRegisterStarted && !!autoRegisterEnv().workspaceId && !!API_KEY;
 }
 
 // Test seam: autoRegister forwards via this indirection so unit tests can inject a
@@ -281,6 +282,9 @@ function __resetForTest() {
   autoRegisterStarted = false;
   agentSessionId = null;
   agentChannelId = null;
+  // Re-read from process.env only (never the registry): the test controls the key,
+  // so the outcome must not depend on the developer's machine (cf. KBT-B438).
+  API_KEY = process.env.KANBANTIC_API_KEY;
   stopInboxPoll();
 }
 
