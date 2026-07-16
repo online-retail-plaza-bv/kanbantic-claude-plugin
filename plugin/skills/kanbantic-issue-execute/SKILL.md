@@ -758,6 +758,26 @@ Load the Toolkit Skill content and execute the flow it describes:
 - Add discussion entry: "Local E2E tests skipped — {reason}"
 - Warn the user and proceed to Step 7 (do not block the workflow)
 
+### 6d: Record test-case results (MANDATORY — owner of the AllTestsPassed gate, KBT-F585)
+
+Running a test green is **not** the same as recording it. For **every** Test Case
+linked to this issue, immediately after the corresponding run, set its status via
+`update_test_case` based on the outcome. This step is the **proactive owner** of the
+non-overridable `AllTestsPassed` gate — Step 7 only *verifies* it:
+
+```
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Passed")   // green run
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Failed")   // red run (+ fix-task)
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Skipped")  // deliberately not run (+ reason ≥20 chars)
+```
+
+- Map each level to its run: **Unit / Integration** from the per-task T1/T2 runs,
+  **E2E** from the `/test-e2e-local` run in 6b.
+- **Anti-pattern:** never set `Passed` without an actual green run — the status is a
+  bewijsuitspraak, gekoppeld aan het verificatie-commando uit de task-DoD.
+- Without this call the Test Case stays on `Ready`/`Draft` and Step 7 **blocks** the
+  Review transition — exactly the KBT-F551 failure mode (issue on Review with 0/5 Passed).
+
 ## Step 7: Verify Review Pre-conditions + Transition
 
 <HARD-GATE>
