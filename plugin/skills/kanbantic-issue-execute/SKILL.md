@@ -803,19 +803,21 @@ Confirm `isReadyToClaim` is still true (or that soft-override is acceptable). Re
 
 ### 7d: Promote linked user stories to `Implemented` (KBT-RL064 Invariant 1)
 
-Every user story linked to this issue (via `userStoryId` or the issue's
-`linkedUserStories` collection) MUST flip from `NotImplemented` to
-`Implemented` here — after tasks are Done and tests Passed but **before** the
-Review transition. This is the first half of the `update_validation_status`
-lifecycle; the second half (`Implemented → Validated`) runs in
+Every Specification↔UserStory link on this issue MUST flip to `Implemented`
+here — after tasks are Done and tests Passed but **before** the Review
+transition. The validation enum is `Approved → Implemented → Validated`
+(there is **no `NotImplemented`** — verified against `get_system_schema`, F589;
+a link starts at `Approved` when the spec/US is approved). This is the first
+half of the lifecycle; the second half (`Implemented → Validated`) runs in
 `kanbantic-issue-review` Step 7.5b after final-approve.
 
 ```
 # Skip silently if the issue has no linked user stories.
 MCP: mcp__kanbantic__get_user_story_with_requirements  // per linked story
+# Signature is (linkId, validationStatus) — linkId from linkedSpecifications, NOT userStoryId (F589).
 MCP: mcp__kanbantic__update_validation_status(
-  userStoryId,
-  status: "Implemented"
+  linkId,                        // from get_user_story_with_requirements → linkedSpecifications[].linkId
+  validationStatus: "Implemented"
 )
 ```
 
