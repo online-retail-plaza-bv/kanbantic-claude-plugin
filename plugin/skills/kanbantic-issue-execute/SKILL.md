@@ -37,6 +37,25 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 Tasks can ONLY be started (set to InProgress) when the parent issue is in **InProgress** status. If the issue is not InProgress, you MUST claim it first (Step 2) before working on any task. NEVER start a task on an issue that is still in New, Triaged, Prepared, or any other non-InProgress status.
 </HARD-GATE>
 
+## Mandatory calls — quick reference (KBT-F585 / v4 §2.10)
+
+A status change is **work, not a by-product**. Emit these calls as you go — a green
+run or a finished task that isn't recorded makes the board lie:
+
+```
+claim_issue ─▶ register_agent_session ─▶ set_current_issue
+      │
+      ├─ per task:  update_task_status(InProgress) ─▶ [build + verify] ─▶ update_task_status(Done)
+      │                    └─ periodically: heartbeat
+      ├─ per test:  [run the test] ─▶ update_test_case(Passed | Failed | Skipped)   ← Step 6d; feeds the non-overridable AllTestsPassed gate
+      ├─ milestone / blocker:  report_status + add_discussion_entry
+      └─ end:  end_agent_session
+```
+
+The Phase/Golf calls (`mark_phase_for_review` → `approve_phase` → `unlock_phase`)
+apply to Epic-walks; their ownership (orchestrator vs. executing agent) is tracked
+in **[OPEN: KBT-F582]** — see `kanbantic-orchestrate`.
+
 ## Step 0: Ensure Repository Access
 
 Before starting, verify you have local access to the workspace's code repository:
