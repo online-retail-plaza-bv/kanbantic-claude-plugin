@@ -251,13 +251,16 @@ function postProcess(request, response) {
 // ---------------------------------------------------------------------------
 
 // Most content-bearing tools carry their large payload in a `content` argument,
-// but some use a differently-named field — e.g. `create_wireframe` seeds version 1
-// from `initialContent`, not `content` (KBT-B390). The filePath machinery reads the
-// file into whichever field the tool actually expects. This alias table is the
-// single source of truth for tools whose content-field is not literally `content`;
-// every other tool defaults to `content`.
+// but some use a differently-named field — e.g. the wireframe fileset tools carry
+// their whole payload in `filesJson` (a JSON-array string), not `content`. The
+// filePath machinery reads the file into whichever field the tool actually expects.
+// This alias table is the single source of truth for tools whose content-field is
+// not literally `content`; every other tool defaults to `content`.
 const CONTENT_FIELD_BY_TOOL = {
-  create_wireframe: 'initialContent',
+  // KBT-F519: create_wireframe now creates version 1 from a fileset — its payload is
+  // `filesJson` (a JSON-array string), not the removed `initialContent` (KBT-B390).
+  // Same filePath offload as add_wireframe_version_files.
+  create_wireframe: 'filesJson',
   // KBT-B417: the multi-file fileset tool carries its whole payload in `filesJson`
   // (a JSON-array string), not `content`. Mapping it here lets the same filePath
   // offload keep large filesets OUT of the MCP tools/call message — the exact
@@ -270,12 +273,13 @@ function contentFieldFor(toolName) {
   return CONTENT_FIELD_BY_TOOL[toolName] || 'content';
 }
 
-// KBT-B398: the wireframe-content tools store raw HTML. Their filePath source must
-// never be a serialized MCP *response* that was saved to disk by mistake.
-const WIREFRAME_CONTENT_TOOLS = new Set(['add_wireframe_version', 'create_wireframe']);
+// KBT-B398: the wireframe-content tools store raw HTML / filesets. Their filePath
+// source must never be a serialized MCP *response* that was saved to disk by mistake.
+// (KBT-F519 removed add_wireframe_version; create_wireframe + the fileset tool remain.)
+const WIREFRAME_CONTENT_TOOLS = new Set(['create_wireframe', 'add_wireframe_version_files']);
 
-// KBT-B398: recognise a serialized get_wireframe / add_wireframe_version /
-// create_wireframe response that was saved to disk and then mistakenly re-used as an
+// KBT-B398: recognise a serialized get_wireframe / create_wireframe /
+// add_wireframe_version_files response that was saved to disk and then re-used as an
 // upload source. The fingerprint is a JSON object whose `.version` is an object
 // carrying a string `content` (or `initialContent`) — a shape that raw wireframe
 // HTML (which starts with `<`, not `{`) can never take. Detecting it lets the proxy
