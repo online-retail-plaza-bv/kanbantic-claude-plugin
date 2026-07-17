@@ -148,8 +148,8 @@ The review skill's scope is per-level:
 
 **Phase-level review:**
 - Parent Epic must be on `InProgress`.
-- Phase must be on `ReadyForReview` (set by `mark_phase_for_review`).
-- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is ReadyForReview and its Epic is InProgress."
+- Phase must be on `Review` (set by `mark_phase_for_review`). *(PhaseStatus enum: `Locked` · `Active` · `Review` · `Approved` · `Rejected` — there is no `ReadyForReview`; verified against `get_system_schema`. F589 / F582.)*
+- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is on `Review` and its Epic is InProgress."
 
 **Epic / standalone-Feature / Bug review:**
 - Required status: `Review`.
@@ -302,10 +302,10 @@ Rejection MUST always include a clear justification. The reason is recorded as a
 
 Create fix tasks **on the right entity**:
 
-- **Feature-level reject**: fix-tasks on the Feature; transition Feature back to `InProgress`:
+- **Feature-level reject**: fix-tasks on the Feature; the Feature **stays on `Review`**. There is **no `Review → InProgress` transition** in the Domain (verified against `get_system_schema`, F589); the wanted return-path is tracked in **[OPEN: KBT-F562 / E104]**. The implementer re-runs `kanbantic-issue-execute` to pick up the fix-tasks from `Review`:
   ```
   MCP: mcp__kanbantic__add_task(issueId: <FeatureId>, title: "Fix: ...", priority: "High")
-  MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "InProgress")
+  # Do NOT call update_issue_status(<FeatureId>, "InProgress") — Review → InProgress does not exist (F589).
   ```
 - **Phase-level reject**: fix-tasks on the Epic (or on individual Features in the Phase if the issue is per-Feature), then `reject_phase`:
   ```
@@ -436,7 +436,7 @@ After a successful `approve_review` on the **Epic / standalone-Feature / Bug**
 final-approve path (this Step 7.5), promote every user story linked to the
 issue from `Implemented` to `Validated`. This is the second half of the
 `update_validation_status` lifecycle — the first half runs in
-`kanbantic-issue-execute` Step 7d (NotImplemented → Implemented).
+`kanbantic-issue-execute` Step 7d (`Approved → Implemented`).
 
 Do **NOT** call this from the Feature-level mini-review approve in Step 5a
 (line ≈239) — per-Feature mini-approves are not the canonical promotion
@@ -445,9 +445,11 @@ point. Validation cascades up to the final Epic / standalone approve only.
 ```
 # Skip silently if the issue has no linked user stories.
 MCP: mcp__kanbantic__get_user_story_with_requirements  // per linked story
+# Signature is (linkId, validationStatus) — linkId is the Specification↔UserStory link
+# from the user story's linkedSpecifications, NOT the userStoryId (F589).
 MCP: mcp__kanbantic__update_validation_status(
-  userStoryId,
-  status: "Validated"
+  linkId,                        // from get_user_story_with_requirements → linkedSpecifications[].linkId
+  validationStatus: "Validated"
 )
 ```
 
@@ -503,7 +505,7 @@ After this transition, surface the deploy-instructions to the caller:
 > 4. Smoke-test against production.
 > 5. Manually transition the issue to `Done` via `update_issue_status(status: "Done")` — the standard Done-readiness gate (all test cases Passed, all specs Approved, no pending Document Impacts, etc.) still applies.
 
-If the deploy fails: transition back to `Review` (`update_issue_status(status: "Review")`) so the implementer can pick up fix-tasks. **Do NOT** transition `InDeployment → Cancelled` directly — the Domain layer blocks that transition (KBT-RL053); cancel from Review (pre-deploy rollback) or from Done (post-deploy hotfix-rollback).
+If the deploy fails: **there is no legal `InDeployment → Review` transition** — the Domain layer allows only `InDeployment → Done` (KBT-RL053, verified against `get_system_schema`; `InDeployment → Cancelled` is likewise blocked). Do **NOT** attempt an illegal transition. Instead: `report_status` + an `add_discussion_entry` documenting the failed deploy, leave the issue on `InDeployment`, and escalate to the PO for a hotfix-forward or a manual recovery decision. A proper failed-deploy return-path is tracked in **[OPEN: KBT-F589 / E104]**.
 
 ## Step 9: Knowledge-Extractie (optional)
 
