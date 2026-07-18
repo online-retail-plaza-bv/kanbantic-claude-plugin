@@ -136,6 +136,17 @@ claude --dangerously-load-development-channels server:kanbantic
 
 Zonder de flag werken `register_agent_session` / `send_message` / `get_channel_messages` etc. nog steeds als gewone tools — maar de **push-richting** (user → agent) verloopt niet realtime. Polling vanuit de agent zelf via `check_messages` is mogelijk maar niet aanbevolen.
 
+## Auto-register van de agent-sessie (KBT-E102 F2)
+
+Om een gespawnde agent betrouwbaar in `/agent-sessions` te laten verschijnen, wacht de proxy **niet** tot het model zelf besluit `register_agent_session` aan te roepen — hij registreert de sessie **automatisch bij startup**, direct na de MCP `initialize`. Dit is fire-and-forget en idempotent (precies één keer per proces).
+
+**Aan/uit — gestuurd door `KANBANTIC_WORKSPACE_ID`:**
+
+- **Aan** wanneer zowel `KANBANTIC_WORKSPACE_ID` als de API-key (`KANBANTIC_API_KEY`) aanwezig zijn. De **Workstation Daemon injecteert** deze context bij elke spawn (KBT-E102 F1), samen met `KANBANTIC_HOST` en `KANBANTIC_SPAWN_COMMAND_ID` — zodat de sessie meteen aan de juiste workspace, host én spawn-command gekoppeld wordt (F3-koppeling → deeplink vanuit de UI).
+- **Uit** wanneer `KANBANTIC_WORKSPACE_ID` ontbreekt. Dit is de bewuste guard voor **lokaal / handmatig** plugin-gebruik: een ontwikkelaar die de plugin zelf start (zonder daemon) krijgt géén ongewenste auto-registratie. Zonder workspace kan de proxy sowieso niet weten in welke workspace hij moet registreren.
+
+Gevolg voor onboarding: verschijnt een gespawnde agent níet in `/agent-sessions`, controleer dan of de daemon een geldige `AgentApiKey` (met workspace-lidmaatschap + `AgentSessions.Create`) injecteert — de daemon-README (sectie *"Making agent-sessions appear"*) en de F4-diagnostiek (spawn-log + spawn-watchdog + de teller op `/workstations`) wijzen de oorzaak aan.
+
 ## `filePath` — lokale bestandssubstitutie voor grote content (KBT-F464)
 
 De proxy draait lokaal met filesystem-toegang. Voor tools met een grote `content`-parameter (bijv. `add_wireframe_version` met een 154KB HTML-wireframe) hoeft Claude de inhoud niet langer in zijn context te laden: geef in plaats van `content` een **`filePath`** mee en de proxy resolvet het bestand vóór doorsturen.
