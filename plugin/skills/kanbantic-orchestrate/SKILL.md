@@ -79,7 +79,10 @@ orchestrator bootstraps the Epic **once**, before routing any child:
    ```
    MCP: mcp__kanbantic__claim_issue(issueId: <EpicCode>, branch: "feature/<EpicCode>-integratie", versionId: <explicit Version GUID>)
    ```
-   Pass an **explicit `versionId`** (auto-version can 500 — KBT-B443).
+   Pass an **explicit `versionId`** (auto-version can 500 — KBT-B443). Note: `claim_issue`
+   records **one** branch on the Epic record — for a multi-repo Epic that is the coordinating
+   repo's integration branch; the other repos' integration branches are resolved per-repo via
+   `register_issue_branch` (by the Feature's `applicationId`, KBT-F588).
 2. **Create the epic-integration branch** off `main` in **each touched repo**
    (multi-repo Epics, KBT-F588) — `feature/<EpicCode>-integratie`. Child Features
    branch from it and merge back into it (`kanbantic-issue-review` Step 5a); the

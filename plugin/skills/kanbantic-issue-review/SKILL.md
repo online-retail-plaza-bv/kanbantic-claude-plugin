@@ -276,7 +276,7 @@ MCP: mcp__kanbantic__update_user_story(userStoryId: <id>, status: "Approved")
 # per linked Specification (title is required — pass the existing title unchanged):
 MCP: mcp__kanbantic__update_specification(id: <specId>, title: <existing title>, status: "Approved")
 ```
-- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`**. When a Feature legitimately has no E2E surface, that is exactly the case the test-policy `N.v.t.` mechanism covers (KBT-F591): record the E2E level as `N.v.t.` + reason via `set_test_policy`, and note in the review summary that the US is left at `Ready` with that rationale. Do **not** reach for `overrideReason` as the default path — the override stays an exception-with-reason (KBT-F170 / KBT-PR191 audit-trail).
+- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`** — a User-Story-level precondition that is **independent of the issue test-policy**. So for a Feature with genuinely no E2E surface you cannot approve the US this way, and leaving it at `Ready` keeps `UserStoriesApproved` red. In that specific case the **documented override-with-reason is the correct route** (not a sluiproute): set the E2E level to `N.v.t.` via `set_test_policy`, then waive `UserStoriesApproved` with an `overrideReason` that cites the E2E-`N.v.t.` policy as the rationale — the override is audited (KBT-F170 / KBT-PR191). Closing this coupling (so `update_user_story` honours a `N.v.t.` E2E policy and no override is needed) is a server-side follow-up on KBT-F591/KBT-F587. For a Feature that *does* have a Passed E2E case, approve the US directly with no override.
 
 **Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature, **then merge to the epic-integration branch**, **then** transition the Feature to `Done`:
 ```
@@ -414,7 +414,7 @@ git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionCont
 git push origin main
 ```
 
-**Where `main` is protected** (push-to-main blocked — e.g. the plugin repo, KBT-REPO002): do **not** push to `main` directly. Open a PR `feature/KBT-E<epic>-integratie → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+**Where `main` is protected** (push-to-main blocked — e.g. the plugin repo, KBT-REPO002): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
 
 **Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
 
