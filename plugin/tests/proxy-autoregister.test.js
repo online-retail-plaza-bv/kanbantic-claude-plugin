@@ -21,6 +21,17 @@ test('shouldAutoRegister: true with workspace-id + key when not started', () => 
   assert.strictEqual(proxy.shouldAutoRegister(), true);
 });
 
+// KBT-F551 review Minor (Axon 03): the `&& !!API_KEY` clause of shouldAutoRegister() was not
+// mutation-covered — no test drove "workspace-id present + key absent → false". A keyless agent
+// cannot authenticate, so it must never auto-register even with a workspace-id. Dropping the
+// `&& !!API_KEY` term flips this to true, so this test now bites that mutation.
+test('shouldAutoRegister: false with workspace-id but WITHOUT KANBANTIC_API_KEY (the key-guard)', () => {
+  process.env.KANBANTIC_WORKSPACE_ID = 'ws-1';
+  delete process.env.KANBANTIC_API_KEY;
+  proxy.__resetForTest();
+  assert.strictEqual(proxy.shouldAutoRegister(), false);
+});
+
 test('autoRegister: sends correct register call (workspace/workstation/spawnCommandId) + idempotent', async () => {
   process.env.KANBANTIC_WORKSPACE_ID = 'ws-1';
   process.env.KANBANTIC_API_KEY = 'ka_test';
