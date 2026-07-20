@@ -33,6 +33,25 @@ Complete the Review → InDeployment lane transition (per KBT-RL053; backend aut
 8. **Close issue** — transition to Done
 9. **Knowledge-extractie (optional)** — toolkit items + document impacts + `KnowledgeExtraction` entry
 
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Reviewer/adversariale verificatie moet altijd **gelijk of zwaarder** zijn dan het model dat de code bouwde (v3 §5.6) — een lichter model kan geen bugs vinden die het zelf niet had gezien. Voor de reviewer-subagent die Step 3 dispatcht betekent dit: **Zwaar (Opus 4.8)** als default (dit is letterlijk "moeilijkste review" uit de tabel), en nooit lichter dan de tier die `kanbantic-issue-execute` voor de betreffende Feature gebruikte. Voor eenvoudige Feature-level mini-reviews met een kleine diff mag **Middel (Sonnet 5)** volstaan, mits de bouwende Agent ook Middel was. Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele-maar-nooit-lichter-dan-de-bouwer) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie.
+
+## Test-tiers in deze skill (v3 §6, AUD-11)
+
+De getrapte teststrategie is verdeeld over de twee skills die samen een Feature/Epic afronden:
+- **T1** (per-task, lokaal, alleen geraakte Unit-tests) en **T2** (per-Feature, lokaal Unit + Integration + lichte review, geen volledige CI) draaien al in `kanbantic-issue-execute` (Steps 4A/4B.2 resp. Step 6) **vóórdat** deze review start.
+- Deze skill **herbevestigt T2** bij de Feature-level merge naar de epic-integratiebranch (Step 5a — de integratie-smoke) en is de **enige eigenaar van T3** — de volledige CI-suite (alle Unit/Integratie + Playwright-E2E + build-image) die één keer per Epic draait op de epic→main PR (Step 7).
+
 ## Step 0: Ensure Repository Access
 
 Before starting, verify you have local access to the workspace's code repository:
@@ -290,7 +309,7 @@ MCP: mcp__kanbantic__approve_review(
 ```
 
 **Merge to the epic-integration branch — NOT to `main` (KBT-F583 / KBT-F584).** This is the named owner and moment of the per-Feature merge that §5.4 of the Workflow doc requires; it was previously nobody's job. The reviewer performs it here, before marking the Feature `Done`:
-- If the Feature was built on its **own** branch/worktree (parallel per-Feature model), merge that branch into `feature/KBT-E<epic>-integratie` and run the light integration-smoke (§6 — not the full suite). One merge-to-integration at a time per repo (serialise via the orchestrator):
+- If the Feature was built on its **own** branch/worktree (parallel per-Feature model), merge that branch into `feature/KBT-E<epic>-integratie` and run the light integration-smoke — this is **T2** (Feature-level, local Unit+Integration, no full CI; v3 §6, mirrors the T2 tier `kanbantic-issue-execute` Step 6 already ran before handing off to this review). One merge-to-integration at a time per repo (serialise via the orchestrator):
   ```bash
   git checkout feature/KBT-E<epic>-integratie
   git pull --ff-only
