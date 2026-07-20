@@ -58,6 +58,39 @@ Then the skill stops.
 Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
 </HARD-GATE>
 
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Toepassing binnen deze skill: **Middel (Sonnet 5)** is de default voor de requirements-dialoog, spec/user-story/test-case-schrijfwerk en root-cause-analyse (Step 5F/5B/5E) — dit valt onder "code/specs/tests schrijven, root-cause" uit de tabel. Escaleer naar **Zwaar (Opus 4.8)** voor Epic-scope voorbereidingen met tegenstrijdige specs, veel afhankelijkheden tussen Features, of complexe golf-indeling (Step 5E). Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele, escaleren-op-bewijs) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie, niet uit geheugen.
+
+## Parallellisme — twee assen (v3 §5.5)
+
+**As 1 — meerdere Agents.** Meerdere prepare-runs op verschillende Triaged issues zijn onafhankelijk van elkaar en kunnen parallel op verschillende werkstations/worktrees draaien — elke run werkt zijn eigen issue uit en schrijft alleen naar dat issue's specs/user-stories/test-cases/tasks.
+
+**As 2 — subagents binnen déze run.** Deze skill draait doorgaans single-agent (een dialoog met de gebruiker), maar mag een **read-only fan-out**-subagent starten voor gericht onderzoek (bv. het opzoeken van een bestaand patroon in meerdere Library-documenten vóórdat een spec wordt geformuleerd) — dat blijft binnen de bestaande beperking hierboven ("Do not launch broad Explore agents"; alleen **gerichte**, read-only verkenning, geen brede Explore-fan-out. Zie ook `kanbantic-issue-execute` §Parallellisme voor de volledige twee-assen-uitleg.). **Schrijvende fan-out is hier niet van toepassing** — alle specs/user-stories/test-cases/tasks worden altijd door de parent-Agent zelf geschreven, nooit door een subagent (governance-regel: de parent blijft eigenaar van alle Kanbantic-writes).
+
+## Continue statusmelding (v3 §5.3)
+
+Prepare-dialogen zijn vaak lang-lopende, multi-turn sessies — precies het soort werk waar een levend "wie werkt waaraan"-signaal op het bord waardevol is:
+
+```
+register_agent_session ─▶ set_current_issue
+      │
+      ├─ doorlopend, tijdens de dialoog: heartbeat (periodiek)
+      ├─ mijlpaal (bv. Epic-fase 5E.1–5E.9 doorlopen, of Feature-requirements klaar): report_status + add_discussion_entry
+      └─ einde: end_agent_session
+```
+
+Dit is aanvullend op de bestaande Decision-entries uit Step 6/6a — het board-statussignaal (`register_agent_session`/`heartbeat`/`report_status`) is zichtbaar buiten de discussion-timeline en laat zien dat de sessie nog leeft tijdens een lange requirements-dialoog.
+
 ## Step 0: Ensure Repository Access
 
 Before starting, verify you have local access to the workspace's code repository:
