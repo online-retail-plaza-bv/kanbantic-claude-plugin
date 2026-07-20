@@ -39,6 +39,35 @@ The triage skill uses **only** the following MCP tools. Any other MCP call is ou
 Forbidden: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `create_implementation_plan`, `create_issue`.
 </HARD-GATE>
 
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, triage, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Triage is expliciet genoemd in de tabel ("status-updates, triage") — dit is **Licht (Haiku 4.5)** werk: een korte go/no-go-dialoog, een lichte duplicaat-heuristiek, en een vaste metadata-update. Er is geen reden om hier zwaarder te escaleren — als een issue tijdens triage al blijkt complexe afwegingen nodig te hebben, hoort die diepgang bij `kanbantic-issue-prepare` (Middel/Zwaar), niet bij triage.
+
+## Parallellisme — twee assen (v3 §5.5)
+
+**As 1 — meerdere Agents.** Triage-runs op verschillende `New`-issues zijn volledig onafhankelijk — elke run muteert alleen zijn eigen issue (`update_issue`, `update_issue_status`) en kan daarom vrij parallel op meerdere werkstations draaien zonder coördinatie.
+
+**As 2 — subagents binnen déze run.** Niet van toepassing voor triage: de dialoog is te kort en het toegestane tool-set te klein (zie HARD-GATE hierboven) om subagent-fan-out te rechtvaardigen. Draai triage single-agent.
+
+## Continue statusmelding (v3 §5.3)
+
+Ook al is een triage-run kort, het board-signaal hoort er toch bij zodat gelijktijdige triage-runs op andere issues zichtbaar blijven:
+
+```
+register_agent_session ─▶ set_current_issue ─▶ [dialoog + metadata-update] ─▶ end_agent_session
+```
+
+`heartbeat`/`report_status` zijn hier meestal overbodig gezien de korte duur — gebruik ze alleen als de go/no-go-dialoog onverwacht lang op gebruikersinput wacht (`report_status(status: "WaitingForInput")`).
+
 ## Checklist
 
 1. **Load issue** — `get_issue`
