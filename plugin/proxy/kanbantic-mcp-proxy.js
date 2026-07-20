@@ -34,26 +34,27 @@ const os = require('os');
 const { URL } = require('url');
 const { execSync } = require('child_process');
 
-const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
-let API_KEY = process.env.KANBANTIC_API_KEY;
-
 // Claude Desktop and Cowork launch the proxy as a child of a GUI process that
 // inherits its environment from explorer.exe at sign-in. User env vars added
 // afterwards are invisible to them until the user signs out and back in. Fall
-// back to HKCU\Environment so the key is resolvable without that cycle and
+// back to HKCU\Environment so values are resolvable without that cycle and
 // without requiring a literal secret in claude_desktop_config.json.
-if (!API_KEY && process.platform === 'win32') {
+function readRegistryEnv(name) {
+  if (process.platform !== 'win32') return undefined;
   try {
-    const out = execSync('reg query HKCU\\Environment /v KANBANTIC_API_KEY', {
+    const out = execSync(`reg query HKCU\\Environment /v ${name}`, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const m = out.match(/KANBANTIC_API_KEY\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/i);
-    if (m) API_KEY = m[1].trim();
+    const m = out.match(new RegExp(`${name}\\s+REG_(?:SZ|EXPAND_SZ)\\s+(.+)`, 'i'));
+    return m ? m[1].trim() : undefined;
   } catch {
-    // Value absent; handled at dispatch time with a clear JSON-RPC error.
+    return undefined; // Value absent; callers handle the miss.
   }
 }
+
+const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
+let API_KEY = process.env.KANBANTIC_API_KEY || readRegistryEnv('KANBANTIC_API_KEY');
 
 let sessionId = null;            // MCP transport session (Mcp-Session-Id header)
 let stdinEnded = false;
@@ -65,6 +66,9 @@ let agentChannelId = null;       // Kanbantic AgentChannel.Id (1:1 with session)
 let inboxCursor = null;          // ISO timestamp — only fetch messages with SentAt > this
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
+
+// KBT-E102 F2 — idempotency guard for the startup auto-register side-effect.
+let autoRegisterStarted = false;
 
 // ---------------------------------------------------------------------------
 // stdio: read newline-delimited JSON-RPC from stdin, write to stdout
@@ -194,6 +198,8 @@ function postProcess(request, response) {
     response.result.capabilities.experimental =
       response.result.capabilities.experimental || {};
     response.result.capabilities.experimental['claude/channel'] = {};
+    // KBT-E102 F2 — auto-register right after initialize (fire-and-forget; idempotent).
+    if (shouldAutoRegister()) autoRegister().catch(() => {});
   }
 
   // 2. Capture sessionId + channelId from register_agent_session response.
@@ -229,6 +235,106 @@ function postProcess(request, response) {
   if (request.method === 'tools/list' && response.result) {
     augmentToolsListResponse(response);
   }
+}
+
+// ---------------------------------------------------------------------------
+// KBT-E102 F2 — auto-register the agent session on startup.
+//
+// When the Workstation Daemon spawns Claude with KANBANTIC_WORKSPACE_ID (and the
+// API key), the proxy registers itself automatically right after initialize — no
+// reliance on the model deciding to call register_agent_session. Idempotent (one
+// shot per process) and backward-compatible: without KANBANTIC_WORKSPACE_ID (local
+// / manual plugin use) it never auto-registers.
+//
+// The register response is routed through postProcess() so the existing
+// sessionId/channelId-capture + inbox-poll logic is reused unchanged.
+// ---------------------------------------------------------------------------
+
+// Central read of the startup env-vars the Workstation Daemon passes in.
+//
+// Deliberately process.env only — no HKCU\Environment fallback. The registry
+// fallback exists for the API key alone, because GUI-launched hosts inherit a
+// stale environment and the key must be resolvable without a sign-out cycle. The
+// auto-register context is different: the Daemon always injects it at spawn, so
+// a machine-wide KANBANTIC_WORKSPACE_ID could only come from a developer's own
+// profile — and would silently auto-register every manually-started plugin,
+// which is exactly what KBT-US771 forbids. Keeping this to process.env also
+// keeps the guard testable without depending on the dev machine (cf. KBT-B438).
+function autoRegisterEnv() {
+  return {
+    workspaceId: process.env.KANBANTIC_WORKSPACE_ID,
+    workstationId: process.env.KANBANTIC_WORKSTATION_ID,
+    host: process.env.KANBANTIC_HOST,
+    spawnCommandId: process.env.KANBANTIC_SPAWN_COMMAND_ID,
+  };
+}
+
+function shouldAutoRegister() {
+  return !autoRegisterStarted && !!autoRegisterEnv().workspaceId && !!API_KEY;
+}
+
+// Test seam: autoRegister forwards via this indirection so unit tests can inject a
+// mock without real HTTP. `forward` is a hoisted function declaration, so this
+// initialization (which runs during module load) safely captures it.
+let __forwardImpl = forward;
+function setForwardForTest(fn) { __forwardImpl = fn; }
+function __resetForTest() {
+  autoRegisterStarted = false;
+  agentSessionId = null;
+  agentChannelId = null;
+  // Re-read from process.env only (never the registry): the test controls the key,
+  // so the outcome must not depend on the developer's machine (cf. KBT-B438).
+  API_KEY = process.env.KANBANTIC_API_KEY;
+  stopInboxPoll();
+}
+
+async function autoRegister() {
+  if (!shouldAutoRegister()) return;
+  autoRegisterStarted = true; // claim the slot up-front → idempotent across re-initialize
+
+  const env = autoRegisterEnv();
+  const args = {
+    workspaceId: env.workspaceId,
+    host: env.host || os.hostname(),
+    cwd: process.cwd(),
+  };
+  if (env.workstationId) args.workstationId = env.workstationId;
+  if (env.spawnCommandId) args.spawnCommandId = env.spawnCommandId;
+
+  const request = {
+    jsonrpc: '2.0',
+    id: `proxy-autoregister-${Date.now()}`,
+    method: 'tools/call',
+    params: { name: 'register_agent_session', arguments: args },
+  };
+
+  // Finite retry (3×, 1s/2s/4s backoff); never crash the proxy on a register failure.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const responses = await __forwardImpl(JSON.stringify(request));
+      for (const r of responses) postProcess(request, r); // reuse capture + inbox-poll
+      if (agentSessionId) {
+        process.stderr.write(
+          `[kanbantic-proxy] auto-registered agent session ${agentSessionId} (channel ${agentChannelId})\n`
+        );
+        return;
+      }
+      process.stderr.write(
+        `[kanbantic-proxy] auto-register attempt ${attempt}/3: no session in response\n`
+      );
+    } catch (e) {
+      process.stderr.write(
+        `[kanbantic-proxy] auto-register attempt ${attempt}/3 failed: ${e.message}\n`
+      );
+      if (/401|403/.test(e.message || '')) {
+        process.stderr.write(
+          '[kanbantic-proxy] check KANBANTIC_API_KEY + workspace-lidmaatschap (AgentSessions.Create)\n'
+        );
+      }
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+  }
+  process.stderr.write('[kanbantic-proxy] auto-register gave up after 3 attempts\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -878,4 +984,10 @@ module.exports = {
   screenFilePathRead,
   secretFileReason,
   MAX_FILEPATH_BYTES,
+  // KBT-F551 — exported for testing the startup auto-register.
+  shouldAutoRegister,
+  autoRegister,
+  setForwardForTest,
+  __resetForTest,
+  stopInboxPoll,
 };
