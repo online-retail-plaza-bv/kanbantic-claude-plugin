@@ -51,6 +51,38 @@ It does **not**:
 
 It **does** own exactly one status-mutation (KBT-F581): when it runs an **Epic** in the parallel per-Feature model, it claims the **Epic itself** (`Ready → InProgress`) and creates the epic-integration branch(es) **before** fanning out to the child Features — see [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581). Without this, nobody owns the Epic's status in the parallel model and it sits misleadingly on `Ready` while N agents build its children (and `kanbantic-issue-review` Step 1.6 rejects every child mini-review because the parent Epic is not `InProgress`).
 
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, triage, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Toepassing binnen deze skill:
+- **De orchestrator zelf** → **Middel (Sonnet 5)** naar complexity — sequencing/ordering-beslissingen zijn meestal Middel; escaleer naar **Zwaar (Opus 4.8)** voor lastige golf-barrière- of dependency-afwegingen (bv. Epic-bootstrap fan-out, Step 3.5).
+- **Elke lane-skill die de orchestrator invoceert** kiest zijn **eigen** modeltier — zie de Model-selectie-sectie in `kanbantic-issue-triage` (Licht), `kanbantic-issue-prepare` (Middel/Zwaar), `kanbantic-issue-execute` (Middel/Zwaar), `kanbantic-issue-review` (Zwaar). De orchestrator dicteert dit niet, maar moet consistent zijn met diezelfde tabel wanneer het zelf een Agent voor een lane-skill spawnt (bv. via parallelle `Agent`-dispatch per Feature in de fan-out).
+- **Read-only fan-out-subagents** (bv. status-verzameling over meerdere issues) → **Licht (Haiku 4.5)**.
+
+Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele, escaleren-op-bewijs) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie, niet uit geheugen.
+
+## Continue statusmelding (v3 §5.3)
+
+De orchestrator is vaak een lang-lopende, multi-issue sessie — precies het soort run waarbij een levend "wie werkt waaraan"-signaal op het bord waardevol is. Emit deze calls **naast** (niet in plaats van) de calls die elke lane-skill zelf al doet voor het issue dat het op dat moment bewerkt:
+
+| Moment | Call | Effect |
+|---|---|---|
+| Start van de sequencer-run | `register_agent_session` + `set_current_issue` | Bord toont dat de orchestrator actief is en (optioneel) welk issue net gestart is |
+| Doorlopend, tijdens lange runs | `heartbeat` (periodiek) | Toont dat de orchestrator leeft/actief is tussen lane-skill-invocaties door |
+| Na elk issue-hand-off | `report_status` + de Comment-entry uit Step 5 | Samenvatting van voortgang zichtbaar buiten alleen de discussion-timeline |
+| Bij een geparkeerd/geblokkeerd issue | `report_status(status: "Blocked")` + Decision/Comment-entry | Board-signaal dat de sequencer bewust wacht, niet hangt |
+| Einde van de run | `end_agent_session` | Sessie netjes afgesloten |
+
+Dit is een **aanvullende** laag bovenop de per-issue statusmelding die elke lane-skill al eigenaar van is (`kanbantic-issue-execute` / `kanbantic-issue-review` §Mandatory calls) — de orchestrator herimplementeert die niet, maar rapporteert wél zijn eigen sequencer-niveau voortgang.
+
 ## Lane routing table
 
 The orchestrator maps each issue's current `status` to the lane-skill that owns
