@@ -59,8 +59,8 @@ its next transition. This mirrors the Skill ↔ Lane table in `plugin/README.md`
 | Issue `status` | Next lane-skill | Hand-off back to orchestrator when |
 |---|---|---|
 | `New` | `kanbantic-issue-triage` | issue reaches `Triaged` (go) or `Cancelled` (no-go) |
-| `Triaged` | `kanbantic-issue-prepare` | issue reaches `Prepared` |
-| `Prepared` | `kanbantic-issue-execute` | issue reaches `Review` |
+| `Triaged` | `kanbantic-issue-prepare` | issue reaches `Ready` |
+| `Ready` | `kanbantic-issue-execute` | issue reaches `Review` |
 | `InProgress` | `kanbantic-issue-execute` (resume) | issue reaches `Review` |
 | `Review` | `kanbantic-issue-review` | issue reaches `InDeployment` (or back to `InProgress` on reject) |
 | `InDeployment` / `Done` / `Cancelled` | — (terminal for this run) | skip |
@@ -128,14 +128,14 @@ MCP: mcp__kanbantic__list_issues(workspaceId, initiativeId: <initiative>)
 
 Filter to **actionable** issues:
 
-- Keep issues whose `status` is `New`, `Triaged`, `Prepared`, `InProgress`, or `Review`.
+- Keep issues whose `status` is `New`, `Triaged`, `Ready`, `InProgress`, or `Review`.
 - Drop `InDeployment`, `Done`, and `Cancelled` (terminal — nothing to sequence).
 - When `repos` is set, keep only issues whose `applicationId` maps to one of those repos.
 
 Order the survivors:
 
 1. **Priority** first — `Critical` → `High` → `Medium` → `Low`.
-2. Within a priority, **issues already in flight** (`InProgress`, `Review`) before fresh ones (`Prepared`, `Triaged`, `New`) — finish what is started before opening new work.
+2. Within a priority, **issues already in flight** (`InProgress`, `Review`) before fresh ones (`Ready`, `Triaged`, `New`) — finish what is started before opening new work.
 3. Respect declared dependencies — if issue B lists A as a blocker, process A first regardless of priority.
 
 Report the ordered worklist to the operator before starting (issue code, type,
