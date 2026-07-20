@@ -148,8 +148,8 @@ The review skill's scope is per-level:
 
 **Phase-level review:**
 - Parent Epic must be on `InProgress`.
-- Phase must be on `ReadyForReview` (set by `mark_phase_for_review`).
-- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is ReadyForReview and its Epic is InProgress."
+- Phase must be on `Review` (set by `mark_phase_for_review`). *(PhaseStatus enum: `Locked` · `Active` · `Review` · `Approved` · `Rejected` — there is no `ReadyForReview`; verified against `get_system_schema`. F589 / F582.)*
+- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is on `Review` and its Epic is InProgress."
 
 **Epic / standalone-Feature / Bug review:**
 - Required status: `Review`.
@@ -269,16 +269,41 @@ The approve/reject mechanism depends on `reviewLevel`:
 
 ### 5a: APPROVE — if no Critical or Important issues
 
-**Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Instead, record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature **and** transition the Feature back to `Done`:
+**First — approve the linked User Stories & Specifications (KBT-F587).** The reviewer is the named owner of User-Story / Specification approval. Do this whenever you record an `Approved` verdict for a Feature/Bug (Feature-level **or** standalone), so the `UserStoriesApproved` / `SpecificationsApproved` readiness-gates flip green on the **normal route** instead of accumulating as silent overrides:
+```
+# per linked User Story:
+MCP: mcp__kanbantic__update_user_story(userStoryId: <id>, status: "Approved")
+# per linked Specification (title is required — pass the existing title unchanged):
+MCP: mcp__kanbantic__update_specification(id: <specId>, title: <existing title>, status: "Approved")
+```
+- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`** — a User-Story-level precondition that is **independent of the issue test-policy**. So for a Feature with genuinely no E2E surface you cannot approve the US this way, and leaving it at `Ready` keeps `UserStoriesApproved` red. In that specific case the **documented override-with-reason is the correct route** (not a sluiproute): set the E2E level to `N.v.t.` via `set_test_policy`, then waive `UserStoriesApproved` with an `overrideReason` that cites the E2E-`N.v.t.` policy as the rationale — the override is audited (KBT-F170 / KBT-PR191). Closing this coupling (so `update_user_story` honours a `N.v.t.` E2E policy and no override is needed) is a server-side follow-up on KBT-F591/KBT-F587. For a Feature that *does* have a Passed E2E case, approve the US directly with no override.
+
+**Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature, **then merge to the epic-integration branch**, **then** transition the Feature to `Done`:
 ```
 MCP: mcp__kanbantic__approve_review(
   issueId: <FeatureId>,
   verdict: "Approved" | "ApprovedWithComments",
   reason: <≥20-char Feature-review summary>
 )
+```
+
+**Merge to the epic-integration branch — NOT to `main` (KBT-F583 / KBT-F584).** This is the named owner and moment of the per-Feature merge that §5.4 of the Workflow doc requires; it was previously nobody's job. The reviewer performs it here, before marking the Feature `Done`:
+- If the Feature was built on its **own** branch/worktree (parallel per-Feature model), merge that branch into `feature/KBT-E<epic>-integratie` and run the light integration-smoke (§6 — not the full suite). One merge-to-integration at a time per repo (serialise via the orchestrator):
+  ```bash
+  git checkout feature/KBT-E<epic>-integratie
+  git pull --ff-only
+  git merge --no-ff <feature-branch> -m "Merge <FeatureCode> into KBT-E<epic> integration"
+  # run the integration-smoke, then:
+  git push origin feature/KBT-E<epic>-integratie
+  ```
+  On **conflict**: `git merge --abort`, add a fix-task on the Feature, and leave it on `Review` (the `Review → InProgress` return-path is tracked in E104 / KBT-F589). Its owner re-runs `kanbantic-issue-execute` to resolve on the feature branch, then review is re-run. Do **not** mark the Feature `Done`.
+- If the Feature shared the **epic-integration branch** directly (single-branch execute model — one branch per Epic-execution), it is already integrated; skip the merge.
+
+Only after a clean integration (or when no merge was needed):
+```
 MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "Done")
 ```
-Then **STOP** — no merge, no further steps. Control returns to the executing skill, which continues with the next Feature in the Phase.
+Then **STOP** — the **only** merge to `main` happens once, at Epic-level (Step 7). Control returns to the executing skill, which continues with the next Feature in the Phase.
 
 **Phase-level:**
 ```
@@ -302,10 +327,10 @@ Rejection MUST always include a clear justification. The reason is recorded as a
 
 Create fix tasks **on the right entity**:
 
-- **Feature-level reject**: fix-tasks on the Feature; transition Feature back to `InProgress`:
+- **Feature-level reject**: fix-tasks on the Feature; the Feature **stays on `Review`**. There is **no `Review → InProgress` transition** in the Domain (verified against `get_system_schema`, F589); the wanted return-path is tracked in **[OPEN: KBT-F562 / E104]**. The implementer re-runs `kanbantic-issue-execute` to pick up the fix-tasks from `Review`:
   ```
   MCP: mcp__kanbantic__add_task(issueId: <FeatureId>, title: "Fix: ...", priority: "High")
-  MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "InProgress")
+  # Do NOT call update_issue_status(<FeatureId>, "InProgress") — Review → InProgress does not exist (F589).
   ```
 - **Phase-level reject**: fix-tasks on the Epic (or on individual Features in the Phase if the issue is per-Feature), then `reject_phase`:
   ```
@@ -376,14 +401,22 @@ If no untracked deferrals are found → continue silently.
 
 ## Step 7: Merge + Push + Cleanup
 
+<HARD-GATE>
+This is the **only** merge to `main`, and it runs **only at Epic-level / standalone-Feature / Bug** final approve (Step 6). The merge **source is the epic-integration branch** `feature/KBT-E<epic>-integratie` (into which every Feature was merged in Step 5a), not an individual feature branch — so the full CI suite (T3) runs once per Epic, not once per Feature (Workflow doc §6–§7). For a standalone Feature/Bug the "integration branch" is simply its own branch.
+</HARD-GATE>
+
 Execute the merge to main with a no-ff merge commit so the merge-historie zichtbaar blijft:
 
 ```bash
 git checkout main
 git pull origin main
-git merge --no-ff <feature-branch> -m "Merge <ISSUE-CODE> (<versionContext.name>): <short summary>"
+git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionContext.name>): <short summary>"
 git push origin main
 ```
+
+**Where `main` is protected** (push-to-main blocked — e.g. the plugin repo, KBT-REPO002): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+
+**Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
 
 Include the Version name (`versionContext` from Step 1b) in the merge commit summary so the merge-historie ties the change to its version-milestone (KBT-F318). For a backlog issue (`versionContext == "—"`) omit the parenthetical.
 
@@ -436,7 +469,7 @@ After a successful `approve_review` on the **Epic / standalone-Feature / Bug**
 final-approve path (this Step 7.5), promote every user story linked to the
 issue from `Implemented` to `Validated`. This is the second half of the
 `update_validation_status` lifecycle — the first half runs in
-`kanbantic-issue-execute` Step 7d (NotImplemented → Implemented).
+`kanbantic-issue-execute` Step 7d (`Approved → Implemented`).
 
 Do **NOT** call this from the Feature-level mini-review approve in Step 5a
 (line ≈239) — per-Feature mini-approves are not the canonical promotion
@@ -445,9 +478,11 @@ point. Validation cascades up to the final Epic / standalone approve only.
 ```
 # Skip silently if the issue has no linked user stories.
 MCP: mcp__kanbantic__get_user_story_with_requirements  // per linked story
+# Signature is (linkId, validationStatus) — linkId is the Specification↔UserStory link
+# from the user story's linkedSpecifications, NOT the userStoryId (F589).
 MCP: mcp__kanbantic__update_validation_status(
-  userStoryId,
-  status: "Validated"
+  linkId,                        // from get_user_story_with_requirements → linkedSpecifications[].linkId
+  validationStatus: "Validated"
 )
 ```
 
@@ -503,7 +538,7 @@ After this transition, surface the deploy-instructions to the caller:
 > 4. Smoke-test against production.
 > 5. Manually transition the issue to `Done` via `update_issue_status(status: "Done")` — the standard Done-readiness gate (all test cases Passed, all specs Approved, no pending Document Impacts, etc.) still applies.
 
-If the deploy fails: transition back to `Review` (`update_issue_status(status: "Review")`) so the implementer can pick up fix-tasks. **Do NOT** transition `InDeployment → Cancelled` directly — the Domain layer blocks that transition (KBT-RL053); cancel from Review (pre-deploy rollback) or from Done (post-deploy hotfix-rollback).
+If the deploy fails: **there is no legal `InDeployment → Review` transition** — the Domain layer allows only `InDeployment → Done` (KBT-RL053, verified against `get_system_schema`; `InDeployment → Cancelled` is likewise blocked). Do **NOT** attempt an illegal transition. Instead: `report_status` + an `add_discussion_entry` documenting the failed deploy, leave the issue on `InDeployment`, and escalate to the PO for a hotfix-forward or a manual recovery decision. A proper failed-deploy return-path is tracked in **[OPEN: KBT-F589 / E104]**.
 
 ## Step 9: Knowledge-Extractie (optional)
 

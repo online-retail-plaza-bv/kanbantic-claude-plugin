@@ -83,7 +83,7 @@ KBT-E060 — Add Workspace Search
              └─ KBT-F264 (Frontend search box)
 ```
 
-Roll-up: Tasks Done → Feature Done → Phase ReadyForReview → Epic Review-ready.
+Roll-up: Tasks Done → Feature Done → Phase Review → Epic Review-ready.
 
 **Legacy shape — Phase → Tasks** (existing Epics; still supported):
 

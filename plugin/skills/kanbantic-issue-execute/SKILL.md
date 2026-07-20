@@ -37,6 +37,25 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 Tasks can ONLY be started (set to InProgress) when the parent issue is in **InProgress** status. If the issue is not InProgress, you MUST claim it first (Step 2) before working on any task. NEVER start a task on an issue that is still in New, Triaged, Prepared, or any other non-InProgress status.
 </HARD-GATE>
 
+## Mandatory calls — quick reference (KBT-F585 / v4 §2.10)
+
+A status change is **work, not a by-product**. Emit these calls as you go — a green
+run or a finished task that isn't recorded makes the board lie:
+
+```
+claim_issue ─▶ register_agent_session ─▶ set_current_issue
+      │
+      ├─ per task:  update_task_status(InProgress) ─▶ [build + verify] ─▶ update_task_status(Done)
+      │                    └─ periodically: heartbeat
+      ├─ per test:  [run the test] ─▶ update_test_case(Passed | Failed | Skipped)   ← Step 6d; feeds the non-overridable AllTestsPassed gate
+      ├─ milestone / blocker:  report_status + add_discussion_entry
+      └─ end:  end_agent_session
+```
+
+The Phase/Golf calls (`mark_phase_for_review` → `approve_phase` → `unlock_phase`)
+apply to Epic-walks; their ownership (orchestrator vs. executing agent) is tracked
+in **[OPEN: KBT-F582]** — see `kanbantic-orchestrate`.
+
 ## Step 0: Ensure Repository Access
 
 Before starting, verify you have local access to the workspace's code repository:
@@ -758,6 +777,26 @@ Load the Toolkit Skill content and execute the flow it describes:
 - Add discussion entry: "Local E2E tests skipped — {reason}"
 - Warn the user and proceed to Step 7 (do not block the workflow)
 
+### 6d: Record test-case results (MANDATORY — owner of the AllTestsPassed gate, KBT-F585)
+
+Running a test green is **not** the same as recording it. For **every** Test Case
+linked to this issue, immediately after the corresponding run, set its status via
+`update_test_case` based on the outcome. This step is the **proactive owner** of the
+non-overridable `AllTestsPassed` gate — Step 7 only *verifies* it:
+
+```
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Passed")   // green run
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Failed")   // red run (+ fix-task)
+MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Skipped")  // deliberately not run (+ reason ≥20 chars)
+```
+
+- Map each level to its run: **Unit / Integration** from the per-task T1/T2 runs,
+  **E2E** from the `/test-e2e-local` run in 6b.
+- **Anti-pattern:** never set `Passed` without an actual green run — the status is a
+  bewijsuitspraak, gekoppeld aan het verificatie-commando uit de task-DoD.
+- Without this call the Test Case stays on `Ready`/`Draft` and Step 7 **blocks** the
+  Review transition — exactly the KBT-F551 failure mode (issue on Review with 0/5 Passed).
+
 ## Step 7: Verify Review Pre-conditions + Transition
 
 <HARD-GATE>
@@ -803,19 +842,21 @@ Confirm `isReadyToClaim` is still true (or that soft-override is acceptable). Re
 
 ### 7d: Promote linked user stories to `Implemented` (KBT-RL064 Invariant 1)
 
-Every user story linked to this issue (via `userStoryId` or the issue's
-`linkedUserStories` collection) MUST flip from `NotImplemented` to
-`Implemented` here — after tasks are Done and tests Passed but **before** the
-Review transition. This is the first half of the `update_validation_status`
-lifecycle; the second half (`Implemented → Validated`) runs in
+Every Specification↔UserStory link on this issue MUST flip to `Implemented`
+here — after tasks are Done and tests Passed but **before** the Review
+transition. The validation enum is `Approved → Implemented → Validated`
+(there is **no `NotImplemented`** — verified against `get_system_schema`, F589;
+a link starts at `Approved` when the spec/US is approved). This is the first
+half of the lifecycle; the second half (`Implemented → Validated`) runs in
 `kanbantic-issue-review` Step 7.5b after final-approve.
 
 ```
 # Skip silently if the issue has no linked user stories.
 MCP: mcp__kanbantic__get_user_story_with_requirements  // per linked story
+# Signature is (linkId, validationStatus) — linkId from linkedSpecifications, NOT userStoryId (F589).
 MCP: mcp__kanbantic__update_validation_status(
-  userStoryId,
-  status: "Implemented"
+  linkId,                        // from get_user_story_with_requirements → linkedSpecifications[].linkId
+  validationStatus: "Implemented"
 )
 ```
 

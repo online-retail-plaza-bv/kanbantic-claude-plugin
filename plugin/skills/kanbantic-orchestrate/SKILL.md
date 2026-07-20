@@ -44,9 +44,10 @@ lane-skills and is NOT duplicated here (see [Boundary](#boundary--what-this-skil
 - Records a short orchestration log (Comment discussion-entries) so the run is auditable.
 
 It does **not**:
-- Mutate issue status directly (the lane-skills own every transition).
-- Claim issues, push branches, run tests, or merge — all lane-skill responsibilities.
+- Mutate **Feature/Bug** status directly, or claim/push/test/merge child issues — all lane-skill responsibilities.
 - Create issues, specs, user stories, or implementation plans.
+
+It **does** own exactly one status-mutation (KBT-F581): when it runs an **Epic** in the parallel per-Feature model, it claims the **Epic itself** (`Ready → InProgress`) and creates the epic-integration branch(es) **before** fanning out to the child Features — see [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581). Without this, nobody owns the Epic's status in the parallel model and it sits misleadingly on `Ready` while N agents build its children (and `kanbantic-issue-review` Step 1.6 rejects every child mini-review because the parent Epic is not `InProgress`).
 
 ## Lane routing table
 
@@ -66,6 +67,32 @@ A single issue may traverse several lanes in one orchestration pass: triage →
 prepare → execute → review. The orchestrator re-reads `status` after each
 lane-skill returns and routes again until the issue is terminal for this run or
 the lane-skill reports a blocker.
+
+### Step 3.5: Epic bootstrap (parallel fan-out) — KBT-F581
+
+When the actionable issue is an **Epic** that will be built in the parallel
+per-Feature model (its child Features are each independently claimable), the
+orchestrator bootstraps the Epic **once**, before routing any child:
+
+1. **Claim the Epic** to promote it `Ready → InProgress` and take ownership on the
+   board (so `HasAssignee` is met and the Epic no longer lies on `Ready`):
+   ```
+   MCP: mcp__kanbantic__claim_issue(issueId: <EpicCode>, branch: "feature/<EpicCode>-integratie", versionId: <explicit Version GUID>)
+   ```
+   Pass an **explicit `versionId`** (auto-version can 500 — KBT-B443). Note: `claim_issue`
+   records **one** branch on the Epic record — for a multi-repo Epic that is the coordinating
+   repo's integration branch; the other repos' integration branches are resolved per-repo via
+   `register_issue_branch` (by the Feature's `applicationId`, KBT-F588).
+2. **Create the epic-integration branch** off `main` in **each touched repo**
+   (multi-repo Epics, KBT-F588) — `feature/<EpicCode>-integratie`. Child Features
+   branch from it and merge back into it (`kanbantic-issue-review` Step 5a); the
+   single merge to `main` per repo happens at Epic-level review (Step 7).
+3. **Then fan out**: route each child Feature/Bug through prepare → execute →
+   review as usual. The Epic advances to `InDeployment`/`Done` only after its
+   children roll up (the harde verticale roll-up, Workflow doc §0.1).
+
+This is the **only** claim/branch action the orchestrator performs; child
+Feature/Bug claims + branches remain owned by `kanbantic-issue-execute`.
 
 ## Checklist
 
@@ -153,16 +180,20 @@ entries are written by the lane-skills that own the corresponding transition.
 This skill is the orchestration layer **only**. The following are owned by the
 lane-skills and MUST NOT be duplicated, re-implemented, or pre-run here:
 
-- **Claim flow** (`claim_issue`, readiness gate, branch creation) → `kanbantic-issue-execute` Step 2.
+- **Child Feature/Bug claim flow** (`claim_issue`, readiness gate, branch creation) → `kanbantic-issue-execute` Step 2.
 - **Worktree + sync + ABP pre-flight HARD-GATES** → `kanbantic-issue-execute` Steps 0.5–0.7.
 - **Per-phase / per-feature push and review gates** → `kanbantic-issue-execute` Step 4A.
 - **Local E2E test gate + Review pre-conditions** → `kanbantic-issue-execute` Steps 6–7.
 - **Code review, merge, branch cleanup, `Review → InDeployment`** → `kanbantic-issue-review`.
 - **`update_validation_status` lifecycle** → execute (`Implemented`) + review (`Validated`).
 
+**Sole exception (KBT-F581):** the orchestrator claims the **parent Epic** once and
+creates the epic-integration branch(es) in [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581).
+That is the only `claim_issue` / branch-create / `update_issue_status` it performs.
+
 If you find yourself about to call `claim_issue`, `git push`, `update_issue_status`,
-or a merge command from this skill, STOP — you are in the wrong layer. Invoke the
-lane-skill instead.
+or a merge command from this skill on a **child Feature/Bug**, STOP — you are in the
+wrong layer. Invoke the lane-skill instead.
 </HARD-GATE>
 
 ## Workspace override

@@ -215,6 +215,14 @@ MCP: mcp__kanbantic__create_test_case(
 
 Test-case test-levels should aim for Unit + Integration + E2E coverage where sensible.
 
+**Koppel het verificatie-commando aan een Test Case (KBT-F585).** Elke granulaire Task
+draagt een concreet **verificatie-commando** in zijn DoD (zie `kanbantic-issue-execute`).
+Neem dat commando — of het gedrag dat het aantoont — op in de `steps` / `expectedResult`
+van een gekoppelde Test Case. Zo is de latere `update_test_case(Passed)` (execute Step 6d)
+een **bewijsuitspraak** die aan een gedraaide, reproduceerbare check hangt, geen gok.
+Zonder die koppeling wordt de test-case-status willekeurig en ondermijnt hij de
+niet-overridable `AllTestsPassed`-gate.
+
 ### 5F.5: Test-policy declaratie (Regel E / KBT-F442)
 
 Declare the per-level test-policy for this Feature **before transitioning to Prepared**. The physical database-freeze happens when `kanbantic-issue-execute` calls `claim_issue`, but the declaration must be captured now as a `Decision` entry so the executing agent and reviewer can both read it.
