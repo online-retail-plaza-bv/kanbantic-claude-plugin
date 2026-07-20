@@ -5,6 +5,8 @@ description: "Use after kanbantic-issue-execute marks an issue Review (or to run
 
 # Kanbantic Issue Review
 
+> **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
+
 ## Overview
 
 Complete the Review → InDeployment lane transition (per KBT-RL053; backend auto-promotes to Done on merge or remains InDeployment until deploy-gate clears, KBT-F236). This skill:
