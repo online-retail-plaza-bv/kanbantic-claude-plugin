@@ -1,6 +1,6 @@
 ---
 name: kanbantic-issue-execute
-description: "Use when a Kanbantic issue needs to be implemented (status Prepared, or Triaged with isReadyToClaim for legacy issues that pre-date KBT-F235). Calls claim_issue which atomically promotes Prepared/Triaged → InProgress (KBT-RL052). For Epics: executes the Implementation Plan phase by phase with per-phase push. Per-Phase shape auto-detected (KBT-RL057, KBT-F250 v2.4.0): legacy Phase→Tasks vs new Phase→Features→Tasks. For Features/Bugs: executes tasks directly without phases. Ends at status Review — handoff to kanbantic-issue-review for merge/close."
+description: "Use when a Kanbantic issue needs to be implemented (status Ready — renamed from Prepared per KBT-E103/v3 — or Triaged with isReadyToClaim for legacy issues that pre-date KBT-F235). Calls claim_issue which atomically promotes Ready/Triaged → InProgress (KBT-RL052). For Epics: executes the Implementation Plan phase by phase with per-phase push. Per-Phase shape auto-detected (KBT-RL057, KBT-F250 v2.4.0): legacy Phase→Tasks vs new Phase→Features→Tasks. For Features/Bugs: executes tasks directly without phases. Ends at status Review — handoff to kanbantic-issue-review for merge/close."
 ---
 
 # Kanbantic Issue Execute
@@ -23,7 +23,7 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 
 ## Checklist
 
-1. **Gate-check** — verify issue is `Prepared` (preferred) or `Triaged` + ready to claim (legacy) (HARD GATE)
+1. **Gate-check** — verify issue is `Ready` (preferred) or `Triaged` + ready to claim (legacy) (HARD GATE)
 1.5. **Version claim-gate** — issue's Application MUST have a Planned Version, else block the claim with a clear error + `preview_next_version` suggestion (HARD GATE, KBT-F318 / KBT-RL145)
 2. **Claim issue** — atomically sets status to InProgress + records branch (single MCP call, KBT-RL052); auto-assigns the Planned Version
 3. **Load plan + knowledge** — get phases/tasks AND project patterns from Kanbantic
@@ -36,7 +36,7 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 8. **Handoff** — instruct user/agent to invoke `kanbantic-issue-review`
 
 <HARD-GATE>
-Tasks can ONLY be started (set to InProgress) when the parent issue is in **InProgress** status. If the issue is not InProgress, you MUST claim it first (Step 2) before working on any task. NEVER start a task on an issue that is still in New, Triaged, Prepared, or any other non-InProgress status.
+Tasks can ONLY be started (set to InProgress) when the parent issue is in **InProgress** status. If the issue is not InProgress, you MUST claim it first (Step 2) before working on any task. NEVER start a task on an issue that is still in New, Triaged, Ready, or any other non-InProgress status.
 </HARD-GATE>
 
 ## Mandatory calls — quick reference (KBT-F585 / v4 §2.10)
@@ -189,7 +189,7 @@ The script emits a single-line JSON result. Possible `action` values:
 | `missing-token` | `$USERPROFILE\.abp\cli\access-token.bin` missing | STOP — Decision entry: run `abp login <username>` in a non-agent shell (interactive credentials) and restart |
 | `stale-token` | token `LastWriteTime` exceeds threshold (default 7 days) | STOP — Decision entry: token is `tokenAgeDays` old (threshold `thresholdDays`), re-run `abp login <username>` to refresh |
 
-After a FAIL (`missing-env-var` / `missing-token` / `stale-token`) the hook exits 1; the skill MUST stop here so the issue stays in `Prepared` / `Triaged`. Add the `Decision` discussion-entry from the rule-table above, then exit cleanly. The operator fixes the auth-state manually and re-invokes the skill.
+After a FAIL (`missing-env-var` / `missing-token` / `stale-token`) the hook exits 1; the skill MUST stop here so the issue stays in `Ready` / `Triaged`. Add the `Decision` discussion-entry from the rule-table above, then exit cleanly. The operator fixes the auth-state manually and re-invokes the skill.
 
 ### Opt-out
 
@@ -199,7 +199,7 @@ Set `KANBANTIC_SKIP_ABP_CHECK=1` to skip the check entirely. Intended for CI / h
 
 Default is 7 days. Override per session via env-var `KANBANTIC_ABP_TOKEN_MAX_AGE_DAYS=<int>`. Empirically a 10-day-old token is already enough to fail `dotnet run` (KBT-F257 incident, 2026-05-12); 7d gives a safety margin without being aggressive.
 
-## Step 1: Gate-check — Prepared (preferred) or Triaged (legacy) + Ready to Claim
+## Step 1: Gate-check — Ready (preferred) or Triaged (legacy) + Ready to Claim
 
 Before claiming, verify the issue is in the right state and has the required artifacts:
 
@@ -211,12 +211,12 @@ Inspect the response:
 
 <HARD-GATE>
 - **`status`**: accepted bron-statuses for execute are:
-  - `Prepared` ← **preferred path**, the kanbantic-issue-prepare skill transitions here once readiness is green (KBT-F235).
-  - `Triaged` ← legacy bron — accepted only when `isReadyToClaim == true`. Used by issues that pre-date the data-migration to Prepared, or by single-session intake → triage → prepare → execute runs that did not yet take the Triaged → Prepared transition.
+  - `Ready` ← **preferred path** (renamed from `Prepared` in KBT-E103/v3), the kanbantic-issue-prepare skill transitions here once readiness is green (KBT-F235).
+  - `Triaged` ← legacy bron — accepted only when `isReadyToClaim == true`. Used by issues that pre-date the data-migration to Ready, or by single-session intake → triage → prepare → execute runs that did not yet take the Triaged → Ready transition.
   - `InProgress` ← already claimed by you in a previous session that crashed; resume execution from Step 3.
   - Any other status (`New`, `Review`, `Done`, `Cancelled`) → STOP and redirect to the appropriate skill (triage / review / etc.).
-- **`isReadyToClaim`**: derived from `Status == Prepared` (KBT-SR266). For Prepared-status issues this is always `true`. For legacy Triaged-status issues, must be backed by green readiness-checks for the `Triaged → InProgress` gate. If `false` and the issue is on `Triaged`:
-  - **Hard enforcement**: STOP and redirect to `kanbantic-issue-prepare` to supply missing artifacts and transition to `Prepared`.
+- **`isReadyToClaim`**: derived from `Status == Ready` (KBT-SR266). For Ready-status issues this is always `true`. For legacy Triaged-status issues, must be backed by green readiness-checks for the `Triaged → InProgress` gate. If `false` and the issue is on `Triaged`:
+  - **Hard enforcement**: STOP and redirect to `kanbantic-issue-prepare` to supply missing artifacts and transition to `Ready`.
   - **Soft enforcement**: warn which checks failed; collect an `overrideReason` to pass in Step 2.
 </HARD-GATE>
 
@@ -232,7 +232,7 @@ Before `claim_issue` (Step 2), verify the issue's Application has a **Planned** 
    ```
    MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter to issue.applicationId + status == "Planned"
    ```
-3. **No Planned Version for the Application** → STOP. Do **not** call `claim_issue` (no partial state — the issue stays on `Prepared` / `Triaged`). Fetch the suggested bump and report verbatim:
+3. **No Planned Version for the Application** → STOP. Do **not** call `claim_issue` (no partial state — the issue stays on `Ready` / `Triaged`). Fetch the suggested bump and report verbatim:
    ```
    MCP: mcp__kanbantic__preview_next_version(applicationId: <issue.applicationId>)
    // → { proposed, rationale, bumpLevel } — quote `proposed` as the recommended new Version
@@ -254,7 +254,7 @@ Before `claim_issue` (Step 2), verify the issue's Application has a **Planned** 
 1. Validates the readiness gate (with optional `overrideReason` for Soft enforcement).
 2. Sets the assignee to the current agent.
 3. Records the branch on the issue.
-4. **Promotes the issue from `New`/`Triaged`/`Prepared` to `InProgress` in the same call** (KBT-RL052).
+4. **Promotes the issue from `New`/`Triaged`/`Ready` to `InProgress` in the same call** (KBT-RL052).
 
 Do **not** split this into `claim_issue` + a separate `update_issue_status(InProgress)` — the second call is unnecessary and historically the source of `MissingAssignee` errors when agents accidentally reversed the order.
 </HARD-GATE>
@@ -282,12 +282,12 @@ This means the execute-skill's claim step is **always one tool call**, regardles
 
 | Pre-state of the issue | Behavior of `claim_issue` |
 |---|---|
-| `Prepared`, no assignee | **Preferred path.** Fresh claim. Sets assignee, branch, status → `InProgress`. |
-| `Prepared`, assignee = self | Resume. Updates `claimedAt`+`branch`, promotes → `InProgress`. |
+| `Ready`, no assignee | **Preferred path.** Fresh claim. Sets assignee, branch, status → `InProgress`. |
+| `Ready`, assignee = self | Resume. Updates `claimedAt`+`branch`, promotes → `InProgress`. |
 | `Triaged`, no assignee | Legacy claim (pre-F2 issues). Sets assignee, branch, status → `InProgress`. |
 | `Triaged`, assignee = self | Legacy resume. Updates `claimedAt`+`branch`, promotes → `InProgress`. |
 | `InProgress`, assignee = self | Resume. Updates `claimedAt`+`branch`, status unchanged. |
-| `Prepared`/`Triaged`/`InProgress`, assignee = other principal | Fails with structured `Kanbantic:IssueAlreadyAssigned` (see error handling below). |
+| `Ready`/`Triaged`/`InProgress`, assignee = other principal | Fails with structured `Kanbantic:IssueAlreadyAssigned` (see error handling below). |
 
 ### Step 2 — Handling structured error responses
 
@@ -489,7 +489,7 @@ When all Tasks in the Phase are `Done` or `Cancelled`, continue to 4A.3 (push + 
 Use this when 4A.0 detected `new shape` for the current Phase.
 
 <IMPORTANT>
-Before starting any Feature, verify the parent Epic-issue is **InProgress**. The child Features stay on `Prepared` (or `Triaged` for legacy intake) until each is sub-claimed below.
+Before starting any Feature, verify the parent Epic-issue is **InProgress**. The child Features stay on `Ready` (or `Triaged` for legacy intake) until each is sub-claimed below.
 </IMPORTANT>
 
 For each Feature in `list_features_by_phase(phaseId)` (in their `order` / Code order):
@@ -498,7 +498,7 @@ For each Feature in `list_features_by_phase(phaseId)` (in their `order` / Code o
 `list_features_by_phase` response may include Features that are already `Done`
 or `Cancelled` from a prior walk. Skip those — `claim_issue` is idempotent and
 would not break, but re-walking completed work is a waste. Only walk Features
-whose status is `Prepared`, `InProgress`, or `Triaged` (legacy intake).
+whose status is `Ready`, `InProgress`, or `Triaged` (legacy intake).
 
 #### 4A.2-new.a: Sub-claim the Feature
 
@@ -610,7 +610,7 @@ git commit -m "feat(KBT-F262): add Issue.PhaseId column + EF migration"
 ```
 For legacy-shape Epics, attribute to the Epic:
 ```
-git commit -m "feat(KBT-E059): add Prepared status to IssueStatus enum"
+git commit -m "feat(KBT-E059): add Ready status to IssueStatus enum"
 ```
 
 ## Step 4B: Execute Tasks Directly (Features / Bugs)
@@ -886,6 +886,33 @@ Report:
 **Next step:** Invoke `kanbantic-issue-review` to run code review, merge, close, and extract final knowledge."
 
 Do **not** merge, do **not** set the issue to Done, do **not** create a PR — those are `kanbantic-issue-review`'s responsibilities.
+
+## Blocked / OnHold — Issue side-states during InProgress (KBT-F561)
+
+Execute is the **only** lane-skill whose issues live in `InProgress` — exactly the status these two side-states pair with. If the executing agent hits an external blocker or needs to consciously park the work mid-build, use `update_issue_status` to move the issue sideways, never `Cancelled` for a temporary situation:
+
+```
+MCP: mcp__kanbantic__update_issue_status(issueId, status: "Blocked", reason: "<what is blocking, ≥ meaningful detail>")
+MCP: mcp__kanbantic__update_issue_status(issueId, status: "OnHold", reason: "<why the work is being deliberately parked>")
+```
+
+<HARD-GATE>
+Per KBT-F561 (verified against `get_system_schema`'s `IssueStatus` transitions):
+- `Blocked` and `OnHold` may only be entered **from `InProgress`** — never from `Ready`, `Triaged`, `Review`, etc. If the issue isn't `InProgress` yet, claim it first (Step 2).
+- A `reason` is **required** on entry — the call is rejected without one (mirrors the Cancelling discipline below).
+- The only legal exits are back to `InProgress` (work resumes) or to `Cancelled` (the work is abandoned, with its own ≥20-char justification per the Cancelling section below). There is **no** direct `Blocked`/`OnHold` → `Review` or → `Done` transition.
+</HARD-GATE>
+
+**When to use which:**
+- **`Blocked`** — an external/technical dependency you don't control (waiting on another Feature's merge, a third-party outage, a missing credential). Use when the *cause* is outside your control.
+- **`OnHold`** — a deliberate pause you or the operator chose (reprioritized, waiting on a product decision). Use when the *cause* is a choice, not an obstacle.
+
+Resume with:
+```
+MCP: mcp__kanbantic__update_issue_status(issueId, status: "InProgress")
+```
+
+Log the block/resume as a `Comment` or `Decision` discussion-entry alongside the status call so the board's Blocked/OnHold signal has visible context (per the "continue statusmelding" discipline in the mandatory-calls table above).
 
 ## Subagent Mode
 
