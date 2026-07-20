@@ -56,7 +56,39 @@ claim_issue ─▶ register_agent_session ─▶ set_current_issue
 
 The Phase/Golf calls (`mark_phase_for_review` → `approve_phase` → `unlock_phase`)
 apply to Epic-walks; their ownership (orchestrator vs. executing agent) is tracked
-in **[OPEN: KBT-F582]** — see `kanbantic-orchestrate`.
+in **[OPEN: KBT-F582]** — see `kanbantic-orchestrate`. This table is the full
+continue-statusmelding call-set from v3 **§5.3** — no calls are missing.
+
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol — dit geldt zowel voor de hoofd-Agent die deze skill draait als voor elke subagent die hij dispatcht (zie Subagent Mode, verderop).
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Toepassing binnen deze skill:
+- **De uitvoerende Agent zelf** (die deze skill draait) → **Middel (Sonnet 5)** als default; **Zwaar (Opus 4.8)** voor de moeilijkste Features (complexe architectuur, hoog conflictrisico — bv. Golf 0-fundament).
+- **Implementer-subagents** (Subagent Mode, één per Task) → **Middel (Sonnet 5)** — dit zijn de "meeste bouw-tasks" uit de tabel; gebruik `effort: high`/`xhigh` voor coding/agentic werk.
+- **Read-only fan-out-subagents** (verkenning van meerdere bestanden vóór een Task) → **Licht (Haiku 4.5)**, `effort: low`.
+
+Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele, escaleren-op-bewijs) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie, niet uit geheugen. Modelkeuze per Subagent-Toolkit-item wordt via `kanbantic-sync-workspace-skills` naar de `.claude/agents/*.md`-frontmatter gerenderd (KBT-F437).
+
+## Parallellisme — twee assen (v3 §5.5)
+
+Parallelliseer op **twee niveaus tegelijk**; kies altijd het goedkoopste niveau dat het werk dekt.
+
+**As 1 — meerdere Agents (werkstation-niveau).** Meerdere Axons, elk op een eigen Feature/spoor, in een **eigen git-worktree** (Step 0.5 HARD-GATE hierboven), verdeeld over de golven van het Implementatieplan. Elke Agent doet zijn eigen `claim_issue` + continue statusmelding (mandatory-calls tabel hierboven). Gebruik dit wanneer Features **echt onafhankelijk** zijn — de fan-out-beslissing zelf hoort bij `kanbantic-orchestrate`.
+
+**As 2 — subagents binnen déze Agent.** Binnen één uitvoerende Agent (deze skill-run) kunnen subagents worden gestart om *binnen* de Feature/Task-lijst werk te parallelliseren, **zonder** een extra Kanbantic-claim. Drie patronen:
+- **Read-only fan-out** (altijd veilig parallel) — onderzoek/verkenning over meerdere bestanden vóór het schrijven van een Task; delen dezelfde worktree maar schrijven niet.
+- **Schrijvende fan-out** (alleen met isolatie) — onafhankelijke deel-taken die code wijzigen mogen alleen parallel als ze **verschillende bestanden** raken of elk een **eigen worktree** krijgen; anders sequentieel (zie Subagent Mode, verderop).
+- **Verificatie/adversarial** — een subagent die een resultaat onafhankelijk narekent vóór de parent commit.
+
+**Governance:** de **parent-Agent** (deze skill-run) blijft eigenaar van het Kanbantic-issue en van **álle** statusupdates (`update_task_status`, `update_test_case`, `claim_issue`, …). Subagents claimen **niets** en leveren hun resultaat terug aan de parent.
 
 ## Step 0: Ensure Repository Access
 
@@ -468,7 +500,7 @@ For each task in the Phase (where `IssueTask.IssueId == EpicId` and `IssueTask.P
 MCP: mcp__kanbantic__update_task_status(issueId: <EpicId>, taskId, status: "InProgress")
 ```
 
-**Implement:** Read the task description and the KnowledgeExtraction discussion entry for this phase. Write the code, run build/tests, fix issues.
+**Implement (T1 — task-level, local, v3 §6):** Read the task description and the KnowledgeExtraction discussion entry for this phase. Write the code, run **only the Unit-tests the task touches** for fast local feedback, fix issues.
 
 **Complete:**
 ```
@@ -522,7 +554,7 @@ For each Task on the Feature (where `IssueTask.IssueId == FeatureId`):
 MCP: mcp__kanbantic__update_task_status(issueId: <FeatureId>, taskId, status: "InProgress")
 ```
 
-**Implement:** Read task + Feature description + Epic's KnowledgeExtraction entry for this Phase. Write the code.
+**Implement (T1 — task-level, local, v3 §6):** Read task + Feature description + Epic's KnowledgeExtraction entry for this Phase. Write the code, run **only the Unit-tests the task touches** for fast local feedback.
 
 **Complete:**
 ```
@@ -643,10 +675,10 @@ For each task:
 MCP: mcp__kanbantic__update_task_status(issueId, taskId, status: "InProgress")
 ```
 
-**Implement:**
+**Implement (T1 — task-level, local, v3 §6):**
 - Read the task description and relevant discussion entries
 - Write the code
-- Run build/test commands to verify
+- Run **only the Unit-tests the task touches** for fast local feedback (build/test commands)
 
 **Complete:**
 ```
@@ -740,9 +772,11 @@ Use this template:
 
 This creates traceability between the issue and knowledge base — visible in the issue's discussion timeline in the Kanbantic UI.
 
-## Step 6: Run Local E2E Tests (auto-trigger)
+## Step 6: Run Local E2E Tests (T2 — Feature-level, local; auto-trigger)
 
 After all tasks are Done and knowledge is updated, run the local E2E test suite before transitioning to Review.
+
+**Test-tier note (v3 §6, getrapte teststrategie):** the per-task Unit runs in Step 4A/4B.2 are **T1**; this step (Feature-level local run + the mini-review that follows in `kanbantic-issue-review`) is **T2** — Unit + Integration + local E2E of *this* Feature, no full CI. **T3** (the full CI suite — all Unit/Integration + Playwright-E2E + build-image, run once on the epic→main PR) is deliberately **out of scope for this skill** — it is owned by `kanbantic-issue-review` Step 7 (see that skill's T3 references at the merge step).
 
 ### 6a: Check if skill exists
 
@@ -919,7 +953,7 @@ Log the block/resume as a `Comment` or `Decision` discussion-entry alongside the
 For large plans, you can dispatch implementer subagents per task. Use the template at `implementer-prompt.md` in this directory.
 
 When using subagents:
-1. Dispatch one subagent per task using the Agent tool
+1. Dispatch one subagent per task using the Agent tool — **Middel (Sonnet 5)** tier per the Model-selectie section above (this is As 2, "schrijvende fan-out": only parallelize subagents whose tasks touch **different files** or that each get their own worktree; otherwise dispatch sequentially)
 2. Review the subagent's output
 3. Update task status in Kanbantic based on results
 4. Commit + (for Epics) request review via 4A.3/4A.4
