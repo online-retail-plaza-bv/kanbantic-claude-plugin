@@ -7,6 +7,8 @@ command: triage-issue
 
 # Kanbantic Issue Triage
 
+> **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
+
 ## Overview
 
 Dedicated lane-skill for the **New → Triaged** (or **New → Cancelled**) transition. Short dialogue, fixed vocabulary, strict tool-set. Triage costs minuten, not uren — the full elaboration (specs / user stories / test cases / implementation plan) belongs to `kanbantic-issue-prepare`.
@@ -154,7 +156,7 @@ Report:
 - Application: [application]
 - Initiative: [initiative or —]
 
-**Next step:** Invoke `kanbantic-issue-prepare` to add specs / user stories / test cases (Epic also: implementation plan). Once all readiness-checks are green, prepare transitions the issue to **`Prepared`** (KBT-F235), surfacing it in the Prepared kanban-column for `kanbantic-issue-execute` to claim. `readinessChecks` will stay red for Specifications / TestCases / UserStories and the issue will stay on `Triaged` until prepare has run — that is expected."
+**Next step:** Invoke `kanbantic-issue-prepare` to add specs / user stories / test cases (Epic also: implementation plan). Once all readiness-checks are green, prepare transitions the issue to **`Ready`** (KBT-F235; renamed from `Prepared` in KBT-E103/v3), surfacing it in the Ready kanban-column for `kanbantic-issue-execute` to claim. `readinessChecks` will stay red for Specifications / TestCases / UserStories and the issue will stay on `Triaged` until prepare has run — that is expected."
 
 ## Step 6: No-go Path
 
