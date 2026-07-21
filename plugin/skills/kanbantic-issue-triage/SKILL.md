@@ -227,6 +227,26 @@ Report:
 
 No handoff to prepare or other skills.
 
+## Step 6.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+Applies regardless of Go (Step 5) or No-go (Step 6) outcome. If the go/no-go dialogue or the duplicate-heuristic check (Step 3) surfaced a reusable pattern, gotcha, or rule — e.g. a recurring intake-quality issue, a metadata convention, an MCP quirk hit while triaging — this is knowledge for the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014). Skip this step entirely if nothing reusable was discovered — it is optional, not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit items and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas). If it does, reconcile via `update_toolkit_item` rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<pattern / gotcha, when to use>"
+)
+```
+
 ## Key Principles
 
 - **Minutes, not hours** — triage is fast; elaboration is `kanbantic-issue-prepare`'s job

@@ -705,7 +705,13 @@ git push origin <branch>
 
 ## Step 5: Update Knowledge Base
 
-After all phases are implemented (before Step 6), update the project knowledge:
+After all phases are implemented (before Step 6), update the project knowledge. Reusable knowledge from this run — a pattern, a gotcha, a corrected assumption — goes to the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory, so other agents on other applications in this workspace benefit (KBT-TRUL014, v3 §5.7 *"Kennisborging"*).
+
+**Consistentie-check (verplicht — v3 §5.7).** Before 5a/5b below write or update anything: search existing Toolkit items and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas) — not just "does this already exist" but "does this conflict with something else". If it does, reconcile via `update_toolkit_item` rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
 
 ### 5a: Correct Outdated Patterns
 
@@ -736,7 +742,7 @@ MCP: mcp__kanbantic__update_toolkit_item(id, title, content, isActive: false)
 **Guidelines:**
 - Only store patterns reusable across multiple issues
 - Include file paths and code examples in every Toolkit item
-- Update rather than duplicate — search existing items first
+- Update rather than duplicate — search existing items first (this is the consistentie-check from §5.7, not a separate step)
 - Skip this step if nothing new was discovered (don't force it)
 
 ### 5d: Record Knowledge Traceability

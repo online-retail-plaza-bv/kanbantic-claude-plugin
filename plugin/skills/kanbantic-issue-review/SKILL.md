@@ -569,12 +569,20 @@ After the issue is Done, prompt the reviewer for knowledge to capture. This step
 
 Ask: **"Heb je patterns, gotchas of rules geleerd die de moeite waard zijn om vast te leggen?"**
 
+This knowledge goes to the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory — other agents on other applications in this workspace rely on it (KBT-TRUL014, v3 §5.7 *"Kennisborging"*).
+
 If yes, per item collect:
 - `title` (descriptive)
 - `category` — `Pattern` | `Gotcha` | `Rule`
 - `content` — Markdown with file paths, code example, when to use
 
-Then:
+**Consistentie-check (verplicht — v3 §5.7).** Before calling `create_toolkit_item`/`update_toolkit_item`: search existing Toolkit items first and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas) — this is a stronger check than "does a duplicate already exist", it is "does this contradict something else". If it does, reconcile — update the existing item so there are no two contradictory pieces of guidance side by side.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+Then, once the consistentie-check is clean:
 ```
 MCP: mcp__kanbantic__create_toolkit_item(
   workspaceId: <id>,
@@ -584,7 +592,7 @@ MCP: mcp__kanbantic__create_toolkit_item(
 )
 ```
 
-If a pattern already exists but is outdated, prefer `update_toolkit_item` (search first with `list_toolkit_items(search: ...)`).
+If a pattern already exists but is outdated, prefer `update_toolkit_item` (this is the same search-first call as the consistentie-check above).
 
 ### 9b: Document impacts
 

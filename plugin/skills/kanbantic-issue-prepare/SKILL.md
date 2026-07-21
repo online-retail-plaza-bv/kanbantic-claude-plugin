@@ -35,6 +35,7 @@ If the readiness-gate is still not green at the end of a run, the issue stays on
    - **Epic** → Step 5E (requirements + implementation plan, sequentieel)
 5. **Validate readiness** — re-check `isReadyToClaim`; report failing checks or confirm ready
 6. **Record Decision entry** — summary of what was added in this run
+6.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any reusable pattern/gotcha/rule discovered this run
 7. **Handoff** — instruct user to invoke `kanbantic-issue-execute`
 
 <HARD-GATE>
@@ -557,6 +558,26 @@ If the transition succeeds, report:
 ### 6b: Some checks still failing
 
 Do **not** call `update_issue_status(Ready)` — the gate would reject it. The issue stays on `Triaged`. Report exactly which checks are still failing and what's needed; offer to continue the dialogue or stop. Re-run the skill after the missing artifacts are added.
+
+## Step 6.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+If the requirements-dialogue (Step 4/5F/5B/5E) surfaced a reusable pattern, gotcha, or rule — a recurring MCP quirk, a domain constraint that will resurface on other Features/applications, a spec-writing convention — this is knowledge for the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014). Skip this step entirely if nothing reusable was discovered — it is optional, not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit items and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas). If it does, reconcile via `update_toolkit_item` rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<pattern with file paths / behavior, when to use>"
+)
+```
 
 ## Step 7: Handoff
 

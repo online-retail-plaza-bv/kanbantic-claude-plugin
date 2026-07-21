@@ -135,6 +135,7 @@ Feature/Bug claims + branches remain owned by `kanbantic-issue-execute`.
 3. **Select issues** — list the initiative's issues, filter to actionable, order by priority + lane.
 4. **Sequence** — for each issue, route to the next lane-skill, wait for hand-off, re-route until terminal.
 5. **Log** — record a Comment per issue-completion and a run-summary at the end.
+5.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any orchestration-level pattern/gotcha/rule discovered this run
 
 ## Step 1: Resolve parameters
 
@@ -207,6 +208,36 @@ terminal for this run or explicitly parked as blocked.
 
 The orchestrator records **Comment** entries only. Decision/KnowledgeExtraction
 entries are written by the lane-skills that own the corresponding transition.
+
+## Step 5.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+Orchestration-level findings are distinct from the per-issue Decision/KnowledgeExtraction
+entries above (those stay owned by the lane-skill that made the transition). A
+sequencing pattern, a golf-barrière gotcha, or an MCP-tool quirk hit while routing
+issues through the lane-skills is reusable, workspace-wide knowledge — it goes to the
+**AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014, v3 §5.7 *"Kennisborging"*).
+Skip this step entirely if nothing reusable was discovered this run — it is optional,
+not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit
+items and verify the new/changed content is not **contradicted** by other Toolkit items
+(ClaudeMd, Rules, Patterns, Gotchas) — the same mechanism `kanbantic-issue-review` Step 9a
+and `kanbantic-issue-execute` Step 5 use. If it does, reconcile via `update_toolkit_item`
+rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<orchestration-level finding: which MCP tool/sequencing quirk, when it applies>"
+)
+```
 
 ## Boundary — what this skill does NOT do
 
