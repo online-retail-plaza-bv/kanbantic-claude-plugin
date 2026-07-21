@@ -7,6 +7,8 @@ command: triage-issue
 
 # Kanbantic Issue Triage
 
+> **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
+
 ## Overview
 
 Dedicated lane-skill for the **New → Triaged** (or **New → Cancelled**) transition. Short dialogue, fixed vocabulary, strict tool-set. Triage costs minuten, not uren — the full elaboration (specs / user stories / test cases / implementation plan) belongs to `kanbantic-issue-prepare`.
@@ -36,6 +38,35 @@ The triage skill uses **only** the following MCP tools. Any other MCP call is ou
 
 Forbidden: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `create_implementation_plan`, `create_issue`.
 </HARD-GATE>
+
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, triage, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Triage is expliciet genoemd in de tabel ("status-updates, triage") — dit is **Licht (Haiku 4.5)** werk: een korte go/no-go-dialoog, een lichte duplicaat-heuristiek, en een vaste metadata-update. Er is geen reden om hier zwaarder te escaleren — als een issue tijdens triage al blijkt complexe afwegingen nodig te hebben, hoort die diepgang bij `kanbantic-issue-prepare` (Middel/Zwaar), niet bij triage.
+
+## Parallellisme — twee assen (v3 §5.5)
+
+**As 1 — meerdere Agents.** Triage-runs op verschillende `New`-issues zijn volledig onafhankelijk — elke run muteert alleen zijn eigen issue (`update_issue`, `update_issue_status`) en kan daarom vrij parallel op meerdere werkstations draaien zonder coördinatie.
+
+**As 2 — subagents binnen déze run.** Niet van toepassing voor triage: de dialoog is te kort en het toegestane tool-set te klein (zie HARD-GATE hierboven) om subagent-fan-out te rechtvaardigen. Draai triage single-agent.
+
+## Continue statusmelding (v3 §5.3)
+
+Ook al is een triage-run kort, het board-signaal hoort er toch bij zodat gelijktijdige triage-runs op andere issues zichtbaar blijven:
+
+```
+register_agent_session ─▶ set_current_issue ─▶ [dialoog + metadata-update] ─▶ end_agent_session
+```
+
+`heartbeat`/`report_status` zijn hier meestal overbodig gezien de korte duur — gebruik ze alleen als de go/no-go-dialoog onverwacht lang op gebruikersinput wacht (`report_status(status: "WaitingForInput")`).
 
 ## Checklist
 
@@ -154,7 +185,7 @@ Report:
 - Application: [application]
 - Initiative: [initiative or —]
 
-**Next step:** Invoke `kanbantic-issue-prepare` to add specs / user stories / test cases (Epic also: implementation plan). Once all readiness-checks are green, prepare transitions the issue to **`Prepared`** (KBT-F235), surfacing it in the Prepared kanban-column for `kanbantic-issue-execute` to claim. `readinessChecks` will stay red for Specifications / TestCases / UserStories and the issue will stay on `Triaged` until prepare has run — that is expected."
+**Next step:** Invoke `kanbantic-issue-prepare` to add specs / user stories / test cases (Epic also: implementation plan). Once all readiness-checks are green, prepare transitions the issue to **`Ready`** (KBT-F235; renamed from `Prepared` in KBT-E103/v3), surfacing it in the Ready kanban-column for `kanbantic-issue-execute` to claim. `readinessChecks` will stay red for Specifications / TestCases / UserStories and the issue will stay on `Triaged` until prepare has run — that is expected."
 
 ## Step 6: No-go Path
 
@@ -195,6 +226,26 @@ Report:
 **"Issue [CODE] is Cancelled. Reason recorded as Decision entry. No further steps."**
 
 No handoff to prepare or other skills.
+
+## Step 6.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+Applies regardless of Go (Step 5) or No-go (Step 6) outcome. If the go/no-go dialogue or the duplicate-heuristic check (Step 3) surfaced a reusable pattern, gotcha, or rule — e.g. a recurring intake-quality issue, a metadata convention, an MCP quirk hit while triaging — this is knowledge for the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014). Skip this step entirely if nothing reusable was discovered — it is optional, not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit items and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas). If it does, reconcile via `update_toolkit_item` rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<pattern / gotcha, when to use>"
+)
+```
 
 ## Key Principles
 

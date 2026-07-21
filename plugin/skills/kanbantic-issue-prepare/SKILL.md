@@ -1,24 +1,26 @@
 ---
 name: kanbantic-issue-prepare
-description: "Use after kanbantic-issue-triage marks an issue Triaged. Consolidates the old design + debugging + planning flows into one lane-verwerker. Routes on issue.type: Feature → requirements + specs + test cases; Bug → root-cause + repro-steps + regression test; Epic → requirements + implementation plan (Phase → Features → Tasks; KBT-F250 v2.4.0). Ends by transitioning the issue to Prepared (KBT-F235) once all readiness-checks pass — the issue then sits in the Prepared kanban-column awaiting claim_issue from kanbantic-issue-execute."
+description: "Use after kanbantic-issue-triage marks an issue Triaged. Consolidates the old design + debugging + planning flows into one lane-verwerker. Routes on issue.type: Feature → requirements + specs + test cases; Bug → root-cause + repro-steps + regression test; Epic → requirements + implementation plan (Phase → Features → Tasks; KBT-F250 v2.4.0). Ends by transitioning the issue to Ready (KBT-F235; renamed from Prepared per KBT-E103/v3) once all readiness-checks pass — the issue then sits in the Ready kanban-column awaiting claim_issue from kanbantic-issue-execute."
 ---
 
 # Kanbantic Issue Prepare
 
+> **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
+
 ## Overview
 
-`kanbantic-issue-prepare` works a Triaged issue all the way to a first-class **`Prepared`** status (KBT-F235). It is the **single entry point** for the Triaged → Prepared lane transition — regardless of whether the issue is a Feature, Bug, or Epic. Internally it dispatches on `issue.type` so the user never has to choose a sub-skill.
+`kanbantic-issue-prepare` works a Triaged issue all the way to a first-class **`Ready`** status (KBT-F235; renamed from `Prepared` in KBT-E103/v3). It is the **single entry point** for the Triaged → Ready lane transition — regardless of whether the issue is a Feature, Bug, or Epic. Internally it dispatches on `issue.type` so the user never has to choose a sub-skill.
 
-**Principle:** Read Triaged issue from Kanbantic → route on type → dialogue with user → write specs / user stories / test cases / phases to Kanbantic → transition issue to `Prepared` so it surfaces in the Prepared kanban-column for claim_issue.
+**Principle:** Read Triaged issue from Kanbantic → route on type → dialogue with user → write specs / user stories / test cases / phases to Kanbantic → transition issue to `Ready` so it surfaces in the Ready kanban-column for claim_issue.
 
 **Announce at start:** "I'm using the kanbantic-issue-prepare skill to work this issue out until it's claimable."
 
 ## Scope
 
-This skill owns the **Triaged → Prepared** transition. It does NOT:
+This skill owns the **Triaged → Ready** transition. It does NOT:
 
 - Create new issues — that is the job of the intake skills (`kanbantic-feature-request`, `kanbantic-epic-proposal`, `kanbantic-bug-report`). If the user proposes a completely new idea mid-dialogue, the skill points them at the right intake skill and stops.
-- Change issue status to `InProgress` — that is the job of `kanbantic-issue-execute` (which now claims directly from `Prepared` via `claim_issue`, atomically promoting status to `InProgress` per KBT-RL052).
+- Change issue status to `InProgress` — that is the job of `kanbantic-issue-execute` (which now claims directly from `Ready` via `claim_issue`, atomically promoting status to `InProgress` per KBT-RL052).
 
 If the readiness-gate is still not green at the end of a run, the issue stays on `Triaged` (no transition) and the skill reports which checks are still failing — the user re-runs the skill once the missing artifacts are added.
 
@@ -33,6 +35,7 @@ If the readiness-gate is still not green at the end of a run, the issue stays on
    - **Epic** → Step 5E (requirements + implementation plan, sequentieel)
 5. **Validate readiness** — re-check `isReadyToClaim`; report failing checks or confirm ready
 6. **Record Decision entry** — summary of what was added in this run
+6.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any reusable pattern/gotcha/rule discovered this run
 7. **Handoff** — instruct user to invoke `kanbantic-issue-execute`
 
 <HARD-GATE>
@@ -55,6 +58,39 @@ Then the skill stops.
 
 Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
 </HARD-GATE>
+
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Toepassing binnen deze skill: **Middel (Sonnet 5)** is de default voor de requirements-dialoog, spec/user-story/test-case-schrijfwerk en root-cause-analyse (Step 5F/5B/5E) — dit valt onder "code/specs/tests schrijven, root-cause" uit de tabel. Escaleer naar **Zwaar (Opus 4.8)** voor Epic-scope voorbereidingen met tegenstrijdige specs, veel afhankelijkheden tussen Features, of complexe golf-indeling (Step 5E). Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele, escaleren-op-bewijs) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie, niet uit geheugen.
+
+## Parallellisme — twee assen (v3 §5.5)
+
+**As 1 — meerdere Agents.** Meerdere prepare-runs op verschillende Triaged issues zijn onafhankelijk van elkaar en kunnen parallel op verschillende werkstations/worktrees draaien — elke run werkt zijn eigen issue uit en schrijft alleen naar dat issue's specs/user-stories/test-cases/tasks.
+
+**As 2 — subagents binnen déze run.** Deze skill draait doorgaans single-agent (een dialoog met de gebruiker), maar mag een **read-only fan-out**-subagent starten voor gericht onderzoek (bv. het opzoeken van een bestaand patroon in meerdere Library-documenten vóórdat een spec wordt geformuleerd) — dat blijft binnen de bestaande beperking hierboven ("Do not launch broad Explore agents"; alleen **gerichte**, read-only verkenning, geen brede Explore-fan-out. Zie ook `kanbantic-issue-execute` §Parallellisme voor de volledige twee-assen-uitleg.). **Schrijvende fan-out is hier niet van toepassing** — alle specs/user-stories/test-cases/tasks worden altijd door de parent-Agent zelf geschreven, nooit door een subagent (governance-regel: de parent blijft eigenaar van alle Kanbantic-writes).
+
+## Continue statusmelding (v3 §5.3)
+
+Prepare-dialogen zijn vaak lang-lopende, multi-turn sessies — precies het soort werk waar een levend "wie werkt waaraan"-signaal op het bord waardevol is:
+
+```
+register_agent_session ─▶ set_current_issue
+      │
+      ├─ doorlopend, tijdens de dialoog: heartbeat (periodiek)
+      ├─ mijlpaal (bv. Epic-fase 5E.1–5E.9 doorlopen, of Feature-requirements klaar): report_status + add_discussion_entry
+      └─ einde: end_agent_session
+```
+
+Dit is aanvullend op de bestaande Decision-entries uit Step 6/6a — het board-statussignaal (`register_agent_session`/`heartbeat`/`report_status`) is zichtbaar buiten de discussion-timeline en laat zien dat de sessie nog leeft tijdens een lange requirements-dialoog.
 
 ## Step 0: Ensure Repository Access
 
@@ -225,7 +261,7 @@ niet-overridable `AllTestsPassed`-gate.
 
 ### 5F.5: Test-policy declaratie (Regel E / KBT-F442)
 
-Declare the per-level test-policy for this Feature **before transitioning to Prepared**. The physical database-freeze happens when `kanbantic-issue-execute` calls `claim_issue`, but the declaration must be captured now as a `Decision` entry so the executing agent and reviewer can both read it.
+Declare the per-level test-policy for this Feature **before transitioning to Ready**. The physical database-freeze happens when `kanbantic-issue-execute` calls `claim_issue`, but the declaration must be captured now as a `Decision` entry so the executing agent and reviewer can both read it.
 
 Determine per level:
 
@@ -308,7 +344,7 @@ MCP: mcp__kanbantic__create_test_case(
 
 ### 5B.6: Test-policy declaratie (Regel E / KBT-F442)
 
-Declare the per-level test-policy for this Bug **before transitioning to Prepared**. Same rules as 5F.5 — defaults all three levels to Vereist/min=1; N.v.t. requires ≥20-char rationale.
+Declare the per-level test-policy for this Bug **before transitioning to Ready**. Same rules as 5F.5 — defaults all three levels to Vereist/min=1; N.v.t. requires ≥20-char rationale.
 
 For bugs, the E2E level typically maps to the applicable stack from the issue's application (Playwright for UI-bugs, real-proxy for plugin-bugs, integration-style for API-bugs without UI surface).
 
@@ -358,12 +394,11 @@ Backward compatibility: existing legacy-shape Epics keep working without restruc
 
 Same as Step 5F.1–5F.3 but applied at Epic scope (wider purpose, broader trade-offs). At the end of this dialogue you should have a clear list of capabilities the Epic must deliver — those become the **Features** in Step 5E.7.
 
-### 5E.4: Write Epic-level user stories and specs
+### 5E.4: Write Epic-level (high-level) specs — no User Stories at Epic scope
 
-Write user stories and specifications at Epic scope — at least one user story per high-level capability and the requisite specs:
+Write high-level specifications at Epic scope — the requisite specs that capture Epic-wide requirements, constraints, or acceptance boundaries:
 
 ```
-MCP: mcp__kanbantic__create_user_story(workspaceId, issueId, ...)
 MCP: mcp__kanbantic__create_specification(
   workspaceId, category: "ProductRequirement" | "SystemRequirement" | "SecurityRequirement" | "Rule" | "Boundary",
   title, content, extractedFromIssueId: issueId
@@ -371,7 +406,7 @@ MCP: mcp__kanbantic__create_specification(
 ```
 
 <HARD-GATE>
-Do **NOT** call `create_test_case` with the Epic's `issueId`. Test cases belong to the child Features, not the Epic. Each child Feature gets its own test cases when it is prepared (via `kanbantic-issue-triage` + `kanbantic-issue-prepare` on that Feature). Writing test cases on an Epic violates Regel A (KBT-E084 / KBT-F449) and produces untraceable coverage gaps that the review-gate cannot enforce.
+Do **NOT** call `create_user_story` or `create_test_case` with the Epic's `issueId`. Per Workflow v3 §2.1 (attachment-model, KBT-RL121): **User Stories are Feature-only** — an Epic organizes Features into Phases and may carry high-level Requirements, but it never owns its own User Stories or Test Cases (both are rollups of its Features). Each child Feature gets its own User Story(-ies) + Test Cases when it is prepared (via `kanbantic-issue-triage` + `kanbantic-issue-prepare` on that Feature, Step 5F.4). Writing User Stories or Test Cases on an Epic violates Regel A (KBT-E084 / KBT-F449) and produces untraceable coverage gaps that the review-gate cannot enforce.
 </HARD-GATE>
 
 ### 5E.5: Create implementation plan
@@ -488,7 +523,7 @@ Go to Step 6.
 MCP: mcp__kanbantic__get_issue(issueId)
 ```
 
-Re-inspect `readinessChecks` for the `Triaged → Prepared` transition. The `isReadyToClaim` boolean on the DTO is now derived from `Status == Prepared` (KBT-SR266) — at this point it is still `false`; that flips to `true` after Step 6a transitions the issue.
+Re-inspect `readinessChecks` for the `Triaged → Ready` transition. The `isReadyToClaim` boolean on the DTO is now derived from `Status == Ready` (KBT-SR266) — at this point it is still `false`; that flips to `true` after Step 6a transitions the issue.
 
 ### 6.0: Version readiness — informational (KBT-F318 / KBT-RL144)
 
@@ -499,39 +534,59 @@ MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter t
 ```
 
 - **A Planned Version exists** and the issue already carries a `VersionId` of the **same** Application → report `Version: <name> ✓`.
-- **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Prepared transition on this.
-- **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Prepared transition. Let op: `create_version` is **app-scoped** — de `applicationId` is verplicht (PR #242) en nieuwe Versions starten in `Planned`.
+- **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Ready transition on this.
+- **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Ready transition. Let op: `create_version` is **app-scoped** — de `applicationId` is verplicht (PR #242) en nieuwe Versions starten in `Planned`.
 
-### 6a: All checks green — transition to Prepared
+### 6a: All checks green — transition to Ready
 
 ```
-MCP: mcp__kanbantic__update_issue_status(issueId, status: "Prepared")
+MCP: mcp__kanbantic__update_issue_status(issueId, status: "Ready")
 ```
 
-The backend evaluates `Triaged → Prepared` readiness (KBT-RL051): all required checks must be green, otherwise a structured `ReadinessGateBlocked` (Hard) or `ReadinessGateSoftBlock` (Soft) BusinessException with `recommendation` is returned — pattern-match on `(missingCondition: ...)` to fix and retry, do not blindly retry.
+The backend evaluates `Triaged → Ready` readiness (KBT-RL051): all required checks must be green, otherwise a structured `ReadinessGateBlocked` (Hard) or `ReadinessGateSoftBlock` (Soft) BusinessException with `recommendation` is returned — pattern-match on `(missingCondition: ...)` to fix and retry, do not blindly retry.
 
 If the transition succeeds, report:
 
-**"[ISSUE CODE] transitioned to `Prepared`. All readiness checks pass:**
+**"[ISSUE CODE] transitioned to `Ready`. All readiness checks pass:**
 - HasDescription: ✓
 - UserStories: ✓ (N linked)
 - Specifications: ✓ (N linked)
 - TestCases: ✓ (N linked)
 
-**Next step:** Invoke `kanbantic-issue-execute`. It will call `claim_issue(branch: ...)` which atomically assigns the issue and promotes `Prepared → InProgress` in a single MCP call (KBT-RL052)."
+**Next step:** Invoke `kanbantic-issue-execute`. It will call `claim_issue(branch: ...)` which atomically assigns the issue and promotes `Ready → InProgress` in a single MCP call (KBT-RL052)."
 
 ### 6b: Some checks still failing
 
-Do **not** call `update_issue_status(Prepared)` — the gate would reject it. The issue stays on `Triaged`. Report exactly which checks are still failing and what's needed; offer to continue the dialogue or stop. Re-run the skill after the missing artifacts are added.
+Do **not** call `update_issue_status(Ready)` — the gate would reject it. The issue stays on `Triaged`. Report exactly which checks are still failing and what's needed; offer to continue the dialogue or stop. Re-run the skill after the missing artifacts are added.
+
+## Step 6.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+If the requirements-dialogue (Step 4/5F/5B/5E) surfaced a reusable pattern, gotcha, or rule — a recurring MCP quirk, a domain constraint that will resurface on other Features/applications, a spec-writing convention — this is knowledge for the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014). Skip this step entirely if nothing reusable was discovered — it is optional, not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit items and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas). If it does, reconcile via `update_toolkit_item` rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<pattern with file paths / behavior, when to use>"
+)
+```
 
 ## Step 7: Handoff
 
-If 6a fires: issue is `Prepared`; hand off to `kanbantic-issue-execute`. If 6b fires: issue stays `Triaged` until the missing artifacts are added.
+If 6a fires: issue is `Ready`; hand off to `kanbantic-issue-execute`. If 6b fires: issue stays `Triaged` until the missing artifacts are added.
 
 ## Key Principles
 
 - **One skill, type-based routing** — the user doesn't choose between design / debugging / planning
-- **Triaged → Prepared**, nothing more, nothing less (KBT-F235)
+- **Triaged → Ready**, nothing more, nothing less (KBT-F235)
 - **Never create new issues** — intake skills do that
 - **Epics are sequential design+plan in one run** — leaving a half-prepared Epic is a failure mode
 - **Root cause before fix (Bug)** — prepare captures understanding, execute captures the fix

@@ -51,6 +51,38 @@ It does **not**:
 
 It **does** own exactly one status-mutation (KBT-F581): when it runs an **Epic** in the parallel per-Feature model, it claims the **Epic itself** (`Ready → InProgress`) and creates the epic-integration branch(es) **before** fanning out to the child Features — see [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581). Without this, nobody owns the Epic's status in the parallel model and it sits misleadingly on `Ready` while N agents build its children (and `kanbantic-issue-review` Step 1.6 rejects every child mini-review because the parent Epic is not `InProgress`).
 
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, triage, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Toepassing binnen deze skill:
+- **De orchestrator zelf** → **Middel (Sonnet 5)** naar complexity — sequencing/ordering-beslissingen zijn meestal Middel; escaleer naar **Zwaar (Opus 4.8)** voor lastige golf-barrière- of dependency-afwegingen (bv. Epic-bootstrap fan-out, Step 3.5).
+- **Elke lane-skill die de orchestrator invoceert** kiest zijn **eigen** modeltier — zie de Model-selectie-sectie in `kanbantic-issue-triage` (Licht), `kanbantic-issue-prepare` (Middel/Zwaar), `kanbantic-issue-execute` (Middel/Zwaar), `kanbantic-issue-review` (Zwaar). De orchestrator dicteert dit niet, maar moet consistent zijn met diezelfde tabel wanneer het zelf een Agent voor een lane-skill spawnt (bv. via parallelle `Agent`-dispatch per Feature in de fan-out).
+- **Read-only fan-out-subagents** (bv. status-verzameling over meerdere issues) → **Licht (Haiku 4.5)**.
+
+Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele, escaleren-op-bewijs) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie, niet uit geheugen.
+
+## Continue statusmelding (v3 §5.3)
+
+De orchestrator is vaak een lang-lopende, multi-issue sessie — precies het soort run waarbij een levend "wie werkt waaraan"-signaal op het bord waardevol is. Emit deze calls **naast** (niet in plaats van) de calls die elke lane-skill zelf al doet voor het issue dat het op dat moment bewerkt:
+
+| Moment | Call | Effect |
+|---|---|---|
+| Start van de sequencer-run | `register_agent_session` + `set_current_issue` | Bord toont dat de orchestrator actief is en (optioneel) welk issue net gestart is |
+| Doorlopend, tijdens lange runs | `heartbeat` (periodiek) | Toont dat de orchestrator leeft/actief is tussen lane-skill-invocaties door |
+| Na elk issue-hand-off | `report_status` + de Comment-entry uit Step 5 | Samenvatting van voortgang zichtbaar buiten alleen de discussion-timeline |
+| Bij een geparkeerd/geblokkeerd issue | `report_status(status: "Blocked")` + Decision/Comment-entry | Board-signaal dat de sequencer bewust wacht, niet hangt |
+| Einde van de run | `end_agent_session` | Sessie netjes afgesloten |
+
+Dit is een **aanvullende** laag bovenop de per-issue statusmelding die elke lane-skill al eigenaar van is (`kanbantic-issue-execute` / `kanbantic-issue-review` §Mandatory calls) — de orchestrator herimplementeert die niet, maar rapporteert wél zijn eigen sequencer-niveau voortgang.
+
 ## Lane routing table
 
 The orchestrator maps each issue's current `status` to the lane-skill that owns
@@ -59,8 +91,8 @@ its next transition. This mirrors the Skill ↔ Lane table in `plugin/README.md`
 | Issue `status` | Next lane-skill | Hand-off back to orchestrator when |
 |---|---|---|
 | `New` | `kanbantic-issue-triage` | issue reaches `Triaged` (go) or `Cancelled` (no-go) |
-| `Triaged` | `kanbantic-issue-prepare` | issue reaches `Prepared` |
-| `Prepared` | `kanbantic-issue-execute` | issue reaches `Review` |
+| `Triaged` | `kanbantic-issue-prepare` | issue reaches `Ready` |
+| `Ready` | `kanbantic-issue-execute` | issue reaches `Review` |
 | `InProgress` | `kanbantic-issue-execute` (resume) | issue reaches `Review` |
 | `Review` | `kanbantic-issue-review` | issue reaches `InDeployment` (or back to `InProgress` on reject) |
 | `InDeployment` / `Done` / `Cancelled` | — (terminal for this run) | skip |
@@ -103,6 +135,7 @@ Feature/Bug claims + branches remain owned by `kanbantic-issue-execute`.
 3. **Select issues** — list the initiative's issues, filter to actionable, order by priority + lane.
 4. **Sequence** — for each issue, route to the next lane-skill, wait for hand-off, re-route until terminal.
 5. **Log** — record a Comment per issue-completion and a run-summary at the end.
+5.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any orchestration-level pattern/gotcha/rule discovered this run
 
 ## Step 1: Resolve parameters
 
@@ -128,14 +161,14 @@ MCP: mcp__kanbantic__list_issues(workspaceId, initiativeId: <initiative>)
 
 Filter to **actionable** issues:
 
-- Keep issues whose `status` is `New`, `Triaged`, `Prepared`, `InProgress`, or `Review`.
+- Keep issues whose `status` is `New`, `Triaged`, `Ready`, `InProgress`, or `Review`.
 - Drop `InDeployment`, `Done`, and `Cancelled` (terminal — nothing to sequence).
 - When `repos` is set, keep only issues whose `applicationId` maps to one of those repos.
 
 Order the survivors:
 
 1. **Priority** first — `Critical` → `High` → `Medium` → `Low`.
-2. Within a priority, **issues already in flight** (`InProgress`, `Review`) before fresh ones (`Prepared`, `Triaged`, `New`) — finish what is started before opening new work.
+2. Within a priority, **issues already in flight** (`InProgress`, `Review`) before fresh ones (`Ready`, `Triaged`, `New`) — finish what is started before opening new work.
 3. Respect declared dependencies — if issue B lists A as a blocker, process A first regardless of priority.
 
 Report the ordered worklist to the operator before starting (issue code, type,
@@ -175,6 +208,36 @@ terminal for this run or explicitly parked as blocked.
 
 The orchestrator records **Comment** entries only. Decision/KnowledgeExtraction
 entries are written by the lane-skills that own the corresponding transition.
+
+## Step 5.5: Record Reusable Knowledge (v3 §5.7, optional)
+
+Orchestration-level findings are distinct from the per-issue Decision/KnowledgeExtraction
+entries above (those stay owned by the lane-skill that made the transition). A
+sequencing pattern, a golf-barrière gotcha, or an MCP-tool quirk hit while routing
+issues through the lane-skills is reusable, workspace-wide knowledge — it goes to the
+**AI Toolkit** (Kanbantic), **not** local memory (KBT-TRUL014, v3 §5.7 *"Kennisborging"*).
+Skip this step entirely if nothing reusable was discovered this run — it is optional,
+not forced.
+
+**Consistentie-check (verplicht — v3 §5.7).** Before writing: search existing Toolkit
+items and verify the new/changed content is not **contradicted** by other Toolkit items
+(ClaudeMd, Rules, Patterns, Gotchas) — the same mechanism `kanbantic-issue-review` Step 9a
+and `kanbantic-issue-execute` Step 5 use. If it does, reconcile via `update_toolkit_item`
+rather than letting contradictory guidance coexist.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+If genuinely new and non-contradictory:
+```
+MCP: mcp__kanbantic__create_toolkit_item(
+  workspaceId: <id>,
+  category: "Pattern" | "Gotcha" | "Rule",
+  title: "<descriptive name>",
+  content: "<orchestration-level finding: which MCP tool/sequencing quirk, when it applies>"
+)
+```
 
 ## Boundary — what this skill does NOT do
 
