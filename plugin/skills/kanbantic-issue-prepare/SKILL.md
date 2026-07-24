@@ -528,7 +528,7 @@ Voor **elke** UI-rakende issue (Feature/Bug/Epic) geldt: het `## Wireframe`-blok
   ```
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
   ```
-  - Bestaat de pagina niet in die versie, of laadt de referentie niet → **STOP (fail-not-skip)**: rapporteer welke pagina-id's wél in die versie bestaan; de issue blijft niet-Ready tot het blok klopt.
+  - `get_wireframe` geeft `Success:false` (`NotFoundKind` = `PageNotFoundInVersion` óf `AmbiguousPage`), of de referentie laadt niet → **STOP (fail-not-skip)**: rapporteer welke pagina-id's wél in die versie bestaan (of, bij `AmbiguousPage`, de kandidaten — kies een specifieker pad); de issue blijft niet-Ready tot het blok klopt.
   - Slaagt de validatie → ga verder naar Step 6.
 
 > Niet-UI-issues zonder `## Wireframe`-blok zijn vrijgesteld; voeg bij twijfel expliciet `## Wireframe — n.v.t. (geen UI)` toe zodat afwezigheid een keuze is, geen omissie.

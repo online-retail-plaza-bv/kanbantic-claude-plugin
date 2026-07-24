@@ -442,7 +442,7 @@ Parse het `## Wireframe`-blok van de issue met `parseWireframeBlock` (`plugin/sc
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>[, #anker])   // exact de gepinde versie — nooit "latest"
   ```
   Bouw **structure-faithful** naar die markup (app-shell, navigatie, tabellen, flows), geen benadering — hetzelfde patroon dat AdminHub's `kanbantic-epic-autopilot` + `UI-UX Specialist` al gebruiken.
-- **Fail-not-skip:** laadt de markup van een UI-task niet (referentie niet resolvebaar, pagina niet in de versie) → **blokkeer die UI-task** en meld het; werk niet op een benadering door. Dit spiegelt Step 6d: de wireframe-getrouwheid is onderdeel van de Definition-of-Done, niet optioneel.
+- **Fail-not-skip:** laadt de markup van een UI-task niet — `get_wireframe` geeft `Success:false` (`NotFoundKind` = `PageNotFoundInVersion` óf `AmbiguousPage`) of de referentie is niet resolvebaar → **blokkeer die UI-task** en meld het; werk niet op een benadering door. Dit spiegelt Step 6d: de wireframe-getrouwheid is onderdeel van de Definition-of-Done, niet optioneel.
 
 ## Step 4A: Execute Per Phase (Epics only)
 

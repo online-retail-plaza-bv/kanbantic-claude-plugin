@@ -114,7 +114,7 @@ Parse het `## Wireframe`-blok uit de bron-notities/het concept met de pure decis
   ```
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
   ```
-  - Bestaat de pagina niet in die versie, of laadt de referentie niet → **STOP (fail-not-skip)**: meld welke pagina-id's wél in die versie bestaan; graduatie blokkeert tot het blok klopt. Er is geen "graceful skip" meer — `get_wireframe` (KBT-E086) is live.
+  - `get_wireframe` geeft `Success:false` (`NotFoundKind` = `PageNotFoundInVersion` óf `AmbiguousPage`), of de referentie laadt niet → **STOP (fail-not-skip)**: meld welke pagina-id's wél in die versie bestaan (of, bij `AmbiguousPage`, de kandidaten); graduatie blokkeert tot het blok klopt. Er is geen "graceful skip" meer — `get_wireframe` (KBT-E086) is live.
   - Slaagt de validatie → bewaar `{ wireframe, versie, paginas }` **gestructureerd** bij de UI-stories (niet langer alleen als vrije tekst).
 
 ---
