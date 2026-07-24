@@ -517,6 +517,21 @@ review-step can verify them together. Phase 3 wires the new flows to the UI.
 
 Go to Step 6.
 
+## Step 5W: Wireframe-blok valideren (HARD — KBT-RL191)
+
+Voor **elke** UI-rakende issue (Feature/Bug/Epic) geldt: het `## Wireframe`-blok in de beschrijving is bindende input, geen inert kruimelspoor. Parse het met de pure decision-rule `parseWireframeBlock` (`plugin/scripts/wireframe-block.js`, KBT-SR578) → `{ present, optOut, wireframe, versie, paginas }`. De slug/versie/pagina komen **uitsluitend** uit het blok — nooit hardcoded (KBT-BD191).
+
+- **`optOut === true`** (`## Wireframe — n.v.t. (geen UI)`): geen UI-oppervlak → sla de wireframe-gate over **zónder** fout; ga verder naar Step 6.
+- **`present === false` op een UI-rakende issue**: readiness-tekortkoming — voeg een `## Wireframe`-blok (velden `wireframe`/`versie`/`pagina`) of een expliciete `n.v.t. (geen UI)` toe vóór de Ready-transitie. Blokkeer Step 6a tot dit klopt.
+- **`present === true && !optOut`**: valideer **elke** `pagina`-id in de gepinde `versie`:
+  ```
+  MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
+  ```
+  - Bestaat de pagina niet in die versie, of laadt de referentie niet → **STOP (fail-not-skip)**: rapporteer welke pagina-id's wél in die versie bestaan; de issue blijft niet-Ready tot het blok klopt.
+  - Slaagt de validatie → ga verder naar Step 6.
+
+> Niet-UI-issues zonder `## Wireframe`-blok zijn vrijgesteld; voeg bij twijfel expliciet `## Wireframe — n.v.t. (geen UI)` toe zodat afwezigheid een keuze is, geen omissie.
+
 ## Step 6: Validate Readiness
 
 ```

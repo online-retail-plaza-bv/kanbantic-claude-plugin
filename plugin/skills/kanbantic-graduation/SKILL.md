@@ -16,7 +16,7 @@ After graduation, **Kanbantic is the single source of truth** for that domain (K
 ## Scope
 
 - Reads kladnotities: free prose **or** structured "Als X wil ik Y zodat Z" stories
-- Fetches wireframe via `get_wireframe` (graceful skip if KBT-E086 unavailable)
+- Valideert het `## Wireframe`-blok via `parseWireframeBlock` + `get_wireframe` (fail-not-skip; `n.v.t.`-opt-out toegestaan — KBT-RL191)
 - Enforces the 5-criteria ripeness gate (KBT-TRUL018) — HARD-GATE before any create calls
 - Creates entities via existing MCP tools:
   `create_initiative` → `create_issue` (Epic) → `create_issue` (Feature) → `create_user_story` → `create_specification` → `create_test_case`
@@ -32,7 +32,7 @@ This skill does NOT:
 
 1. **Worktree gate** — verify not in main working tree (KBT-TRUL004)
 2. **Read kladnotities** — paste or file path; extract epic, features, stories, ACs
-3. **Fetch wireframe** — graceful skip if unavailable
+3. **Validate wireframe-blok** — parse + `get_wireframe` per pagina; fail-not-skip (of `n.v.t.`-opt-out)
 4. **Ripeness gate** — evaluate 5 criteria (KBT-TRUL018); HARD-GATE on failure
 5. **Create entities** — Initiative → Epic → Feature → UserStory → Specification
 6. **Create Draft Test Cases** — one per AC, on the Feature (Regel A)
@@ -103,20 +103,18 @@ If the PO corrects anything, update the schema and re-confirm before moving to S
 
 ---
 
-## Step 2: Wireframe Ophalen (Graceful)
+## Step 2: Wireframe-blok valideren (HARD — KBT-RL191)
 
-Scan the extracted schema for screen IDs (patterns: `SCR-\d+`, `[A-Z]{2,}-SCR-\d+`, or explicit scherm-ID references from KBT-F435 convention).
+Parse het `## Wireframe`-blok uit de bron-notities/het concept met de pure decision-rule `parseWireframeBlock` (`plugin/scripts/wireframe-block.js`, KBT-SR578) → `{ present, optOut, wireframe, versie, paginas }`. De slug/versie/pagina komen **uitsluitend** uit het blok — nooit hardcoded (KBT-BD191).
 
-For each screen ID found:
-```
-// No dedicated get_wireframe MCP tool exists yet (KBT-E086 planned)
-// Skip gracefully when unavailable
-```
-
-If no `get_wireframe` tool is registered in the current MCP session, log a warning to the PO:
-> "⚠️ Wireframe-ophalen overgeslagen (KBT-E086 nog niet beschikbaar). Screen-ID's worden als vrije tekst bewaard in de User Story-beschrijvingen. De rijpheids-checklist vereist wel dat UI-stories een scherm-ID bevatten."
-
-Then continue to Step 3. Do **not** block graduation on the absence of KBT-E086.
+- **`optOut === true`** (`## Wireframe — n.v.t. (geen UI)`): geen UI-oppervlak → sla de wireframe-gate over **zónder** fout; ga verder naar Step 3.
+- **`present === false` op een UI-rakend concept**: readiness-tekortkoming — vraag de PO om een `## Wireframe`-blok (velden `wireframe`/`versie`/`pagina`) of een expliciete `n.v.t. (geen UI)` vóór graduatie.
+- **`present === true && !optOut`**: valideer **elke** `pagina`-id in de gepinde `versie`:
+  ```
+  MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
+  ```
+  - Bestaat de pagina niet in die versie, of laadt de referentie niet → **STOP (fail-not-skip)**: meld welke pagina-id's wél in die versie bestaan; graduatie blokkeert tot het blok klopt. Er is geen "graceful skip" meer — `get_wireframe` (KBT-E086) is live.
+  - Slaagt de validatie → bewaar `{ wireframe, versie, paginas }` **gestructureerd** bij de UI-stories (niet langer alleen als vrije tekst).
 
 ---
 
