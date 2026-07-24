@@ -436,7 +436,8 @@ Do NOT launch Explore agents or do broad codebase exploration. The plan (tasks +
 Parse het `## Wireframe`-blok van de issue met `parseWireframeBlock` (`plugin/scripts/wireframe-block.js`, KBT-SR578) → `{ present, optOut, wireframe, versie, paginas }`. De slug/versie/pagina komen **uitsluitend** uit het blok — nooit hardcoded (KBT-BD191).
 
 - **`optOut === true`** of **`present === false` op een niet-UI-issue** → geen wireframe-context nodig; ga verder.
-- **`present === true && !optOut`** → haal per pagina de markup op en geef die als **bindende** context mee aan elke (sub)agent die UI bouwt:
+- **`present === true && !optOut && incomplete`** (`wireframe`, `versie` óf `pagina` ontbreekt — incl. een lege pagina-lijst) → **STOP**: een UI-issue mag niet worden uitgevoerd zonder een volledige, resolvebare wireframe-referentie (dit hoort in prepare al geblokkeerd te zijn — meld het als het hier alsnog opduikt).
+- **`present === true && !optOut && !incomplete`** → haal per pagina de markup op en geef die als **bindende** context mee aan elke (sub)agent die UI bouwt:
   ```
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>[, #anker])   // exact de gepinde versie — nooit "latest"
   ```

@@ -118,3 +118,59 @@ test('multiple pages split on comma, anchors preserved', () => {
   const r = parseWireframeBlock(desc);
   assert.deepEqual(r.paginas, ['a', 'b#c', 'd']);
 });
+
+// ---------------------------------------------------------------------------
+// Review-fixes KBT-F605 — adversariële randgevallen (PR #39 findings 1-3, 5)
+// ---------------------------------------------------------------------------
+
+test('opt-out does NOT false-positive on the word "na" in a sentence (finding 1)', () => {
+  const r = parseWireframeBlock('## Wireframe\nWireframe volgt na afstemming met de PO');
+  assert.equal(r.present, true);
+  assert.equal(r.optOut, false);
+});
+
+test('legacy name containing a vN token is preserved, not dropped (finding 2a)', () => {
+  const r = parseWireframeBlock('## Wireframe\nCheckout v2 Hub, v23, pagina s-ai-checkout');
+  assert.equal(r.wireframe, 'Checkout v2 Hub');
+  assert.equal(r.versie, 'v23');
+  assert.deepEqual(r.paginas, ['s-ai-checkout']);
+});
+
+test('legacy name with vN but no explicit version → version undefined, not misread (finding 2b)', () => {
+  const r = parseWireframeBlock('## Wireframe\nCheckout v2 Hub, pagina s-ai-checkout');
+  assert.equal(r.wireframe, 'Checkout v2 Hub');
+  assert.equal(r.versie, undefined);
+  assert.equal(r.incomplete, true);
+});
+
+test('block with wireframe+versie but no pagina is marked incomplete (finding 3)', () => {
+  const r = parseWireframeBlock('## Wireframe\n- wireframe: adminmeester--spa\n- versie: v23');
+  assert.equal(r.optOut, false);
+  assert.deepEqual(r.paginas, []);
+  assert.equal(r.incomplete, true);
+});
+
+test('a complete block is not marked incomplete', () => {
+  const r = parseWireframeBlock('## Wireframe\n- wireframe: w--x\n- versie: v2\n- pagina: a');
+  assert.equal(r.incomplete, false);
+});
+
+test('uppercase heading is recognised (finding 5)', () => {
+  const r = parseWireframeBlock('## WIREFRAME\n- wireframe: w--x\n- versie: v2\n- pagina: a');
+  assert.equal(r.present, true);
+  assert.equal(r.wireframe, 'w--x');
+});
+
+test('non-first ## Wireframe section is still found (finding 5)', () => {
+  const desc = '## Intro\ntext\n\n## Details\nmore\n\n## Wireframe\n- wireframe: w--x\n- versie: v9\n- pagina: p1';
+  const r = parseWireframeBlock(desc);
+  assert.equal(r.versie, 'v9');
+  assert.deepEqual(r.paginas, ['p1']);
+  assert.equal(r.incomplete, false);
+});
+
+test('canonical opt-out variants still work after the anchor fix', () => {
+  assert.equal(parseWireframeBlock('## Wireframe — n.v.t. (geen UI)').optOut, true);
+  assert.equal(parseWireframeBlock('## Wireframe\nn.v.t. (geen UI)').optOut, true);
+  assert.equal(parseWireframeBlock('## Wireframe — n/a').optOut, true);
+});

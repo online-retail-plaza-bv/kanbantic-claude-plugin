@@ -109,7 +109,8 @@ Parse het `## Wireframe`-blok uit de bron-notities/het concept met de pure decis
 
 - **`optOut === true`** (`## Wireframe — n.v.t. (geen UI)`): geen UI-oppervlak → sla de wireframe-gate over **zónder** fout; ga verder naar Step 3.
 - **`present === false` op een UI-rakend concept**: readiness-tekortkoming — vraag de PO om een `## Wireframe`-blok (velden `wireframe`/`versie`/`pagina`) of een expliciete `n.v.t. (geen UI)` vóór graduatie.
-- **`present === true && !optOut`**: valideer **elke** `pagina`-id in de gepinde `versie`:
+- **`present === true && !optOut && incomplete`** (`wireframe`, `versie` óf `pagina` ontbreekt — incl. een lege pagina-lijst): **STOP** — behandel dit als readiness-tekortkoming, niet als een geldige validatie. Een blok zonder pagina mag de gate niet vacuous passeren.
+- **`present === true && !optOut && !incomplete`**: valideer **elke** `pagina`-id in de gepinde `versie`:
   ```
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
   ```

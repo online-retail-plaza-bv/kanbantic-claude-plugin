@@ -37,13 +37,11 @@
 // (KBT-BD191). `paginas` behoudt een eventuele `#anker`-suffix per pagina.
 //
 
-// Matcht een `## Wireframe`-heading-regel; capture-groep 1 = de rest van de
-// heading-regel (voor de opt-out-vorm `## Wireframe — n.v.t. (geen UI)`).
-const HEADING_RE = /^[ \t]{0,3}#{1,6}[ \t]+wireframe\b[ \t]*(.*)$/im;
-
-// Herkent de opt-out: "n.v.t." / "nvt" / "n/a" (met of zonder "(geen UI)"),
-// zowel op de heading-regel als op een losse regel eronder.
-const OPTOUT_RE = /\bn\.?\s*v\.?\s*t\.?\b|\bn\/?a\b/i;
+// Herkent de opt-out `## Wireframe — n.v.t. (geen UI)`: "n.v.t." (of "n/a"), optioneel
+// gevolgd door een toelichting tussen haakjes. Geankerd op het HELE veld/de hele regel
+// (review-fix KBT-F605): een losse substring-match zou het gangbare woord "na"/"n/a" in een
+// zin ("Wireframe volgt na afstemming") ten onrechte als opt-out lezen.
+const OPTOUT_RE = /^n\.?\s*v\.?\s*t\.?(?:\s*\(.*\))?$|^n\/a(?:\s*\(.*\))?$/i;
 
 // Een exact-gepind versienummer: v gevolgd door 1+ cijfers (optioneel .x.y).
 const VERSION_TOKEN_RE = /\bv\d+(?:\.\d+)*\b/i;
@@ -115,9 +113,9 @@ function parseWireframeBlock(description) {
 
   const { headingRest, body } = section;
 
-  // Opt-out: n.v.t. op de heading-regel of ergens in het (korte) lichaam.
-  const optOutHeading = headingRest.length > 0 && OPTOUT_RE.test(headingRest);
-  const optOutBody = body.length > 0 && body.length < 80 && OPTOUT_RE.test(body) && VERSION_TOKEN_RE.test(body) === false;
+  // Opt-out: "n.v.t." als volledige heading-rest óf als volledige (losse) body-regel.
+  const optOutHeading = OPTOUT_RE.test(headingRest.trim());
+  const optOutBody = OPTOUT_RE.test(body.trim());
   if (optOutHeading || optOutBody) {
     return { present: true, optOut: true };
   }
@@ -142,25 +140,21 @@ function parseWireframeBlock(description) {
     const flat = body.replace(/\n+/g, ' ').trim();
     const parts = flat.split(',').map((s) => s.trim()).filter(Boolean);
     for (const part of parts) {
-      if (!versie) {
-        const vm = part.match(VERSION_TOKEN_RE);
-        if (vm && /^v\d/i.test(part.trim())) {
-          versie = vm[0];
-          continue;
-        }
+      const startsWithVersion = /^v\d/i.test(part.trim());
+      if (!versie && startsWithVersion) {
+        versie = part.trim().match(VERSION_TOKEN_RE)[0];
+        continue;
       }
       if (!paginas && /pagina|pages?\b/i.test(part)) {
         paginas = splitPages(part);
         continue;
       }
-      if (!wireframe && !VERSION_TOKEN_RE.test(part) && !/pagina|pages?\b/i.test(part)) {
-        wireframe = part;
+      // Een part is alleen géén wireframe-naam als het ZELF met een versietoken begint
+      // (review-fix KBT-F605): een naam die toevallig "v2" bevat ("Checkout v2 Hub") mag niet
+      // worden weggegooid of als versie gelezen. Spiegelt de begint-met-guard van de versie-detectie.
+      if (!wireframe && !startsWithVersion && !/pagina|pages?\b/i.test(part)) {
+        wireframe = part.trim();
       }
-    }
-    // versie kan ook los in de tekst staan zonder eigen segment
-    if (!versie) {
-      const vm = flat.match(VERSION_TOKEN_RE);
-      if (vm) versie = vm[0];
     }
   }
 
@@ -170,12 +164,20 @@ function parseWireframeBlock(description) {
     versie = vm ? vm[0].toLowerCase() : String(versie).trim();
   }
 
+  const normalizedPaginas = paginas && paginas.length ? paginas : [];
+  const wf = wireframe ? wireframe.trim() : undefined;
+  const ver = versie || undefined;
+  // Een aanwezig, niet-opt-out blok is INCOMPLEET als wireframe, versie of pagina ontbreekt
+  // (review-fix KBT-F605). De lane-skills behandelen `incomplete === true` als STOP-conditie
+  // (fail-not-skip, KBT-RL191) — een lege pagina-lijst mag de validatie niet vacuous laten passeren.
+  const incomplete = !wf || !ver || normalizedPaginas.length === 0;
   return {
     present: true,
     optOut: false,
-    wireframe: wireframe ? wireframe.trim() : undefined,
-    versie: versie || undefined,
-    paginas: paginas && paginas.length ? paginas : [],
+    incomplete,
+    wireframe: wf,
+    versie: ver,
+    paginas: normalizedPaginas,
   };
 }
 

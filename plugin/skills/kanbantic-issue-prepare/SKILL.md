@@ -523,7 +523,8 @@ Voor **elke** UI-rakende issue (Feature/Bug/Epic) geldt: het `## Wireframe`-blok
 
 - **`optOut === true`** (`## Wireframe — n.v.t. (geen UI)`): geen UI-oppervlak → sla de wireframe-gate over **zónder** fout; ga verder naar Step 6.
 - **`present === false` op een UI-rakende issue**: readiness-tekortkoming — voeg een `## Wireframe`-blok (velden `wireframe`/`versie`/`pagina`) of een expliciete `n.v.t. (geen UI)` toe vóór de Ready-transitie. Blokkeer Step 6a tot dit klopt.
-- **`present === true && !optOut`**: valideer **elke** `pagina`-id in de gepinde `versie`:
+- **`present === true && !optOut && incomplete`** (`wireframe`, `versie` óf `pagina` ontbreekt — incl. een lege pagina-lijst): **STOP** — readiness-tekortkoming; blokkeer Step 6a. Een blok zonder pagina mag de gate niet vacuous passeren.
+- **`present === true && !optOut && !incomplete`**: valideer **elke** `pagina`-id in de gepinde `versie`:
   ```
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
   ```
