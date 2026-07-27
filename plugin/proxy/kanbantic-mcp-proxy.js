@@ -66,6 +66,12 @@ let agentChannelId = null;       // Kanbantic AgentChannel.Id (1:1 with session)
 let inboxCursor = null;          // ISO timestamp — only fetch messages with SentAt > this
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
+// KBT-B470 — keep-alive heartbeat. The backend stale-sweep marks a session Stale after
+// HeartbeatTimeoutSeconds (300s) of no LastSeen refresh, archiving its channel and dropping it
+// from /agent-sessions. An idle spawned agent never calls the heartbeat tool itself, so the
+// proxy refreshes LastSeen periodically (well under the 300s window) while it stays connected.
+let heartbeatTimer = null;
+const HEARTBEAT_INTERVAL_MS = 90_000;
 
 // KBT-E102 F2 — idempotency guard for the startup auto-register side-effect.
 let autoRegisterStarted = false;
@@ -213,6 +219,7 @@ function postProcess(request, response) {
       // Initialize the inbox-poll cursor at 'now' so we don't replay old history.
       inboxCursor = new Date().toISOString();
       startInboxPoll();
+      startHeartbeat(); // KBT-B470 — keep the session alive while connected
       writeSessionFile();
       process.stderr.write(
         `[kanbantic-proxy] agent session ${agentSessionId} registered, ` +
@@ -225,6 +232,7 @@ function postProcess(request, response) {
   if (request.method === 'tools/call' &&
       request.params && request.params.name === 'end_agent_session') {
     stopInboxPoll();
+    stopHeartbeat(); // KBT-B470
     removeSessionFile();
     agentSessionId = null;
     agentChannelId = null;
@@ -286,7 +294,11 @@ function __resetForTest() {
   // so the outcome must not depend on the developer's machine (cf. KBT-B438).
   API_KEY = process.env.KANBANTIC_API_KEY;
   stopInboxPoll();
+  stopHeartbeat(); // KBT-B470
 }
+
+// KBT-B470 — test hook: set the active session id so sendHeartbeat() can be exercised in isolation.
+function __setSessionForTest(id) { agentSessionId = id; }
 
 async function autoRegister() {
   if (!shouldAutoRegister()) return;
@@ -763,6 +775,30 @@ function stopInboxPoll() {
   inboxPollTimer = null;
 }
 
+// KBT-B470 — periodic session keep-alive so an idle spawned agent stays visible in
+// /agent-sessions instead of being reaped by the backend stale-sweep after 300s.
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+async function sendHeartbeat() {
+  if (!agentSessionId || shuttingDown) return;
+  try {
+    await callInternalTool('heartbeat', { sessionId: agentSessionId });
+  } catch (e) {
+    // Best-effort: a failed heartbeat (transient blip) must never crash the proxy — the next
+    // tick retries. The stale-sweep only reaps after 300s, so occasional misses are tolerated.
+    process.stderr.write(`[kanbantic-proxy] heartbeat failed (non-fatal): ${e.message}\n`);
+  }
+}
+
 async function pollInbox() {
   if (!agentChannelId || shuttingDown) return;
 
@@ -820,7 +856,9 @@ async function callInternalTool(toolName, toolArgs) {
     method: 'tools/call',
     params: { name: toolName, arguments: toolArgs },
   });
-  const responses = await forward(body);
+  // KBT-B470 — go through __forwardImpl (defaults to forward) so callInternalTool is unit-testable
+  // via setForwardForTest, matching the request-handling path. Production behaviour is unchanged.
+  const responses = await __forwardImpl(body);
   for (const r of responses) {
     if (r.id === requestId) {
       return parseToolResult(r);
@@ -944,6 +982,7 @@ async function gracefulExit(code) {
   shuttingDown = true;
 
   stopInboxPoll();
+  stopHeartbeat(); // KBT-B470
   removeSessionFile();
 
   if (agentSessionId && API_KEY) {
@@ -990,4 +1029,9 @@ module.exports = {
   setForwardForTest,
   __resetForTest,
   stopInboxPoll,
+  // KBT-B470 — exported for testing the keep-alive heartbeat timer.
+  startHeartbeat,
+  stopHeartbeat,
+  sendHeartbeat,
+  __setSessionForTest,
 };
