@@ -106,8 +106,8 @@ Report:
 **"Feature [CODE] has been created in status New. Next steps in the v0.10.0 lane-flow (8 statuses, 4 lane-skills):**
 
 1. **Triage** — run `kanbantic-issue-triage` for the go / no-go decision (`New → Triaged`); sets priority / version / application details.
-2. **Prepare** — once Triaged, run `kanbantic-issue-prepare` to work out specs, user stories, and test cases (`Triaged → Prepared` on green readiness — Prepared is the dedicated ready-to-claim status since plugin v2.2.0 / KBT-F235).
-3. **Execute** — finally `kanbantic-issue-execute` claims the Prepared issue (atomic `Prepared → InProgress`) and drives it through to `Review` when all tasks are Done and tests Passed.
+2. **Prepare** — once Triaged, run `kanbantic-issue-prepare` to work out specs, user stories, and test cases (`Triaged → Ready` on green readiness — `Ready` is the dedicated ready-to-claim status since plugin v2.2.0 / KBT-F235, renamed from `Prepared` in KBT-E103/v3).
+3. **Execute** — finally `kanbantic-issue-execute` claims the Ready issue (atomic `Ready → InProgress`) and drives it through to `Review` when all tasks are Done and tests Passed.
 4. **Review + Deploy** — `kanbantic-issue-review` reviews + merges + transitions to `InDeployment` (since plugin v2.3.0 / KBT-F236); the operational deploy webhooks + manual `update_issue_status(status: \"Done\")` complete the journey to `Done`."
 
 No other MCP calls. Stop after printing the handoff.

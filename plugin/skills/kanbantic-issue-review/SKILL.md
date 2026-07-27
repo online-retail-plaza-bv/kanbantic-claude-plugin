@@ -5,6 +5,8 @@ description: "Use after kanbantic-issue-execute marks an issue Review (or to run
 
 # Kanbantic Issue Review
 
+> **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
+
 ## Overview
 
 Complete the Review → InDeployment lane transition (per KBT-RL053; backend auto-promotes to Done on merge or remains InDeployment until deploy-gate clears, KBT-F236). This skill:
@@ -30,6 +32,25 @@ Complete the Review → InDeployment lane transition (per KBT-RL053; backend aut
 7. **Merge** — `git merge --no-ff` to main, push, clean up feature branch
 8. **Close issue** — transition to Done
 9. **Knowledge-extractie (optional)** — toolkit items + document impacts + `KnowledgeExtraction` entry
+
+## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
+
+**Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**.
+
+| Tier | Typische taken | Model (huidig) |
+|---|---|---|
+| **Licht** | lezen, samenvatten, status-updates, read-only onderzoek | **Haiku 4.5** |
+| **Middel** | code/specs/tests schrijven, root-cause, de meeste bouw-tasks | **Sonnet 5** |
+| **Zwaar** | complexe architectuur, tegenstrijdige specs, moeilijkste review | **Opus 4.8** |
+| **Max** | de absolute moeilijkste redeneer-/lang-horizon-taken (zelden) | **Fable 5** |
+
+Reviewer/adversariale verificatie moet altijd **gelijk of zwaarder** zijn dan het model dat de code bouwde (v3 §5.6) — een lichter model kan geen bugs vinden die het zelf niet had gezien. Voor de reviewer-subagent die Step 3 dispatcht betekent dit: **Zwaar (Opus 4.8)** als default (dit is letterlijk "moeilijkste review" uit de tabel), en nooit lichter dan de tier die `kanbantic-issue-execute` voor de betreffende Feature gebruikte. Voor eenvoudige Feature-level mini-reviews met een kleine diff mag **Middel (Sonnet 5)** volstaan, mits de bouwende Agent ook Middel was. Modelnamen/prijzen evolueren; het **principe** (lichtste-capabele-maar-nooit-lichter-dan-de-bouwer) is leidend — verifieer actuele model-ID's via de `claude-api`-referentie.
+
+## Test-tiers in deze skill (v3 §6, AUD-11)
+
+De getrapte teststrategie is verdeeld over de twee skills die samen een Feature/Epic afronden:
+- **T1** (per-task, lokaal, alleen geraakte Unit-tests) en **T2** (per-Feature, lokaal Unit + Integration + lichte review, geen volledige CI) draaien al in `kanbantic-issue-execute` (Steps 4A/4B.2 resp. Step 6) **vóórdat** deze review start.
+- Deze skill **herbevestigt T2** bij de Feature-level merge naar de epic-integratiebranch (Step 5a — de integratie-smoke) en is de **enige eigenaar van T3** — de volledige CI-suite (alle Unit/Integratie + Playwright-E2E + build-image) die één keer per Epic draait op de epic→main PR (Step 7).
 
 ## Step 0: Ensure Repository Access
 
@@ -148,8 +169,8 @@ The review skill's scope is per-level:
 
 **Phase-level review:**
 - Parent Epic must be on `InProgress`.
-- Phase must be on `ReadyForReview` (set by `mark_phase_for_review`).
-- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is ReadyForReview and its Epic is InProgress."
+- Phase must be on `Review` (set by `mark_phase_for_review`). *(PhaseStatus enum: `Locked` · `Active` · `Review` · `Approved` · `Rejected` — there is no `ReadyForReview`; verified against `get_system_schema`. F589 / F582.)*
+- Other statuses → STOP. Report: "Phase-level review only valid when the Phase is on `Review` and its Epic is InProgress."
 
 **Epic / standalone-Feature / Bug review:**
 - Required status: `Review`.
@@ -269,16 +290,41 @@ The approve/reject mechanism depends on `reviewLevel`:
 
 ### 5a: APPROVE — if no Critical or Important issues
 
-**Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Instead, record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature **and** transition the Feature back to `Done`:
+**First — approve the linked User Stories & Specifications (KBT-F587).** The reviewer is the named owner of User-Story / Specification approval. Do this whenever you record an `Approved` verdict for a Feature/Bug (Feature-level **or** standalone), so the `UserStoriesApproved` / `SpecificationsApproved` readiness-gates flip green on the **normal route** instead of accumulating as silent overrides:
+```
+# per linked User Story:
+MCP: mcp__kanbantic__update_user_story(userStoryId: <id>, status: "Approved")
+# per linked Specification (title is required — pass the existing title unchanged):
+MCP: mcp__kanbantic__update_specification(id: <specId>, title: <existing title>, status: "Approved")
+```
+- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`** — a User-Story-level precondition that is **independent of the issue test-policy**. So for a Feature with genuinely no E2E surface you cannot approve the US this way, and leaving it at `Ready` keeps `UserStoriesApproved` red. In that specific case the **documented override-with-reason is the correct route** (not a sluiproute): set the E2E level to `N.v.t.` via `set_test_policy`, then waive `UserStoriesApproved` with an `overrideReason` that cites the E2E-`N.v.t.` policy as the rationale — the override is audited (KBT-F170 / KBT-PR191). Closing this coupling (so `update_user_story` honours a `N.v.t.` E2E policy and no override is needed) is a server-side follow-up on KBT-F591/KBT-F587. For a Feature that *does* have a Passed E2E case, approve the US directly with no override.
+
+**Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature, **then merge to the epic-integration branch**, **then** transition the Feature to `Done`:
 ```
 MCP: mcp__kanbantic__approve_review(
   issueId: <FeatureId>,
   verdict: "Approved" | "ApprovedWithComments",
   reason: <≥20-char Feature-review summary>
 )
+```
+
+**Merge to the epic-integration branch — NOT to `main` (KBT-F583 / KBT-F584).** This is the named owner and moment of the per-Feature merge that §5.4 of the Workflow doc requires; it was previously nobody's job. The reviewer performs it here, before marking the Feature `Done`:
+- If the Feature was built on its **own** branch/worktree (parallel per-Feature model), merge that branch into `feature/KBT-E<epic>-integratie` and run the light integration-smoke — this is **T2** (Feature-level, local Unit+Integration, no full CI; v3 §6, mirrors the T2 tier `kanbantic-issue-execute` Step 6 already ran before handing off to this review). One merge-to-integration at a time per repo (serialise via the orchestrator):
+  ```bash
+  git checkout feature/KBT-E<epic>-integratie
+  git pull --ff-only
+  git merge --no-ff <feature-branch> -m "Merge <FeatureCode> into KBT-E<epic> integration"
+  # run the integration-smoke, then:
+  git push origin feature/KBT-E<epic>-integratie
+  ```
+  On **conflict**: `git merge --abort`, add a fix-task on the Feature, and leave it on `Review` (the `Review → InProgress` return-path is tracked in E104 / KBT-F589). Its owner re-runs `kanbantic-issue-execute` to resolve on the feature branch, then review is re-run. Do **not** mark the Feature `Done`.
+- If the Feature shared the **epic-integration branch** directly (single-branch execute model — one branch per Epic-execution), it is already integrated; skip the merge.
+
+Only after a clean integration (or when no merge was needed):
+```
 MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "Done")
 ```
-Then **STOP** — no merge, no further steps. Control returns to the executing skill, which continues with the next Feature in the Phase.
+Then **STOP** — the **only** merge to `main` happens once, at Epic-level (Step 7). Control returns to the executing skill, which continues with the next Feature in the Phase.
 
 **Phase-level:**
 ```
@@ -302,10 +348,10 @@ Rejection MUST always include a clear justification. The reason is recorded as a
 
 Create fix tasks **on the right entity**:
 
-- **Feature-level reject**: fix-tasks on the Feature; transition Feature back to `InProgress`:
+- **Feature-level reject**: fix-tasks on the Feature; the Feature **stays on `Review`**. There is **no `Review → InProgress` transition** in the Domain (verified against `get_system_schema`, F589); the wanted return-path is tracked in **[OPEN: KBT-F562 / E104]**. The implementer re-runs `kanbantic-issue-execute` to pick up the fix-tasks from `Review`:
   ```
   MCP: mcp__kanbantic__add_task(issueId: <FeatureId>, title: "Fix: ...", priority: "High")
-  MCP: mcp__kanbantic__update_issue_status(issueId: <FeatureId>, status: "InProgress")
+  # Do NOT call update_issue_status(<FeatureId>, "InProgress") — Review → InProgress does not exist (F589).
   ```
 - **Phase-level reject**: fix-tasks on the Epic (or on individual Features in the Phase if the issue is per-Feature), then `reject_phase`:
   ```
@@ -376,14 +422,22 @@ If no untracked deferrals are found → continue silently.
 
 ## Step 7: Merge + Push + Cleanup
 
+<HARD-GATE>
+This is the **only** merge to `main`, and it runs **only at Epic-level / standalone-Feature / Bug** final approve (Step 6). The merge **source is the epic-integration branch** `feature/KBT-E<epic>-integratie` (into which every Feature was merged in Step 5a), not an individual feature branch — so the full CI suite (T3) runs once per Epic, not once per Feature (Workflow doc §6–§7). For a standalone Feature/Bug the "integration branch" is simply its own branch.
+</HARD-GATE>
+
 Execute the merge to main with a no-ff merge commit so the merge-historie zichtbaar blijft:
 
 ```bash
 git checkout main
 git pull origin main
-git merge --no-ff <feature-branch> -m "Merge <ISSUE-CODE> (<versionContext.name>): <short summary>"
+git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionContext.name>): <short summary>"
 git push origin main
 ```
+
+**Where `main` is protected** (push-to-main blocked — e.g. the plugin repo, KBT-REPO002): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+
+**Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
 
 Include the Version name (`versionContext` from Step 1b) in the merge commit summary so the merge-historie ties the change to its version-milestone (KBT-F318). For a backlog issue (`versionContext == "—"`) omit the parenthetical.
 
@@ -436,7 +490,7 @@ After a successful `approve_review` on the **Epic / standalone-Feature / Bug**
 final-approve path (this Step 7.5), promote every user story linked to the
 issue from `Implemented` to `Validated`. This is the second half of the
 `update_validation_status` lifecycle — the first half runs in
-`kanbantic-issue-execute` Step 7d (NotImplemented → Implemented).
+`kanbantic-issue-execute` Step 7d (`Approved → Implemented`).
 
 Do **NOT** call this from the Feature-level mini-review approve in Step 5a
 (line ≈239) — per-Feature mini-approves are not the canonical promotion
@@ -445,9 +499,11 @@ point. Validation cascades up to the final Epic / standalone approve only.
 ```
 # Skip silently if the issue has no linked user stories.
 MCP: mcp__kanbantic__get_user_story_with_requirements  // per linked story
+# Signature is (linkId, validationStatus) — linkId is the Specification↔UserStory link
+# from the user story's linkedSpecifications, NOT the userStoryId (F589).
 MCP: mcp__kanbantic__update_validation_status(
-  userStoryId,
-  status: "Validated"
+  linkId,                        // from get_user_story_with_requirements → linkedSpecifications[].linkId
+  validationStatus: "Validated"
 )
 ```
 
@@ -503,7 +559,7 @@ After this transition, surface the deploy-instructions to the caller:
 > 4. Smoke-test against production.
 > 5. Manually transition the issue to `Done` via `update_issue_status(status: "Done")` — the standard Done-readiness gate (all test cases Passed, all specs Approved, no pending Document Impacts, etc.) still applies.
 
-If the deploy fails: transition back to `Review` (`update_issue_status(status: "Review")`) so the implementer can pick up fix-tasks. **Do NOT** transition `InDeployment → Cancelled` directly — the Domain layer blocks that transition (KBT-RL053); cancel from Review (pre-deploy rollback) or from Done (post-deploy hotfix-rollback).
+If the deploy fails: **there is no legal `InDeployment → Review` transition** — the Domain layer allows only `InDeployment → Done` (KBT-RL053, verified against `get_system_schema`; `InDeployment → Cancelled` is likewise blocked). Do **NOT** attempt an illegal transition. Instead: `report_status` + an `add_discussion_entry` documenting the failed deploy, leave the issue on `InDeployment`, and escalate to the PO for a hotfix-forward or a manual recovery decision. A proper failed-deploy return-path is tracked in **[OPEN: KBT-F589 / E104]**.
 
 ## Step 9: Knowledge-Extractie (optional)
 
@@ -513,12 +569,20 @@ After the issue is Done, prompt the reviewer for knowledge to capture. This step
 
 Ask: **"Heb je patterns, gotchas of rules geleerd die de moeite waard zijn om vast te leggen?"**
 
+This knowledge goes to the workspace-wide **AI Toolkit** (Kanbantic), **not** local memory — other agents on other applications in this workspace rely on it (KBT-TRUL014, v3 §5.7 *"Kennisborging"*).
+
 If yes, per item collect:
 - `title` (descriptive)
 - `category` — `Pattern` | `Gotcha` | `Rule`
 - `content` — Markdown with file paths, code example, when to use
 
-Then:
+**Consistentie-check (verplicht — v3 §5.7).** Before calling `create_toolkit_item`/`update_toolkit_item`: search existing Toolkit items first and verify the new/changed content is not **contradicted** by other Toolkit items (ClaudeMd, Rules, Patterns, Gotchas) — this is a stronger check than "does a duplicate already exist", it is "does this contradict something else". If it does, reconcile — update the existing item so there are no two contradictory pieces of guidance side by side.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId, search: "<keyword>")
+```
+
+Then, once the consistentie-check is clean:
 ```
 MCP: mcp__kanbantic__create_toolkit_item(
   workspaceId: <id>,
@@ -528,7 +592,7 @@ MCP: mcp__kanbantic__create_toolkit_item(
 )
 ```
 
-If a pattern already exists but is outdated, prefer `update_toolkit_item` (search first with `list_toolkit_items(search: ...)`).
+If a pattern already exists but is outdated, prefer `update_toolkit_item` (this is the same search-first call as the consistentie-check above).
 
 ### 9b: Document impacts
 

@@ -34,26 +34,27 @@ const os = require('os');
 const { URL } = require('url');
 const { execSync } = require('child_process');
 
-const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
-let API_KEY = process.env.KANBANTIC_API_KEY;
-
 // Claude Desktop and Cowork launch the proxy as a child of a GUI process that
 // inherits its environment from explorer.exe at sign-in. User env vars added
 // afterwards are invisible to them until the user signs out and back in. Fall
-// back to HKCU\Environment so the key is resolvable without that cycle and
+// back to HKCU\Environment so values are resolvable without that cycle and
 // without requiring a literal secret in claude_desktop_config.json.
-if (!API_KEY && process.platform === 'win32') {
+function readRegistryEnv(name) {
+  if (process.platform !== 'win32') return undefined;
   try {
-    const out = execSync('reg query HKCU\\Environment /v KANBANTIC_API_KEY', {
+    const out = execSync(`reg query HKCU\\Environment /v ${name}`, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const m = out.match(/KANBANTIC_API_KEY\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/i);
-    if (m) API_KEY = m[1].trim();
+    const m = out.match(new RegExp(`${name}\\s+REG_(?:SZ|EXPAND_SZ)\\s+(.+)`, 'i'));
+    return m ? m[1].trim() : undefined;
   } catch {
-    // Value absent; handled at dispatch time with a clear JSON-RPC error.
+    return undefined; // Value absent; callers handle the miss.
   }
 }
+
+const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
+let API_KEY = process.env.KANBANTIC_API_KEY || readRegistryEnv('KANBANTIC_API_KEY');
 
 let sessionId = null;            // MCP transport session (Mcp-Session-Id header)
 let stdinEnded = false;
@@ -65,6 +66,15 @@ let agentChannelId = null;       // Kanbantic AgentChannel.Id (1:1 with session)
 let inboxCursor = null;          // ISO timestamp — only fetch messages with SentAt > this
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
+// KBT-B470 — keep-alive heartbeat. The backend stale-sweep marks a session Stale after
+// HeartbeatTimeoutSeconds (300s) of no LastSeen refresh, archiving its channel and dropping it
+// from /agent-sessions. An idle spawned agent never calls the heartbeat tool itself, so the
+// proxy refreshes LastSeen periodically (well under the 300s window) while it stays connected.
+let heartbeatTimer = null;
+const HEARTBEAT_INTERVAL_MS = 90_000;
+
+// KBT-E102 F2 — idempotency guard for the startup auto-register side-effect.
+let autoRegisterStarted = false;
 
 // ---------------------------------------------------------------------------
 // stdio: read newline-delimited JSON-RPC from stdin, write to stdout
@@ -194,6 +204,8 @@ function postProcess(request, response) {
     response.result.capabilities.experimental =
       response.result.capabilities.experimental || {};
     response.result.capabilities.experimental['claude/channel'] = {};
+    // KBT-E102 F2 — auto-register right after initialize (fire-and-forget; idempotent).
+    if (shouldAutoRegister()) autoRegister().catch(() => {});
   }
 
   // 2. Capture sessionId + channelId from register_agent_session response.
@@ -207,6 +219,7 @@ function postProcess(request, response) {
       // Initialize the inbox-poll cursor at 'now' so we don't replay old history.
       inboxCursor = new Date().toISOString();
       startInboxPoll();
+      startHeartbeat(); // KBT-B470 — keep the session alive while connected
       writeSessionFile();
       process.stderr.write(
         `[kanbantic-proxy] agent session ${agentSessionId} registered, ` +
@@ -219,6 +232,7 @@ function postProcess(request, response) {
   if (request.method === 'tools/call' &&
       request.params && request.params.name === 'end_agent_session') {
     stopInboxPoll();
+    stopHeartbeat(); // KBT-B470
     removeSessionFile();
     agentSessionId = null;
     agentChannelId = null;
@@ -229,6 +243,110 @@ function postProcess(request, response) {
   if (request.method === 'tools/list' && response.result) {
     augmentToolsListResponse(response);
   }
+}
+
+// ---------------------------------------------------------------------------
+// KBT-E102 F2 — auto-register the agent session on startup.
+//
+// When the Workstation Daemon spawns Claude with KANBANTIC_WORKSPACE_ID (and the
+// API key), the proxy registers itself automatically right after initialize — no
+// reliance on the model deciding to call register_agent_session. Idempotent (one
+// shot per process) and backward-compatible: without KANBANTIC_WORKSPACE_ID (local
+// / manual plugin use) it never auto-registers.
+//
+// The register response is routed through postProcess() so the existing
+// sessionId/channelId-capture + inbox-poll logic is reused unchanged.
+// ---------------------------------------------------------------------------
+
+// Central read of the startup env-vars the Workstation Daemon passes in.
+//
+// Deliberately process.env only — no HKCU\Environment fallback. The registry
+// fallback exists for the API key alone, because GUI-launched hosts inherit a
+// stale environment and the key must be resolvable without a sign-out cycle. The
+// auto-register context is different: the Daemon always injects it at spawn, so
+// a machine-wide KANBANTIC_WORKSPACE_ID could only come from a developer's own
+// profile — and would silently auto-register every manually-started plugin,
+// which is exactly what KBT-US771 forbids. Keeping this to process.env also
+// keeps the guard testable without depending on the dev machine (cf. KBT-B438).
+function autoRegisterEnv() {
+  return {
+    workspaceId: process.env.KANBANTIC_WORKSPACE_ID,
+    workstationId: process.env.KANBANTIC_WORKSTATION_ID,
+    host: process.env.KANBANTIC_HOST,
+    spawnCommandId: process.env.KANBANTIC_SPAWN_COMMAND_ID,
+  };
+}
+
+function shouldAutoRegister() {
+  return !autoRegisterStarted && !!autoRegisterEnv().workspaceId && !!API_KEY;
+}
+
+// Test seam: autoRegister forwards via this indirection so unit tests can inject a
+// mock without real HTTP. `forward` is a hoisted function declaration, so this
+// initialization (which runs during module load) safely captures it.
+let __forwardImpl = forward;
+function setForwardForTest(fn) { __forwardImpl = fn; }
+function __resetForTest() {
+  autoRegisterStarted = false;
+  agentSessionId = null;
+  agentChannelId = null;
+  // Re-read from process.env only (never the registry): the test controls the key,
+  // so the outcome must not depend on the developer's machine (cf. KBT-B438).
+  API_KEY = process.env.KANBANTIC_API_KEY;
+  stopInboxPoll();
+  stopHeartbeat(); // KBT-B470
+}
+
+// KBT-B470 — test hook: set the active session id so sendHeartbeat() can be exercised in isolation.
+function __setSessionForTest(id) { agentSessionId = id; }
+
+async function autoRegister() {
+  if (!shouldAutoRegister()) return;
+  autoRegisterStarted = true; // claim the slot up-front → idempotent across re-initialize
+
+  const env = autoRegisterEnv();
+  const args = {
+    workspaceId: env.workspaceId,
+    host: env.host || os.hostname(),
+    cwd: process.cwd(),
+  };
+  if (env.workstationId) args.workstationId = env.workstationId;
+  if (env.spawnCommandId) args.spawnCommandId = env.spawnCommandId;
+
+  const request = {
+    jsonrpc: '2.0',
+    id: `proxy-autoregister-${Date.now()}`,
+    method: 'tools/call',
+    params: { name: 'register_agent_session', arguments: args },
+  };
+
+  // Finite retry (3×, 1s/2s/4s backoff); never crash the proxy on a register failure.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const responses = await __forwardImpl(JSON.stringify(request));
+      for (const r of responses) postProcess(request, r); // reuse capture + inbox-poll
+      if (agentSessionId) {
+        process.stderr.write(
+          `[kanbantic-proxy] auto-registered agent session ${agentSessionId} (channel ${agentChannelId})\n`
+        );
+        return;
+      }
+      process.stderr.write(
+        `[kanbantic-proxy] auto-register attempt ${attempt}/3: no session in response\n`
+      );
+    } catch (e) {
+      process.stderr.write(
+        `[kanbantic-proxy] auto-register attempt ${attempt}/3 failed: ${e.message}\n`
+      );
+      if (/401|403/.test(e.message || '')) {
+        process.stderr.write(
+          '[kanbantic-proxy] check KANBANTIC_API_KEY + workspace-lidmaatschap (AgentSessions.Create)\n'
+        );
+      }
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+  }
+  process.stderr.write('[kanbantic-proxy] auto-register gave up after 3 attempts\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -251,25 +369,35 @@ function postProcess(request, response) {
 // ---------------------------------------------------------------------------
 
 // Most content-bearing tools carry their large payload in a `content` argument,
-// but some use a differently-named field — e.g. `create_wireframe` seeds version 1
-// from `initialContent`, not `content` (KBT-B390). The filePath machinery reads the
-// file into whichever field the tool actually expects. This alias table is the
-// single source of truth for tools whose content-field is not literally `content`;
-// every other tool defaults to `content`.
+// but some use a differently-named field — e.g. the wireframe fileset tools carry
+// their whole payload in `filesJson` (a JSON-array string), not `content`. The
+// filePath machinery reads the file into whichever field the tool actually expects.
+// This alias table is the single source of truth for tools whose content-field is
+// not literally `content`; every other tool defaults to `content`.
 const CONTENT_FIELD_BY_TOOL = {
-  create_wireframe: 'initialContent',
+  // KBT-F519: create_wireframe now creates version 1 from a fileset — its payload is
+  // `filesJson` (a JSON-array string), not the removed `initialContent` (KBT-B390).
+  // Same filePath offload as add_wireframe_version_files.
+  create_wireframe: 'filesJson',
+  // KBT-B417: the multi-file fileset tool carries its whole payload in `filesJson`
+  // (a JSON-array string), not `content`. Mapping it here lets the same filePath
+  // offload keep large filesets OUT of the MCP tools/call message — the exact
+  // client-side message-size cap (~60-90KB) that KBT-F464 solved for `content`.
+  // The file at filePath must contain the filesJson value (the JSON array text).
+  add_wireframe_version_files: 'filesJson',
 };
 
 function contentFieldFor(toolName) {
   return CONTENT_FIELD_BY_TOOL[toolName] || 'content';
 }
 
-// KBT-B398: the wireframe-content tools store raw HTML. Their filePath source must
-// never be a serialized MCP *response* that was saved to disk by mistake.
-const WIREFRAME_CONTENT_TOOLS = new Set(['add_wireframe_version', 'create_wireframe']);
+// KBT-B398: the wireframe-content tools store raw HTML / filesets. Their filePath
+// source must never be a serialized MCP *response* that was saved to disk by mistake.
+// (KBT-F519 removed add_wireframe_version; create_wireframe + the fileset tool remain.)
+const WIREFRAME_CONTENT_TOOLS = new Set(['create_wireframe', 'add_wireframe_version_files']);
 
-// KBT-B398: recognise a serialized get_wireframe / add_wireframe_version /
-// create_wireframe response that was saved to disk and then mistakenly re-used as an
+// KBT-B398: recognise a serialized get_wireframe / create_wireframe /
+// add_wireframe_version_files response that was saved to disk and then re-used as an
 // upload source. The fingerprint is a JSON object whose `.version` is an object
 // carrying a string `content` (or `initialContent`) — a shape that raw wireframe
 // HTML (which starts with `<`, not `{`) can never take. Detecting it lets the proxy
@@ -288,6 +416,98 @@ function looksLikeSavedWireframeResponse(text) {
   const version = parsed.version;
   if (!version || typeof version !== 'object' || Array.isArray(version)) return false;
   return typeof version.content === 'string' || typeof version.initialContent === 'string';
+}
+
+// ---------------------------------------------------------------------------
+// KBT-B411 — confine the local filePath read channel.
+//
+// resolveFilePathArgument reads filePath from disk and forwards the bytes to the
+// remote server through a channel deliberately kept OUT of the model transcript
+// (KBT-F464). A prompt-injected filePath could therefore point at a secret
+// (~/.ssh/id_rsa, .env) and exfiltrate it invisibly. Before reading we now:
+//   - canonicalize with realpathSync (defeats symlink escape),
+//   - reject anything but a regular file and cap the size,
+//   - refuse known secret/credential files (denylist), and
+//   - audit every read to stderr so the channel is never silent.
+// ---------------------------------------------------------------------------
+const MAX_FILEPATH_BYTES = 25 * 1024 * 1024; // 25 MiB — generous vs. real wireframe filesets
+
+// Sensitive directory anywhere in the path (e.g. ~/.ssh/id_rsa, ~/.aws/credentials).
+const SECRET_PATH_SEGMENTS = new Set(['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker']);
+// Exact credential filenames.
+const SECRET_BASENAMES = new Set([
+  '.env', '.npmrc', '.netrc', '.pgpass', '.git-credentials', '.credentials.json',
+  '.claude.json', 'credentials', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+]);
+// Key / certificate extensions.
+const SECRET_EXTENSIONS = new Set(['.pem', '.key', '.pfx', '.p12', '.keystore', '.ppk']);
+
+// Returns a human reason string if the canonical path looks like a secret, else null.
+function secretFileReason(canonicalPath) {
+  const norm = canonicalPath.replace(/\\/g, '/').toLowerCase();
+  const segments = norm.split('/').filter(Boolean);
+  const base = segments[segments.length - 1] || '';
+
+  for (const seg of segments) {
+    if (SECRET_PATH_SEGMENTS.has(seg)) return `path traverses a sensitive directory ('${seg}')`;
+  }
+  if (SECRET_BASENAMES.has(base)) return `filename '${base}' is a known credential file`;
+  if (base === '.env' || base.startsWith('.env.')) return `filename '${base}' is a dotenv secret file`;
+  const dot = base.lastIndexOf('.');
+  const ext = dot >= 0 ? base.slice(dot) : '';
+  if (SECRET_EXTENSIONS.has(ext)) return `extension '${ext}' is a private key / certificate file`;
+  return null;
+}
+
+// Screens a filePath before it is read. Returns { path, bytes } on success or
+// { error: {code,message} } (JSON-RPC error) on refusal — never throws.
+function screenFilePathRead(filePath, toolName) {
+  const readFail = (verb, e) => ({
+    error: {
+      code: -32603,
+      message:
+        `Failed to ${verb} filePath '${filePath}' for tool '${toolName}': ` +
+        `${e.code || e.name || 'Error'}: ${e.message}. The call was not forwarded.`,
+    },
+  });
+
+  let canonical;
+  try {
+    canonical = fs.realpathSync(filePath); // resolve symlinks + relative segments
+  } catch (e) {
+    return readFail('read', e);
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(canonical);
+  } catch (e) {
+    return readFail('stat', e);
+  }
+
+  if (!stat.isFile()) {
+    return { error: { code: -32602, message:
+      `filePath '${filePath}' for tool '${toolName}' is not a regular file. The call was not forwarded.` } };
+  }
+  if (stat.size > MAX_FILEPATH_BYTES) {
+    return { error: { code: -32602, message:
+      `filePath '${filePath}' for tool '${toolName}' is ${stat.size} bytes, over the ` +
+      `${MAX_FILEPATH_BYTES}-byte limit. The call was not forwarded.` } };
+  }
+
+  const secret = secretFileReason(canonical);
+  if (secret) {
+    return { error: { code: -32602, message:
+      `Refused to read filePath '${filePath}' for tool '${toolName}': ${secret}. The proxy will ` +
+      `not upload secret/credential files. The call was not forwarded.` } };
+  }
+
+  // KBT-B411 audit: this read channel is intentionally invisible to the transcript,
+  // so surface it on stderr (operator log) — the channel is never silent.
+  process.stderr.write(
+    `[kanbantic-mcp-proxy] filePath read for '${toolName}': ${canonical} (${stat.size} bytes)\n`);
+
+  return { path: canonical, bytes: stat.size };
 }
 
 function resolveFilePathArgument(msg) {
@@ -315,9 +535,14 @@ function resolveFilePathArgument(msg) {
     };
   }
 
+  // KBT-B411 — screen the path before reading: canonicalize, cap size, refuse
+  // secret/credential files, and audit to stderr.
+  const screen = screenFilePathRead(filePath, toolName);
+  if (screen.error) return { error: screen.error };
+
   let fileContent;
   try {
-    fileContent = fs.readFileSync(filePath, 'utf8');
+    fileContent = fs.readFileSync(screen.path, 'utf8');
   } catch (e) {
     return {
       error: {
@@ -550,6 +775,30 @@ function stopInboxPoll() {
   inboxPollTimer = null;
 }
 
+// KBT-B470 — periodic session keep-alive so an idle spawned agent stays visible in
+// /agent-sessions instead of being reaped by the backend stale-sweep after 300s.
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+async function sendHeartbeat() {
+  if (!agentSessionId || shuttingDown) return;
+  try {
+    await callInternalTool('heartbeat', { sessionId: agentSessionId });
+  } catch (e) {
+    // Best-effort: a failed heartbeat (transient blip) must never crash the proxy — the next
+    // tick retries. The stale-sweep only reaps after 300s, so occasional misses are tolerated.
+    process.stderr.write(`[kanbantic-proxy] heartbeat failed (non-fatal): ${e.message}\n`);
+  }
+}
+
 async function pollInbox() {
   if (!agentChannelId || shuttingDown) return;
 
@@ -607,7 +856,9 @@ async function callInternalTool(toolName, toolArgs) {
     method: 'tools/call',
     params: { name: toolName, arguments: toolArgs },
   });
-  const responses = await forward(body);
+  // KBT-B470 — go through __forwardImpl (defaults to forward) so callInternalTool is unit-testable
+  // via setForwardForTest, matching the request-handling path. Production behaviour is unchanged.
+  const responses = await __forwardImpl(body);
   for (const r of responses) {
     if (r.id === requestId) {
       return parseToolResult(r);
@@ -731,6 +982,7 @@ async function gracefulExit(code) {
   shuttingDown = true;
 
   stopInboxPoll();
+  stopHeartbeat(); // KBT-B470
   removeSessionFile();
 
   if (agentSessionId && API_KEY) {
@@ -767,4 +1019,19 @@ module.exports = {
   resolveFilePathArgument,
   augmentToolsListResponse,
   parseToolResult,
+  // KBT-B411 — exported for unit testing the filePath read confinement.
+  screenFilePathRead,
+  secretFileReason,
+  MAX_FILEPATH_BYTES,
+  // KBT-F551 — exported for testing the startup auto-register.
+  shouldAutoRegister,
+  autoRegister,
+  setForwardForTest,
+  __resetForTest,
+  stopInboxPoll,
+  // KBT-B470 — exported for testing the keep-alive heartbeat timer.
+  startHeartbeat,
+  stopHeartbeat,
+  sendHeartbeat,
+  __setSessionForTest,
 };
