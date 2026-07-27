@@ -26,10 +26,32 @@
 
 const http = require('node:http');
 const https = require('node:https');
+const fs = require('node:fs');
+const path = require('node:path');
 const { URL } = require('node:url');
 
 const MCP_URL = process.env.KANBANTIC_MCP_URL || 'https://kanbantic.com/mcp';
 const API_KEY = process.env.KANBANTIC_API_KEY;
+
+// KBT-B483 — snapshot comparison.
+//
+// Until now this script only checked three MUST_HAVE names, so it reported
+// "OK ... 222 total exposed" while known-mcp-tools.json was missing 8 live
+// tools — two of which (resolve_issue_elsewhere, set_test_policy) are named in
+// the lane-skills themselves. A guard that cannot fail when it should.
+//
+// The snapshot is deliberately a curated subset, not a mirror, so the comparison
+// is against `tools ∪ curatedOut`. `curatedOut` makes that intent
+// machine-readable instead of prose in the `source` field.
+const SNAPSHOT_PATH = process.env.KANBANTIC_TOOLS_SNAPSHOT
+  || path.resolve(__dirname, 'known-mcp-tools.json');
+
+// Advisory by default: the live registry grows through work in another repo, so
+// plugin CI should not turn red because someone else deployed a new tool.
+// --strict (or KANBANTIC_DRIFT_STRICT=1) makes the backlog blocking, for a
+// release step that wants the snapshot provably current.
+const STRICT = process.argv.includes('--strict')
+  || process.env.KANBANTIC_DRIFT_STRICT === '1';
 
 // Tools that the kanbantic-issue-review skill (and other lane-flow skills)
 // rely on. If the live MCP registers any of these but the bundle exposes
@@ -43,6 +65,38 @@ const MUST_HAVE = [
 function fatal(code, msg) {
   process.stderr.write(`check-bundle-tool-drift: ${msg}\n`);
   process.exit(code);
+}
+
+// KBT-B483 — read the curated snapshot. A missing or malformed snapshot must not
+// be reported as drift: that would confuse "I could not compare" with "I compared
+// and it drifted", the same distinction exit code 2 exists for. Returns null so
+// the MUST-HAVE check still runs and its verdict stands on its own.
+function readSnapshot() {
+  let raw;
+  try {
+    raw = fs.readFileSync(SNAPSHOT_PATH, 'utf8');
+  } catch (e) {
+    process.stderr.write(
+      `check-bundle-tool-drift: snapshot unreadable at ${SNAPSHOT_PATH} (${e.message}) — ` +
+        `skipping the snapshot comparison.\n`
+    );
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      // curatedOut is optional for backward compatibility with a pre-B483
+      // snapshot; absent means "nothing deliberately excluded".
+      curatedOut: Array.isArray(parsed.curatedOut) ? parsed.curatedOut : [],
+    };
+  } catch (e) {
+    process.stderr.write(
+      `check-bundle-tool-drift: snapshot is not valid JSON (${e.message}) — ` +
+        `skipping the snapshot comparison.\n`
+    );
+    return null;
+  }
 }
 
 if (!API_KEY) {
@@ -157,6 +211,57 @@ async function main() {
           `present: [${[...names].sort().join(', ')}]\n`
       );
       process.exit(1);
+    }
+
+    // ---------------------------------------------------------------------
+    // KBT-B483 — snapshot vs live comparison.
+    // ---------------------------------------------------------------------
+    const snapshot = readSnapshot();
+    if (snapshot) {
+      const snapTools = new Set(snapshot.tools);
+      const curatedOut = new Set(snapshot.curatedOut);
+
+      // A name may not be in both: known-mcp-tools.test.js asserts the curated
+      // names are absent from `tools`, so this would break that test anyway.
+      // Always fatal — an internally inconsistent snapshot is never advisory.
+      const contradictory = [...curatedOut].filter((n) => snapTools.has(n)).sort();
+      if (contradictory.length > 0) {
+        process.stderr.write(
+          `check-bundle-tool-drift: INCONSISTENT SNAPSHOT — ${contradictory.length} name(s) appear in ` +
+            `both "tools" and "curatedOut": ${contradictory.join(', ')}\n` +
+            `Remove them from "tools" (curatedOut is the source of truth for deliberate exclusions).\n`
+        );
+        process.exit(1);
+      }
+
+      // Live tools the snapshot neither lists nor deliberately excludes.
+      const behind = [...names].filter((n) => !snapTools.has(n) && !curatedOut.has(n)).sort();
+      // Snapshot names that no longer exist live.
+      const phantom = [...snapTools].filter((n) => !names.has(n)).sort();
+
+      if (behind.length > 0 || phantom.length > 0) {
+        const lines = [];
+        if (behind.length > 0) {
+          lines.push(
+            `${behind.length} live tool(s) missing from the snapshot: ${behind.join(', ')}`
+          );
+        }
+        if (phantom.length > 0) {
+          lines.push(
+            `${phantom.length} snapshot name(s) no longer live: ${phantom.join(', ')}`
+          );
+        }
+        lines.push(
+          `Snapshot: ${snapshot.tools.length} tools + ${snapshot.curatedOut.length} curatedOut; live: ${tools.length}.`
+        );
+        lines.push(`Fix: see regenerationCommand in ${SNAPSHOT_PATH}`);
+
+        const label = STRICT ? 'SNAPSHOT DRIFT' : 'WARNING — snapshot drift (advisory)';
+        const sink = STRICT ? process.stderr : process.stdout;
+        sink.write(`check-bundle-tool-drift: ${label}\n  ${lines.join('\n  ')}\n`);
+
+        if (STRICT) process.exit(1);
+      }
     }
 
     process.stdout.write(
