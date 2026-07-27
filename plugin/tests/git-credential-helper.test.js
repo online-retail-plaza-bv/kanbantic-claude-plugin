@@ -23,11 +23,39 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 const HELPER_PATH = path.resolve(
   __dirname, '..', 'scripts', 'kanbantic-git-credential-helper.js'
 );
+
+// ---------------------------------------------------------------------------
+// KBT-B484 — cwd isolation.
+//
+// The helper resolves its repositoryId from (1) KANBANTIC_REPOSITORY_ID, else
+// (2) `git config --get kanbantic.repositoryId`. Step (2) runs in the child's
+// working directory, so if the child inherits the test-runner's cwd (this repo)
+// it picks up the LOCAL `kanbantic.repositoryId` that CLAUDE.md tells every
+// developer to configure for the PAT helper. That made the
+// "no repositoryId resolvable" test fail on every correctly-configured machine
+// while passing in CI, where a fresh checkout has no such config.
+//
+// Spawning in a scratch directory outside any git repo makes the premise true
+// instead of aspirational. Applied to ALL tests here, not just the one that
+// failed: the others set KANBANTIC_REPOSITORY_ID explicitly and therefore only
+// passed by accident, carrying the same latent dependency.
+// ---------------------------------------------------------------------------
+const ISOLATED_CWD = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b484-cred-'));
+
+process.on('exit', () => {
+  try {
+    fs.rmSync(ISOLATED_CWD, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup — never fail the suite over a leftover temp dir.
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Stub MCP backend — responds to tools/call get_repository_credential with a
@@ -94,6 +122,10 @@ function runHelper(op, { port, stdin, repositoryId = 'repo-123', apiKey = 'test-
 
   const child = spawn(process.execPath, [HELPER_PATH, op], {
     env,
+    // KBT-B484 — run outside any git repo so `git config --get
+    // kanbantic.repositoryId` genuinely finds nothing when the env override is
+    // absent. Without this the child inherits the runner's cwd (the repo root).
+    cwd: ISOLATED_CWD,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -181,8 +213,12 @@ test('get → backend success:false → empty stdout, exit 0 (fall through)', as
 test('get → no repositoryId resolvable → empty stdout, backend not contacted', async () => {
   const stub = await startStubBackend({ success: true, token: 't', provider: 'GitHub' });
   try {
-    // repositoryId:null clears the env var, and the temp cwd is not a git repo,
-    // so `git config --get kanbantic.repositoryId` finds nothing.
+    // repositoryId:null clears the env var, and runHelper spawns in
+    // ISOLATED_CWD — a scratch dir outside any git repo — so
+    // `git config --get kanbantic.repositoryId` genuinely finds nothing.
+    // Before KBT-B484 there was no cwd at all, so this comment described an
+    // isolation that did not exist and the assertion failed on any machine
+    // with a local kanbantic.repositoryId configured.
     const { code, stdout } = await runHelper('get', { port: stub.port, repositoryId: null });
     assert.strictEqual(code, 0);
     assert.strictEqual(stdout.trim(), '', 'no token emitted without a repositoryId');
