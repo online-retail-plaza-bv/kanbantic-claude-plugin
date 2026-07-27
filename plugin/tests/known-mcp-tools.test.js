@@ -17,7 +17,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SNAPSHOT = path.resolve(__dirname, '..', 'scripts', 'known-mcp-tools.json');
-const tools = new Set(JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8')).tools);
+// KBT-B483 — keep the whole parsed snapshot around so tests can assert on
+// `curatedOut` as well, not just the tool-name set.
+const snapshot = JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8'));
+const tools = new Set(snapshot.tools);
 
 const LIVE_VERSION_TOOLS = [
   'create_version',
@@ -49,7 +52,12 @@ const STALE_NONEXISTENT = [
   'archive_version',
   'add_affects_version',
   'remove_affects_version',
-  'get_roadmap_data',
+  // KBT-B483 — `get_roadmap_data` was removed from this list on 2026-07-27.
+  // F320 listed it as a name that "never shipped as an MCP tool", but it has
+  // since been implemented and is present in the live tools/list on
+  // kanbantic.com (verified directly against tools/list, alongside the four
+  // names below which really are still absent). Keeping it here would forbid
+  // the snapshot from recording a tool that genuinely exists.
   'search_deployment_history',
 ];
 
@@ -69,5 +77,37 @@ test('omits all 4 legacy release-tools', () => {
 test('omits stale/non-existent names from the F320 description', () => {
   for (const t of STALE_NONEXISTENT) {
     assert.ok(!tools.has(t), `snapshot must NOT contain stale non-existent name \`${t}\``);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// KBT-TC3292 (KBT-B483 / KBT-SR586) — curatedOut makes the curation
+// machine-readable. Before B483 "which tools do we deliberately exclude?" lived
+// only in the `source` / `regenerationCommand` prose, so no check could tell a
+// deliberate exclusion apart from a forgotten name.
+// ---------------------------------------------------------------------------
+test('KBT-TC3292 — curatedOut exists, is an array, and never overlaps tools', () => {
+  const snap = snapshot;
+
+  assert.ok(Array.isArray(snap.curatedOut), 'curatedOut must be an array');
+  assert.ok(snap.curatedOut.length > 0, 'curatedOut should list the deliberate exclusions');
+
+  const tools = new Set(snap.tools);
+  const overlap = snap.curatedOut.filter((n) => tools.has(n));
+  assert.deepStrictEqual(
+    overlap,
+    [],
+    `curatedOut and tools must be disjoint; overlapping: ${overlap.join(', ')}`
+  );
+});
+
+test('KBT-TC3292 — the 4 deprecated release tools are curated out, not merely absent', () => {
+  const snap = snapshot;
+  const curated = new Set(snap.curatedOut);
+  const tools = new Set(snap.tools);
+
+  for (const name of ['create_release', 'list_releases', 'update_release', 'get_release_notes']) {
+    assert.ok(curated.has(name), `${name} must be listed in curatedOut`);
+    assert.ok(!tools.has(name), `${name} must not appear in tools`);
   }
 });

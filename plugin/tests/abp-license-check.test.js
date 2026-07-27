@@ -87,6 +87,68 @@ function mkEmptyProfile(prefix) {
   return mkTmpDir(prefix);
 }
 
+// ---------------------------------------------------------------------------
+// KBT-B480 fixtures — make the ABP NuGet-feed check deterministic.
+//
+// The hook resolves feed availability from (1) the NuGet package cache, honoring
+// NUGET_PACKAGES, else (2) `dotnet nuget list source`. Tests must not depend on
+// whether the host machine happens to have an ABP source registered — that is
+// exactly the kind of ambient dependency KBT-B484 was filed for.
+// ---------------------------------------------------------------------------
+
+function mkProPackageCache(prefix) {
+  // A NUGET_PACKAGES root that already contains an ABP Pro package, so the
+  // cache branch short-circuits and the feed counts as available everywhere.
+  const root = mkTmpDir(prefix);
+  fs.mkdirSync(path.join(root, 'volo.abp.identity.pro.domain'), { recursive: true });
+  return root;
+}
+
+function mkDotnetShim(prefix, mode) {
+  // A directory to prepend to PATH containing a fake `dotnet`.
+  //   mode 'nuget-only' → lists only nuget.org, exit 0  → no-abp-source
+  //   mode 'fail'       → exit 1                        → inconclusive
+  //
+  // Both .cmd (Windows, via PATHEXT) and an extensionless sh script (POSIX) are
+  // written so the shim works on either platform. The real PATH is kept after
+  // the shim dir so pwsh itself still resolves.
+  const dir = mkTmpDir(prefix);
+
+  const cmdLines = mode === 'fail'
+    ? ['@echo off', 'exit /b 1']
+    : [
+        '@echo off',
+        'echo Registered Sources:',
+        'echo   1.  nuget.org [Enabled]',
+        'echo       https://api.nuget.org/v3/index.json',
+        'exit /b 0',
+      ];
+  fs.writeFileSync(path.join(dir, 'dotnet.cmd'), cmdLines.join('\r\n') + '\r\n');
+
+  const shLines = mode === 'fail'
+    ? ['#!/bin/sh', 'exit 1']
+    : [
+        '#!/bin/sh',
+        'echo "Registered Sources:"',
+        'echo "  1.  nuget.org [Enabled]"',
+        'echo "      https://api.nuget.org/v3/index.json"',
+        'exit 0',
+      ];
+  const shPath = path.join(dir, 'dotnet');
+  const sh = shLines.join('\n') + '\n';
+  fs.writeFileSync(shPath, sh);
+  try {
+    fs.chmodSync(shPath, 0o755);
+  } catch {
+    // chmod is a no-op/unsupported on some Windows setups — harmless here.
+  }
+  return dir;
+}
+
+function withShimPath(shimDir) {
+  return { PATH: shimDir + path.delimiter + (process.env.PATH || '') };
+}
+
 function runHook(args, extraEnv) {
   // Build a sanitized env so we never inherit the host's ABP_LICENSE_CODE,
   // KANBANTIC_SKIP_ABP_CHECK, or USERPROFILE. Each test sets the exact env
@@ -136,11 +198,19 @@ function hookTest(name, fn) {
 // ---------------------------------------------------------------------------
 hookTest('KBT-TC1913 — happy path: ok when env-var set and token fresh', (t) => {
   const profile = mkFreshTokenFixture('kbt-f263-ok-', 0);
-  t.after(() => cleanup(profile));
+  // KBT-B480 — supply a cache containing an ABP Pro package so the new feed
+  // check passes regardless of the host's NuGet sources (CI has none).
+  const cache = mkProPackageCache('kbt-b480-ok-cache-');
+  t.after(() => cleanup(profile, cache));
 
   const { exitCode, result } = runHook(
     ['kanbantic-api', '', profile],
-    { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile }
+    {
+      ABP_LICENSE_CODE: 'test-license-1234',
+      USERPROFILE: profile,
+      HOME: profile,
+      NUGET_PACKAGES: cache,
+    }
   );
 
   assert.equal(exitCode, 0, `expected exit 0 (stderr=${result && JSON.stringify(result.messages)})`);
@@ -249,15 +319,196 @@ hookTest('KBT-TC1917 — out-of-scope: frontend application + no backend tags re
 
 hookTest('KBT-TC1917b — in-scope by tag: tag=backend triggers the check even if app is unknown', (t) => {
   const profile = mkFreshTokenFixture('kbt-f263-tag-', 0);
-  t.after(() => cleanup(profile));
+  // KBT-B480 — feed fixture, same reason as TC1913.
+  const cache = mkProPackageCache('kbt-b480-tag-cache-');
+  t.after(() => cleanup(profile, cache));
 
   const { exitCode, result } = runHook(
     ['some-unknown-app', 'backend', profile],
-    { ABP_LICENSE_CODE: 'test', USERPROFILE: profile, HOME: profile }
+    { ABP_LICENSE_CODE: 'test', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache }
   );
 
   assert.equal(exitCode, 0);
   assert.equal(result.action, 'ok', 'backend tag must put us in scope');
+});
+
+// ---------------------------------------------------------------------------
+// KBT-TC3291 (KBT-B480 / KBT-SR585) — ABP Commercial NuGet-feed reachability.
+//
+// The hook used to report ok while `dotnet build` was doomed to fail with
+// 49x NU1101: ABP_LICENSE_CODE is a runtime licence, the feed is a restore
+// source, and only the former was checked.
+// ---------------------------------------------------------------------------
+
+hookTest('KBT-TC3291 — missing-nuget-feed: no ABP source and empty cache → exit 1', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-nofeed-', 0);
+  const cache = mkTmpDir('kbt-b480-nofeed-cache-');   // empty: no Pro packages
+  const shim = mkDotnetShim('kbt-b480-shim-nuget-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const { exitCode, result } = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign(
+      { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+      withShimPath(shim)
+    )
+  );
+
+  assert.equal(exitCode, 1, 'a doomed build must block before claim_issue');
+  assert.equal(result.action, 'missing-nuget-feed');
+  assert.equal(result.ok, false);
+
+  const joined = (result.messages || []).join('\n');
+  assert.ok(/NU1101/.test(joined), `messages should name the failure mode; got:\n${joined}`);
+});
+
+hookTest('KBT-TC3291 — feed available via cache → ok (no ABP source needed)', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-cache-', 0);
+  const cache = mkProPackageCache('kbt-b480-cache-hit-');
+  // Shim reports no ABP source: the cache branch alone must be sufficient.
+  const shim = mkDotnetShim('kbt-b480-shim-cache-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const { exitCode, result } = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign(
+      { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+      withShimPath(shim)
+    )
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(result.action, 'ok');
+  assert.ok(
+    /pro-packages-in-cache/.test((result.messages || []).join('\n')),
+    'should report which branch satisfied the check'
+  );
+});
+
+hookTest('KBT-TC3291 — fix instruction shows $env:ABP_API_KEY unexpanded and leaks no key', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-leak-', 0);
+  const cache = mkTmpDir('kbt-b480-leak-cache-');
+  const shim = mkDotnetShim('kbt-b480-shim-leak-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const { result, stdout } = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign(
+      {
+        ABP_LICENSE_CODE: 'test-license-1234',
+        USERPROFILE: profile,
+        HOME: profile,
+        NUGET_PACKAGES: cache,
+        ABP_API_KEY: 'super-secret-key-value',
+      },
+      withShimPath(shim)
+    )
+  );
+
+  assert.equal(result.action, 'missing-nuget-feed');
+  const joined = (result.messages || []).join('\n');
+
+  // The instruction must reference the variable, never its value.
+  assert.ok(
+    joined.includes('$env:ABP_API_KEY'),
+    `fix instruction must keep the env-var unexpanded; got:\n${joined}`
+  );
+  // Hard key-leak assertion across the entire output, not just messages.
+  assert.ok(
+    !stdout.includes('super-secret-key-value'),
+    'the ABP_API_KEY value must never appear in the hook output'
+  );
+  assert.ok(
+    !/nuget\.abp\.io\/[^/\s"]+\/v3\/index\.json/.test(stdout.replace(/\$env:ABP_API_KEY/g, '')),
+    'no keyed feed URL may appear in the output'
+  );
+});
+
+hookTest('KBT-TC3291 — ABP_API_KEY absent → reported as a second missing precondition', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-nokey-', 0);
+  const cache = mkTmpDir('kbt-b480-nokey-cache-');
+  const shim = mkDotnetShim('kbt-b480-shim-nokey-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const env = Object.assign(
+    { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+    withShimPath(shim)
+  );
+  const { result } = runHook(['kanbantic-api', '', profile], env);
+
+  assert.equal(result.action, 'missing-nuget-feed');
+  const joined = (result.messages || []).join('\n');
+  // On a machine with ABP_API_KEY on User/Machine scope the hook legitimately
+  // finds one, so accept either branch — but it must say something actionable.
+  assert.ok(
+    /ABP_API_KEY is also not set/.test(joined) || /\$env:ABP_API_KEY/.test(joined),
+    `expected either the "also not set" note or the fix command; got:\n${joined}`
+  );
+});
+
+hookTest('KBT-TC3291 — dotnet failing is inconclusive, not a block', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-incon-', 0);
+  const cache = mkTmpDir('kbt-b480-incon-cache-');
+  const shim = mkDotnetShim('kbt-b480-shim-fail-', 'fail');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const { exitCode, result } = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign(
+      { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+      withShimPath(shim)
+    )
+  );
+
+  assert.equal(exitCode, 0, 'a hook that cannot verify must not hold up work');
+  assert.equal(result.action, 'ok');
+  assert.ok(
+    /could not be verified/.test((result.messages || []).join('\n')),
+    'inconclusive state must be reported, not silently ignored'
+  );
+});
+
+hookTest('KBT-TC3291 — existing FAIL paths keep precedence over the feed check', (t) => {
+  // A stale token AND no feed: the answer must still be stale-token, so the
+  // operator fixes the first blocker rather than chasing the second.
+  const profile = mkFreshTokenFixture('kbt-b480-prec-', 10);
+  const cache = mkTmpDir('kbt-b480-prec-cache-');
+  const shim = mkDotnetShim('kbt-b480-shim-prec-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const { exitCode, result } = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign(
+      { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+      withShimPath(shim)
+    )
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(result.action, 'stale-token', 'token checks run before the feed check');
+});
+
+hookTest('KBT-TC3291 — opt-out and out-of-scope skip the feed check too', (t) => {
+  const profile = mkFreshTokenFixture('kbt-b480-skip-', 0);
+  const cache = mkTmpDir('kbt-b480-skip-cache-');
+  const shim = mkDotnetShim('kbt-b480-shim-skip-', 'nuget-only');
+  t.after(() => cleanup(profile, cache, shim));
+
+  const base = Object.assign(
+    { ABP_LICENSE_CODE: 'test-license-1234', USERPROFILE: profile, HOME: profile, NUGET_PACKAGES: cache },
+    withShimPath(shim)
+  );
+
+  const optOut = runHook(
+    ['kanbantic-api', '', profile],
+    Object.assign({}, base, { KANBANTIC_SKIP_ABP_CHECK: '1' })
+  );
+  assert.equal(optOut.exitCode, 0);
+  assert.equal(optOut.result.action, 'skipped-env');
+
+  const outOfScope = runHook(['kanbantic-frontend', '', profile], base);
+  assert.equal(outOfScope.exitCode, 0);
+  assert.equal(outOfScope.result.action, 'out-of-scope');
 });
 
 // ---------------------------------------------------------------------------

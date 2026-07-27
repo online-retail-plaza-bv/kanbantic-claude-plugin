@@ -25,10 +25,15 @@
     - skipped-env   : KANBANTIC_SKIP_ABP_CHECK=1 opt-out
     - out-of-scope  : issue doesn't touch ABP Pro license-runtime
 
-  Three FAIL paths (exit 1 — skill must stop before claim_issue):
-    - missing-env-var : ABP_LICENSE_CODE not set on User or Machine scope
-    - missing-token   : $USERPROFILE\.abp\cli\access-token.bin missing
-    - stale-token     : token LastWriteTime older than threshold
+  Four FAIL paths (exit 1 — skill must stop before claim_issue):
+    - missing-env-var    : ABP_LICENSE_CODE not set on User or Machine scope
+    - missing-token      : $USERPROFILE\.abp\cli\access-token.bin missing
+    - stale-token        : token LastWriteTime older than threshold
+    - missing-nuget-feed : no ABP Commercial NuGet source AND no ABP Pro packages
+                           in the local cache — `dotnet restore` would fail with
+                           NU1101 (KBT-B480 / KBT-SR585). ABP_LICENSE_CODE is a
+                           runtime licence; the feed is a restore source. Checking
+                           only the former reported ok while the build was doomed.
 
   The function is non-interactive. It does NOT mutate Kanbantic state — the
   caller (kanbantic-issue-execute) is responsible for translating the result
@@ -56,7 +61,7 @@
       skipped         : [bool]    # true for skipped-env / out-of-scope
       action          : [string]  # ok | skipped-env | out-of-scope |
                                   #   missing-env-var | missing-token |
-                                  #   stale-token
+                                  #   stale-token | missing-nuget-feed
       applicationSlug : [string]
       tagsCsv         : [string]
       tokenAgeDays    : [object]  # double or $null when not checked
@@ -91,6 +96,73 @@ function New-AbpResult {
         tokenAgeDays    = $TokenAgeDays
         thresholdDays   = $ThresholdDays
         messages        = @($Messages)
+    }
+}
+
+function Test-AbpNuGetFeedAvailable {
+    <#
+    .SYNOPSIS
+      KBT-B480 / KBT-SR585 — can this machine restore the ABP Pro packages?
+
+    .DESCRIPTION
+      ABP_LICENSE_CODE is a *runtime* licence; the ABP Commercial feed is a
+      *restore* source. Two independent preconditions for "this machine can build
+      and run the backend". Before B480 only the first was checked, so the hook
+      reported ok while `dotnet build` failed with 49x NU1101.
+
+      Succeeds when EITHER holds:
+        - the ABP Pro packages already sit in the local NuGet cache (offline
+          restore works, so no source is needed), OR
+        - `dotnet nuget list source` lists a source on host nuget.abp.io.
+
+      The cache check runs first: it is a filesystem probe rather than a
+      subprocess, and it short-circuits the common case.
+
+    .OUTPUTS
+      Hashtable { Available = [bool]; Inconclusive = [bool]; Reason = [string] }
+
+      Inconclusive means "could not determine" (no dotnet on PATH, or the call
+      failed). Callers must NOT block on that — a hook that trips over its own
+      tooling should not hold up work.
+
+    .NOTES
+      SECURITY: the ABP feed URL embeds the API key, so this function never
+      returns or logs the output of `dotnet nuget list source` — only whether a
+      nuget.abp.io source exists, never which one.
+    #>
+    param()
+
+    # 1. Local NuGet cache. Honors NUGET_PACKAGES (the real dotnet override) so
+    #    this is testable without touching the developer's actual cache.
+    $cacheRoot = $env:NUGET_PACKAGES
+    if ([string]::IsNullOrWhiteSpace($cacheRoot)) {
+        $profileDir = if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $env:USERPROFILE } else { $env:HOME }
+        if (-not [string]::IsNullOrWhiteSpace($profileDir)) {
+            $cacheRoot = Join-Path $profileDir '.nuget/packages'
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($cacheRoot)) {
+        foreach ($pkg in @('volo.abp.identity.pro.domain', 'volo.abp.identity.pro.application')) {
+            if (Test-Path -LiteralPath (Join-Path $cacheRoot $pkg)) {
+                return @{ Available = $true; Inconclusive = $false; Reason = 'pro-packages-in-cache' }
+            }
+        }
+    }
+
+    # 2. Registered NuGet sources.
+    try {
+        $raw = & dotnet nuget list source 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Available = $false; Inconclusive = $true; Reason = 'dotnet-nuget-list-source-failed' }
+        }
+        # Match on host only — never surface the URL itself (it carries the key).
+        if (($raw -join "`n") -match 'nuget\.abp\.io') {
+            return @{ Available = $true; Inconclusive = $false; Reason = 'abp-source-registered' }
+        }
+        return @{ Available = $false; Inconclusive = $false; Reason = 'no-abp-source-and-empty-cache' }
+    } catch {
+        # CommandNotFoundException when dotnet is not on PATH, among others.
+        return @{ Available = $false; Inconclusive = $true; Reason = 'dotnet-unavailable' }
     }
 }
 
@@ -229,7 +301,52 @@ function Invoke-AbpLicenseCheck {
             -Messages $messages
     }
 
-    # 6. All checks passed.
+    # 6. ABP Commercial NuGet-feed reachability (KBT-B480 / KBT-SR585).
+    #    Placed after the licence + token checks because those are cheaper, and
+    #    because a stale token should still be reported as stale-token rather
+    #    than being masked by a feed problem.
+    $feed = Test-AbpNuGetFeedAvailable
+    if ($feed.Inconclusive) {
+        # Could not determine != broken. Never block on our own tooling.
+        $messages.Add("ABP NuGet-feed could not be verified ($($feed.Reason)) — not blocking.")
+    }
+    elseif (-not $feed.Available) {
+        $messages.Add('No ABP Commercial NuGet source is configured and the ABP Pro packages are not in the local NuGet cache — dotnet restore will fail with NU1101.')
+
+        # ABP_API_KEY carries the feed key (Toolkit KBT-CMND014). Single-quoted on
+        # purpose: the instruction must show the variable, never its value.
+        $abpApiKey = $env:ABP_API_KEY
+        if ([string]::IsNullOrWhiteSpace($abpApiKey)) {
+            try {
+                $abpApiKey = [Environment]::GetEnvironmentVariable('ABP_API_KEY', 'User')
+                if ([string]::IsNullOrWhiteSpace($abpApiKey)) {
+                    $abpApiKey = [Environment]::GetEnvironmentVariable('ABP_API_KEY', 'Machine')
+                }
+            } catch {
+                # Non-Windows: User/Machine scopes are unavailable — treat as unset.
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($abpApiKey)) {
+            $messages.Add('ABP_API_KEY is also not set on Process, User, or Machine scope — obtain it first (see Toolkit KBT-CMND014); without it the feed URL cannot be constructed.')
+        } else {
+            $messages.Add('Fix: dotnet nuget add source "https://nuget.abp.io/$env:ABP_API_KEY/v3/index.json" --name "ABP Commercial"')
+        }
+
+        return New-AbpResult `
+            -Ok $false `
+            -Action 'missing-nuget-feed' `
+            -ApplicationSlug $ApplicationSlug `
+            -TagsCsv $TagsCsv `
+            -TokenAgeDays $ageDays `
+            -ThresholdDays $MaxAgeDays `
+            -Messages $messages
+    }
+    else {
+        $messages.Add("ABP Commercial NuGet-feed available ($($feed.Reason)).")
+    }
+
+    # 7. All checks passed.
     $messages.Add("ABP license pre-flight OK — token is $ageDays days old (threshold $MaxAgeDays).")
     return New-AbpResult `
         -Action 'ok' `
