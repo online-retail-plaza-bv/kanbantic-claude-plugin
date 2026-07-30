@@ -54,7 +54,18 @@ De getrapte teststrategie is verdeeld over de twee skills die samen een Feature/
 
 ## Step 0: Ensure Repository Access
 
-Before starting, verify you have local access to the workspace's code repository:
+**0a. Register the agent session (KBT-F614)** — this skill doesn't otherwise call
+`register_agent_session` itself (a session usually already exists from the proxy's
+silent auto-register at startup, or from `kanbantic-issue-execute` in the same
+continuous run), so call it explicitly here to get the identity in-context for 0b.
+Safe to call even when a session already exists — idempotent, refreshes rather than
+duplicates:
+```
+MCP: mcp__kanbantic__register_agent_session(workspaceId, host: <hostname>, cwd: <current working directory>)
+```
+Capture, when present, `claudeAgentName`/`claudeAgentEmail`. Older backends omit these two fields; that's expected, not an error.
+
+**0b. Verify local access to the workspace's code repository:**
 
 1. Run `git remote -v` to check if you're in a git repository
 2. If already in the correct repository, skip to Step 1
@@ -81,9 +92,19 @@ Before starting, verify you have local access to the workspace's code repository
    cd <repo>
    git config credential.helper "$HELPER"          # persist (remote URL stays clean — no token)
    git config kanbantic.repositoryId "<repositoryId>"
-   git config user.name "<gitAuthorName>"
-   git config user.email "<gitAuthorEmail>"
    ```
+   Then set the git commit identity — resolve in this order, most specific wins (KBT-F614):
+   1. `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` env vars, if already set on this workstation — **do nothing**, git honors these over `git config` automatically. Skip the two lines below entirely.
+   2. Otherwise, if 0a returned `claudeAgentName`/`claudeAgentEmail`, use those:
+      ```bash
+      git config user.name "<claudeAgentName>"
+      git config user.email "<claudeAgentEmail>"
+      ```
+   3. Otherwise, fall back to the repository's own identity from `get_repository`:
+      ```bash
+      git config user.name "<gitAuthorName>"
+      git config user.email "<gitAuthorEmail>"
+      ```
    (PowerShell: identical `git config` keys; only shell quoting differs.)
 4. Ensure you're on the branch being reviewed (`git checkout <feature-branch>`)
 

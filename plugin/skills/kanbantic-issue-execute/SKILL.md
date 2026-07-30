@@ -45,7 +45,7 @@ A status change is **work, not a by-product**. Emit these calls as you go — a 
 run or a finished task that isn't recorded makes the board lie:
 
 ```
-claim_issue ─▶ register_agent_session ─▶ set_current_issue
+register_agent_session (Step 0a) ─▶ claim_issue ─▶ set_current_issue
       │
       ├─ per task:  update_task_status(InProgress) ─▶ [build + verify] ─▶ update_task_status(Done)
       │                    └─ periodically: heartbeat
@@ -53,6 +53,8 @@ claim_issue ─▶ register_agent_session ─▶ set_current_issue
       ├─ milestone / blocker:  report_status + add_discussion_entry
       └─ end:  end_agent_session
 ```
+
+`register_agent_session` now runs in Step 0a — earlier than `claim_issue` — so its `claudeAgentName`/`claudeAgentEmail` (KBT-F614) are available for the git-identity setup in Step 0b, before any status-mutating call happens. `set_current_issue` reuses that same `sessionId`.
 
 The Phase/Golf calls (`mark_phase_for_review` → `approve_phase` → `unlock_phase`)
 apply to Epic-walks; their ownership (orchestrator vs. executing agent) is tracked
@@ -92,7 +94,15 @@ Parallelliseer op **twee niveaus tegelijk**; kies altijd het goedkoopste niveau 
 
 ## Step 0: Ensure Repository Access
 
-Before starting, verify you have local access to the workspace's code repository:
+**0a. Register the agent session (KBT-F614)** — moved here (earlier than the
+`claim_issue ─▶ register_agent_session` position in the mandatory-calls table
+below) because the git identity in 0b needs it:
+```
+MCP: mcp__kanbantic__register_agent_session(workspaceId, host: <hostname>, cwd: <current working directory>)
+```
+Capture `sessionId` — reused by `set_current_issue` later, no second `register_agent_session` call needed — and, when present, `claudeAgentName`/`claudeAgentEmail`. Older backends omit these two fields; that's expected, not an error.
+
+**0b. Verify local access to the workspace's code repository:**
 
 1. Run `git remote -v` to check if you're in a git repository
 2. If already in the correct repository, skip to Step 1
@@ -119,13 +129,23 @@ Before starting, verify you have local access to the workspace's code repository
    cd <repo>
    git config credential.helper "$HELPER"          # persist (remote URL stays clean — no token)
    git config kanbantic.repositoryId "<repositoryId>"
-   git config user.name "<gitAuthorName>"
-   git config user.email "<gitAuthorEmail>"
    ```
+   Then set the git commit identity — resolve in this order, most specific wins (KBT-F614):
+   1. `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` env vars, if already set on this workstation — **do nothing**, git honors these over `git config` automatically. Skip the two lines below entirely.
+   2. Otherwise, if 0a returned `claudeAgentName`/`claudeAgentEmail`, use those:
+      ```bash
+      git config user.name "<claudeAgentName>"
+      git config user.email "<claudeAgentEmail>"
+      ```
+   3. Otherwise, fall back to the repository's own identity from `get_repository`:
+      ```bash
+      git config user.name "<gitAuthorName>"
+      git config user.email "<gitAuthorEmail>"
+      ```
    (PowerShell: identical `git config` keys; only shell quoting differs.)
 
 <IMPORTANT>
-- If no repository is configured in the workspace, skip this step and proceed — not all work requires code access.
+- If no repository is configured in the workspace, skip 0b and proceed — not all work requires code access.
 - If no credential is configured, tell the user: "No repository credential found. Configure a PAT token via Workspace → Repositories → Credentials in the Kanbantic UI."
 - If the repo is already cloned, run `git pull` to get the latest code. Branch creation happens in Step 2.
 </IMPORTANT>
