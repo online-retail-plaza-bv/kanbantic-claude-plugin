@@ -96,11 +96,12 @@ Parallelliseer op **twee niveaus tegelijk**; kies altijd het goedkoopste niveau 
 
 **0a. Register the agent session (KBT-F614)** — moved here (earlier than the
 `claim_issue ─▶ register_agent_session` position in the mandatory-calls table
-below) because the git identity in 0b needs it:
+below) so board presence is visible from the very start of the run, not only
+once an issue is claimed:
 ```
 MCP: mcp__kanbantic__register_agent_session(workspaceId, host: <hostname>, cwd: <current working directory>)
 ```
-Capture `sessionId` — reused by `set_current_issue` later, no second `register_agent_session` call needed — and, when present, `claudeAgentName`/`claudeAgentEmail`. Older backends omit these two fields; that's expected, not an error.
+Capture `sessionId` — reused by `set_current_issue` later, no second `register_agent_session` call needed.
 
 **0b. Verify local access to the workspace's code repository:**
 
@@ -130,19 +131,19 @@ Capture `sessionId` — reused by `set_current_issue` later, no second `register
    git config credential.helper "$HELPER"          # persist (remote URL stays clean — no token)
    git config kanbantic.repositoryId "<repositoryId>"
    ```
-   Then set the git commit identity — resolve in this order, most specific wins (KBT-F614):
-   1. `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` env vars, if already set on this workstation — **do nothing**, git honors these over `git config` automatically. Skip the two lines below entirely.
-   2. Otherwise, if 0a returned `claudeAgentName`/`claudeAgentEmail`, use those:
-      ```bash
-      git config user.name "<claudeAgentName>"
-      git config user.email "<claudeAgentEmail>"
-      ```
-   3. Otherwise, fall back to the repository's own identity from `get_repository`:
-      ```bash
-      git config user.name "<gitAuthorName>"
-      git config user.email "<gitAuthorEmail>"
-      ```
-   (PowerShell: identical `git config` keys; only shell quoting differs.)
+   Then set the git commit identity by running the resolver script (KBT-F616) —
+   it applies the full precedence deterministically (env var override →
+   per-agent identity via the read-only `get_current_agent_identity` tool,
+   KBT-F615 → the repository's `gitAuthorName`/`gitAuthorEmail`) and calls
+   `git config` itself:
+   ```bash
+   node "$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-git-identity.js"
+   ```
+   A `pre-tool-use-git-identity-gate.js` PreToolUse hook also self-heals this
+   before every `git commit` if it's somehow still unset when you get there —
+   this explicit call is not the only thing standing between you and a
+   correctly-attributed commit, but running it here means the identity is
+   already right from the first commit on, not just from the second.
 
 <IMPORTANT>
 - If no repository is configured in the workspace, skip 0b and proceed — not all work requires code access.
