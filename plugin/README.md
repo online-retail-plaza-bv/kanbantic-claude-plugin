@@ -215,6 +215,21 @@ echo $env:KANBANTIC_API_KEY
 # should print your key
 ```
 
+## Setup — optional: git commit identity override (KBT-F614)
+
+By default, the lane-skills (`kanbantic-issue-execute` / `kanbantic-issue-review`) set the local git commit identity per-repository, from the repository's configured `gitAuthorName`/`gitAuthorEmail` (Workspace → Repositories in the Kanbantic UI) — or, when the workspace's API key belongs to a named agent, from that agent's own display name (`claudeAgentName`/`claudeAgentEmail`, KBT-F613).
+
+To force a **fixed** committer identity for every repository on a given workstation — regardless of per-repository or per-agent config — set the standard git environment variables once as persistent User Environment Variables (same steps as `KANBANTIC_API_KEY` above):
+
+```
+GIT_AUTHOR_NAME=Kanbantic Agent
+GIT_AUTHOR_EMAIL=agent@example.com
+GIT_COMMITTER_NAME=Kanbantic Agent
+GIT_COMMITTER_EMAIL=agent@example.com
+```
+
+Git honors these over `git config user.name`/`user.email` automatically — no plugin-specific env var, no code change, and the lane-skills' git-identity setup step becomes a no-op when they're set. This is a workstation-wide override: every git commit on that machine uses this identity, including outside the plugin. If you instead want each concurrent agent on a shared workstation to commit under its own name, leave these unset and rely on the per-agent `claudeAgentName`/`claudeAgentEmail` resolution instead (requires each agent to authenticate with its own Kanbantic API key / `ClaudeAgent` record).
+
 ## Setup — Claude Code
 
 Claude Code is supported out of the box. The bundled `plugin/.mcp.json` registers the stdio proxy automatically when the plugin is enabled:
