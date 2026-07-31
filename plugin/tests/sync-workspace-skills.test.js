@@ -659,3 +659,214 @@ test('KBT-TC1969 (CLI): mixed Skill+Command+Subagent input materializes only Ski
     cleanup(root);
   }
 });
+
+// ---------------------------------------------------------------------------
+// KBT-B495 — `name:` frontmatter for Subagent mirrors
+//
+//   KBT-TC3320 (Unit)        — renderFile emits `name:` for Subagent, not for Skill;
+//                              deriveDescription ignores a leading `name:` line.
+//   KBT-TC3321 (Integration) — runSync writes name == basename, and a pre-fix
+//                              mirror re-syncs as `update` (no --force needed).
+//   KBT-TC3322 (E2E)         — CLI run over a realistic multi-subagent fixture
+//                              yields files whose frontmatter name == basename.
+//
+// Why this matters: Claude Code registers a subagent under the frontmatter
+// `name:` value and does NOT fall back to the filename. Without that line the
+// mirror is written correctly and loads as nothing — `Agent type '<slug>' not
+// found.` Commands are unaffected (their name IS the filename).
+// ---------------------------------------------------------------------------
+
+/** Parse the leading `---` frontmatter block into a flat key-value map. */
+function parseFrontmatter(text) {
+  const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  if (!m) return null;
+  const out = {};
+  for (const line of m[1].split('\n')) {
+    const kv = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line);
+    if (!kv) continue;
+    let v = kv[2].trim();
+    if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+    out[kv[1]] = v;
+  }
+  return out;
+}
+
+test('KBT-TC3320: renderFile emits `name: <slug>` for a Subagent item', () => {
+  const body = sync.renderFile(item({
+    category: 'Subagent', title: 'Bar Specialist', content: 'Bar body.\n', code: 'KBT-SAGN201',
+  }));
+  // `name` must be the FIRST frontmatter line so it reads as the identity.
+  assert.match(body, /^---\nname: bar-specialist\n/);
+  const fm = parseFrontmatter(body);
+  assert.equal(fm.name, sync.slugify('Bar Specialist'),
+    'the emitted name must equal the slug that determines the file path');
+  assert.ok(fm.description, 'description must survive alongside name');
+  assert.equal(fm.source, 'KBT-SAGN201');
+});
+
+test('KBT-TC3320: renderFile emits NO `name:` line for a Skill item', () => {
+  const body = sync.renderFile(item({
+    category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101',
+  }));
+  assert.doesNotMatch(body, /\nname:/);
+  const fm = parseFrontmatter(body);
+  assert.equal(fm.name, undefined);
+  assert.equal(fm.description, 'Foo body.');
+});
+
+test('KBT-TC3320: renderFile prefers an explicit slug over re-slugifying the title', () => {
+  // buildPlan hands renderFile an entry that already carries `slug`; the two
+  // paths must agree so name and filename can never diverge.
+  const body = sync.renderFile(item({
+    category: 'Subagent', title: 'Bar Specialist', slug: 'bar-specialist',
+    content: 'Bar body.\n', code: 'KBT-SAGN201',
+  }));
+  assert.match(body, /^---\nname: bar-specialist\n/);
+});
+
+test('KBT-TC3320: deriveDescription skips a leading `name:` line in the content', () => {
+  // Real case: ADM-SKIL003 starts with `name: adminhub-ui-ux`, which used to
+  // render as description: "name: adminhub-ui-ux".
+  const it = item({ content: 'name: adminhub-ui-ux\n\nReviews UI changes against the design system.\n' });
+  assert.equal(sync.deriveDescription(it), 'Reviews UI changes against the design system.');
+
+  // A line that merely *contains* "name:" is untouched.
+  const it2 = item({ content: 'The name: field is documented below.\n' });
+  assert.equal(sync.deriveDescription(it2), 'The name: field is documented below.');
+
+  // ...and so is a real sentence that happens to start with "Name:" — only a
+  // bare slug value is treated as a stray frontmatter attempt.
+  const it3 = item({ content: 'Name: John Doe, the owner of this workflow.\n' });
+  assert.equal(sync.deriveDescription(it3), 'Name: John Doe, the owner of this workflow.');
+});
+
+test('KBT-TC3321: runSync writes an agent mirror whose `name` equals its filename', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Subagent', title: 'Wireframe Agent', content: 'Body.\n', code: 'KBT-SAGN009' }),
+      item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101' }),
+    ];
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    const agentPath = path.join(root, '.claude/agents/wireframe-agent.md');
+    const fm = parseFrontmatter(fs.readFileSync(agentPath, 'utf8'));
+    assert.ok(fm, 'agent frontmatter must parse');
+    assert.equal(fm.name, path.basename(agentPath, '.md'));
+
+    // Commands keep their filename-derived identity — no name line.
+    const cmd = parseFrontmatter(fs.readFileSync(path.join(root, '.claude/commands/foo.md'), 'utf8'));
+    assert.equal(cmd.name, undefined);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3321: a pre-fix mirror re-syncs as `update` — no local-edit warning, no --force', () => {
+  const root = mkTmpRoot();
+  try {
+    const it = item({ category: 'Subagent', title: 'Bar Specialist', content: 'Bar body.\n', code: 'KBT-SAGN201' });
+    const targetPath = '.claude/agents/bar-specialist.md';
+
+    // Reconstruct the exact pre-KBT-B495 render (frontmatter without `name:`)
+    // plus a manifest whose targetHash matches it — i.e. a mirror that was last
+    // synced by an older plugin version and never touched since.
+    const legacyBody = '---\ndescription: "Bar body."\nsource: "KBT-SAGN201"\n---\n\nBar body.\n';
+    const legacyPath = path.join(root, targetPath);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, legacyBody, 'utf8');
+    fs.writeFileSync(path.join(root, '.kanbantic-sync.json'), JSON.stringify({
+      version: 1, workspace: 'kanbantic', lastSyncedAt: FIXED_NOW,
+      items: [{
+        slug: 'bar-specialist', category: 'Subagent',
+        sourceId: it.id, sourceCode: it.code,
+        sourceHash: sha256(it.content + ' '),
+        targetPath, targetHash: sha256(legacyBody), syncedAt: FIXED_NOW,
+      }],
+    }, null, 2) + '\n', 'utf8');
+
+    const summary = sync.runSync({ rootDir: root, items: [it], workspace: 'kanbantic', now: FIXED_NOW });
+
+    // The whole point: a clean upgrade, not a wall of warnings.
+    assert.equal(summary.warnings, 0, 'an untouched legacy mirror must not be reported as a local edit');
+    assert.equal(summary.updated, 1);
+    assert.equal(summary.unchanged, 0);
+    assert.equal(summary.forced, 0);
+    assert.deepEqual(summary.localEdits, []);
+
+    const fm = parseFrontmatter(fs.readFileSync(legacyPath, 'utf8'));
+    assert.equal(fm.name, 'bar-specialist');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3321: a genuinely hand-edited agent mirror still warns instead of being overwritten', () => {
+  const root = mkTmpRoot();
+  try {
+    const it = item({ category: 'Subagent', title: 'Bar Specialist', content: 'Bar body.\n', code: 'KBT-SAGN201' });
+    sync.runSync({ rootDir: root, items: [it], workspace: 'kanbantic', now: FIXED_NOW });
+
+    const filePath = path.join(root, '.claude/agents/bar-specialist.md');
+    fs.appendFileSync(filePath, '\nUSER LOCAL EDIT.\n', 'utf8');
+    const edited = fs.readFileSync(filePath, 'utf8');
+
+    const summary = sync.runSync({
+      rootDir: root, items: [Object.assign({}, it, { content: 'New body.\n' })],
+      workspace: 'kanbantic', now: FIXED_NOW,
+    });
+    assert.equal(summary.warnings, 1);
+    assert.equal(fs.readFileSync(filePath, 'utf8'), edited);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3322 (CLI E2E): every generated agent file is loadable — name == basename', () => {
+  const root = mkTmpRoot();
+  try {
+    // Fixture mirroring the real Kanbantic + admin-hub Toolkit Subagent titles:
+    // em-dashes, parenthesised codes, and a Dutch title — the shapes that
+    // actually pass through slugify() in production.
+    const items = [
+      item({ category: 'Subagent', title: 'Documentation Specialist', code: 'KBT-SAGN003', content: 'Audits documentation coverage.\n' }),
+      item({ category: 'Subagent', title: 'Test Coverage Specialist', code: 'KBT-SAGN006', content: 'Audits test coverage.\n' }),
+      item({ category: 'Subagent', title: 'Wireframe Agent', code: 'KBT-SAGN009', content: 'Handles wireframe filesets.\n', model: 'Sonnet' }),
+      item({ category: 'Subagent', title: 'Frontend Ontwikkelingsagent — Angular/LeptonX (KBT-SAGN001)', code: 'KBT-SAGN001', content: 'Bouwt Angular-componenten.\n' }),
+      item({ category: 'Subagent', title: 'UI-UX Specialist', code: 'ADM-SAGN001', content: 'name: adminhub-ui-ux\n\nReviews UI changes against the design system.\n' }),
+      item({ category: 'Skill', title: '/local-dev-sandbox — Lokale Dev/Debug Sandbox (KBT-F233)', code: 'KBT-SKIL003', content: 'Boots the local sandbox.\n' }),
+    ];
+    const inputPath = path.join(root, 'items.json');
+    fs.writeFileSync(inputPath, JSON.stringify(items), 'utf8');
+
+    const r = spawnSync(process.execPath, [SCRIPT, '--input', inputPath, '--root', root, '--workspace', 'kanbantic'], {
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, 'expected exit 0, got ' + r.status + '. stderr: ' + r.stderr);
+
+    const agentsDir = path.join(root, '.claude/agents');
+    const files = fs.readdirSync(agentsDir).filter(f => f.endsWith('.md'));
+    assert.equal(files.length, 5, 'all five Subagent items must materialize');
+
+    for (const file of files) {
+      const fm = parseFrontmatter(fs.readFileSync(path.join(agentsDir, file), 'utf8'));
+      assert.ok(fm, file + ': frontmatter must parse');
+      assert.equal(fm.name, path.basename(file, '.md'), file + ': name must equal the basename');
+      assert.match(fm.name, /^[a-z0-9]+(-[a-z0-9]+)*$/, file + ': name must be a clean slug');
+      assert.ok(fm.description && fm.description.length > 0, file + ': description must not be empty');
+      assert.doesNotMatch(fm.description, /^name:/, file + ': description must not be the name line');
+    }
+
+    // The UI-UX case from the bug report: name from the slug, description from
+    // the real first body line — not `name: adminhub-ui-ux`.
+    const uiux = parseFrontmatter(fs.readFileSync(path.join(agentsDir, 'ui-ux-specialist.md'), 'utf8'));
+    assert.equal(uiux.name, 'ui-ux-specialist');
+    assert.equal(uiux.description, 'Reviews UI changes against the design system.');
+
+    // Skill mirrors are unchanged by this fix.
+    const skill = parseFrontmatter(fs.readFileSync(path.join(root, '.claude/commands/local-dev-sandbox.md'), 'utf8'));
+    assert.equal(skill.name, undefined);
+  } finally {
+    cleanup(root);
+  }
+});

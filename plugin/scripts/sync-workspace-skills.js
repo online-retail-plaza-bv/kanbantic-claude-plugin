@@ -115,6 +115,14 @@ function deriveDescription(item) {
     if (!line) continue;
     if (line.startsWith('#')) continue;        // heading
     if (line.startsWith('---')) continue;      // existing frontmatter delimiter
+    // KBT-B495: a `name: <slug>` line at the top of the content is an author
+    // trying to declare the subagent's name in the body (the frontmatter is
+    // generated around it, so it never worked). Skipping it keeps that attempt
+    // out of the description — before this, the very first line of ADM-SKIL003
+    // rendered as `description: "name: adminhub-ui-ux"`. Deliberately narrow:
+    // the key `name:` followed by a bare slug and nothing else, so a real
+    // sentence ("Name: John Doe, the owner") is still a valid description.
+    if (/^name:\s*[a-z0-9][a-z0-9-]*$/i.test(line)) continue;
     return truncate(line, 250);
   }
   // Fallback: title minus em-dash prefix or whole title.
@@ -145,6 +153,7 @@ function sha256(s) {
  * Adds a YAML frontmatter block:
  *
  *   ---
+ *   name: <slug>              (Subagent items only — KBT-B495)
  *   description: "<one line>"
  *   source: "<KBT-XXXNNN>"
  *   ---
@@ -153,6 +162,20 @@ function sha256(s) {
  * informational (lets a human see which toolkit item produced this file)
  * but is NOT used by Claude Code's loader.
  *
+ * KBT-B495: `name` is what Claude Code's loader uses to register a SUBAGENT —
+ * it does NOT derive a subagent's name from the filename. Without this line the
+ * mirror under .claude/agents/ is written correctly but loads as nothing, and
+ * calling it fails with `Agent type '<slug>' not found.`. Skills/commands DO
+ * take their name from the filename, which is why the .claude/commands/ mirror
+ * always worked and only the agents mirror was silently dead. Commands get no
+ * `name:` line — it is unused there and only pollutes the frontmatter.
+ *
+ * The value is the same slug that determines the file path, so name and
+ * filename agree by construction and the existing slug-collision check in
+ * buildPlan doubles as an agent-name uniqueness check. `item.slug` is set by
+ * buildPlan; the slugify() fallback keeps direct renderFile() calls (unit
+ * tests, future callers) on the same value.
+ *
  * Note: description is double-quoted; any `"` or `\` inside is escaped.
  */
 function renderFile(item) {
@@ -160,6 +183,9 @@ function renderFile(item) {
   const escDesc = description.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const source = item.code || item.sourceCode || '';
   const sourceLine = source ? `source: "${source}"\n` : '';
+  // KBT-B495: subagent identity — see the block comment above.
+  const slug = item.slug || slugify(item.title || '');
+  const nameLine = item.category === 'Subagent' && slug ? `name: ${slug}\n` : '';
   // KBT-F437: emit a `model:` frontmatter line when the toolkit item carries a
   // model preference. Alias = lowercase of the enum name (Opus→opus, etc.).
   // MCP `ListToolkitItems` may surface the field as either `model` or `Model`.
@@ -168,7 +194,7 @@ function renderFile(item) {
   const body = (item.content || '').replace(/\r\n/g, '\n');
   // Ensure exactly one trailing newline.
   const trimmed = body.endsWith('\n') ? body : body + '\n';
-  return `---\ndescription: "${escDesc}"\n${sourceLine}${modelLine}---\n\n${trimmed}`;
+  return `---\n${nameLine}description: "${escDesc}"\n${sourceLine}${modelLine}---\n\n${trimmed}`;
 }
 
 /**

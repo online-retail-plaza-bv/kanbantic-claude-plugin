@@ -58,6 +58,23 @@ Examples:
 
 If two active items resolve to the same slug, the skill aborts BEFORE any write with a structured error listing both offending source codes.
 
+## Generated frontmatter (per KBT-B495)
+
+Every mirror file gets a YAML frontmatter block, then the toolkit item's content verbatim:
+
+| Field | Written for | Value |
+|---|---|---|
+| `name` | **`Subagent` only** | The slug — identical to the filename without `.md`. |
+| `description` | both | First usable line of the item's content (headings, fenced code and a leading `name:` line are skipped), else the title after the em-dash. Truncated at ~250 chars. |
+| `source` | both | The toolkit item code (e.g. `KBT-SAGN009`). Informational only. |
+| `model` | items carrying a Model | Lowercased alias (`opus` / `sonnet` / `haiku`), per KBT-F437. |
+
+**Why `name` is mandatory for subagents.** Claude Code registers a subagent under its frontmatter `name:` value and does **not** fall back to the filename. A `.claude/agents/*.md` file without that field is written correctly and loads as nothing — calling it fails with `Agent type '<slug>' not found.`. Skills/commands take their name from the filename, which is why the `.claude/commands/` mirror always worked while the agents mirror was silently dead until KBT-B495. Commands deliberately get **no** `name:` line.
+
+Because `name` is the same slug that determines the file path, the existing slug-collision check doubles as an agent-name uniqueness check: two subagents can never claim the same name.
+
+> **Upgrading from a plugin version before this fix.** No `--force` is needed. Drift detection compares the on-disk hash against the manifest's `targetHash`, not against a freshly rendered file — an untouched mirror still matches, so it is re-rendered as a normal **UPDATE**. Only mirrors you actually hand-edited keep warning, exactly as before. Note that the mirrors were unloadable, not wrong: after re-syncing, restart the Claude Code session so the loader picks the agents up.
+
 ## Checklist
 
 1. **Determine workspace** — call `mcp__kanbantic__get_context` to identify the active workspace (or accept an explicit `--workspace <slug>` from the user).
