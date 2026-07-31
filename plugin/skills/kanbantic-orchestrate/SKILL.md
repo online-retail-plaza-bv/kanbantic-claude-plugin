@@ -246,7 +246,7 @@ This skill is the orchestration layer **only**. The following are owned by the
 lane-skills and MUST NOT be duplicated, re-implemented, or pre-run here:
 
 - **Child Feature/Bug claim flow** (`claim_issue`, readiness gate, branch creation) → `kanbantic-issue-execute` Step 2.
-- **Worktree + sync + ABP pre-flight HARD-GATES** → `kanbantic-issue-execute` Steps 0.5–0.7.
+- **Worktree + sync + workspace pre-flight HARD-GATES** → `kanbantic-issue-execute` Steps 0.5–0.7.
 - **Per-phase / per-feature push and review gates** → `kanbantic-issue-execute` Step 4A.
 - **Local E2E test gate + Review pre-conditions** → `kanbantic-issue-execute` Steps 6–7.
 - **Code review, merge, branch cleanup, `Review → InDeployment`** → `kanbantic-issue-review`.
