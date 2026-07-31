@@ -452,7 +452,7 @@ git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionCont
 git push origin main
 ```
 
-**Where `main` is protected** (push-to-main blocked — e.g. the plugin repo, KBT-REPO002): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+**Where `main` is protected** (push-to-main blocked — check the repository's own branch-protection settings): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
 
 **Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
 

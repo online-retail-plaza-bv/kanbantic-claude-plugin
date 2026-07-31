@@ -221,36 +221,67 @@ Set `KANBANTIC_SKIP_GIT_SYNC=1` to skip the comparison entirely. Intended for CI
 
 `-DefaultAction Pull` is the default — when the local base is behind, the script rebases the feature-branch onto `origin/<default-branch>` automatically. Pass `Force` to log a Decision-entry and proceed without rebasing, or `Abort` to stop the skill. Interactive callers (a human running the skill from a terminal) should prompt the operator and pass the chosen action through.
 
-## Step 0.7: ABP license pre-flight — backend issues only (KBT-F263 / KBT-SR307 / KBT-RL066)
+## Step 0.7: Workspace pre-flight checks (KBT-B499)
 
-For issues that touch the Kanbantic API or MCP host (anything that runs `dotnet run` on `Kanbantic.HttpApi.Host` or `Kanbantic.Mcp`), verify the ABP Pro license-runtime is satisfied **before** `claim_issue`. A stale `abp` CLI auth-token causes backend-startup to fail mid-flight with `ABP-LIC-ERROR — License check failed`, leaving an orphan `InProgress` claim that has to be cleaned up manually (see KBT-GTCH013, KBT-CMND007).
+Some workspaces have environment preconditions that must hold **before** `claim_issue`: a licence runtime that has to be authenticated, a container daemon that has to be up, a VPN that has to be reachable. When such a precondition fails *after* the claim, the issue is left as an orphan `InProgress` claim that someone has to clean up by hand.
 
-```bash
-pwsh -NoProfile -File "$CLAUDE_PLUGIN_ROOT/hooks/abp-license-check.ps1" "<applicationSlug>" "<tagsCsv>" "$PWD"
+The plugin does **not** know what those preconditions are — they differ per workspace and per tech stack, and hard-coding one workspace's checks here is exactly the drift this step was rewritten to remove. Instead **each workspace declares its own checks** in its AI Toolkit, and this step runs them.
+
+### 1. Read the declaration
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId: "<slug>", category: "Custom", search: "pre-flight-checks")
 ```
 
-Pass the issue's `applicationSlug` (from `get_issue`) and a comma-separated string of its `tags`. The hook's scope-gate runs the actual checks only for `kanbantic-api` / `kanbantic-mcp` or for any tags containing `backend` / `live-stack` — frontend-only and plugin-only work skips the check transparently.
+Look for the item titled exactly **`pre-flight-checks`**. **No such item ⇒ this workspace declares no preconditions: skip this step silently and go to Step 1.** That is the normal case for most workspaces, and it is not a warning.
 
-The script emits a single-line JSON result. Possible `action` values:
+The item's body holds a markdown table:
 
-| `action` | Meaning | Skill behavior |
-|---|---|---|
-| `ok` | env-var set, token present and fresh | continue silently |
-| `out-of-scope` | issue's application / tags do not require the ABP Pro license-runtime | continue silently |
-| `skipped-env` | `KANBANTIC_SKIP_ABP_CHECK=1` set | log a `Comment` discussion-entry recording the opt-out; continue |
-| `missing-env-var` | `ABP_LICENSE_CODE` not set on Process / User / Machine scope | STOP — add a `Decision` entry with `[Environment]::SetEnvironmentVariable('ABP_LICENSE_CODE','<your-license>','User')` fix instruction; do not call `claim_issue` |
-| `missing-token` | `$USERPROFILE\.abp\cli\access-token.bin` missing | STOP — Decision entry: run `abp login <username>` in a non-agent shell (interactive credentials) and restart |
-| `stale-token` | token `LastWriteTime` exceeds threshold (default 7 days) | STOP — Decision entry: token is `tokenAgeDays` old (threshold `thresholdDays`), re-run `abp login <username>` to refresh |
+| Check | Scope | Command | On fail |
+|---|---|---|---|
+| Licence runtime authenticated | app:my-backend-api, app:my-worker | pwsh -NoProfile -File .claude/preflight/licence-check.ps1 | stop |
+| Docker daemon up | tag:live-stack | docker info | stop |
+| Build toolchain present | always | node .claude/preflight/toolchain.js | warn |
 
-After a FAIL (`missing-env-var` / `missing-token` / `stale-token`) the hook exits 1; the skill MUST stop here so the issue stays in `Ready` / `Triaged`. Add the `Decision` discussion-entry from the rule-table above, then exit cleanly. The operator fixes the auth-state manually and re-invokes the skill.
+- **Scope** — comma-separated `app:<slug>`, `tag:<tag>`, or `always`. `always` may not be combined with the others.
+- **On fail** — `stop` (block the claim) or `warn` (log and continue). An empty field defaults to `stop`, the safe side.
+- **Command** — run from the repo root of the worktree you are in.
+
+### 2. Parse it
+
+```bash
+node -e "const p=require('$CLAUDE_PLUGIN_ROOT/scripts/preflight-block.js');console.log(JSON.stringify(p.parsePreflightChecks(require('fs').readFileSync(process.argv[1],'utf8'))))" <path-to-item-body>
+```
+
+<HARD-GATE>
+**Fail-not-skip (KBT-RL191).** If `errors` is non-empty, STOP. Do not call `claim_issue`, and do not "just run the checks that did parse". A malformed declaration means the workspace intended a precondition that you cannot read — running past it is exactly the silent failure this mechanism exists to prevent. Add a `Decision` discussion-entry quoting each `{line, reason}` so the Toolkit item can be fixed, then exit cleanly.
+</HARD-GATE>
+
+### 3. Select what applies to this issue
+
+```js
+selectApplicableChecks(checks, { applicationSlugs: [...], tags: [...] })
+```
+
+Feed it the issue's application slug(s) and tags from `get_issue`. A check applies when its scope is `always`, or when one of its `app:` / `tag:` tokens matches. Nothing applicable ⇒ continue to Step 1.
+
+### 4. Run each applicable check and act on the outcome
+
+Run the `Command` from the repo root and read its **exit code**:
+
+| Outcome | Skill behavior |
+|---|---|
+| exit 0 | continue silently |
+| non-zero, `On fail = stop` | **STOP** — do not call `claim_issue`. Add a `Decision` discussion-entry with the check name, the command, and the command's own stdout/stderr verbatim: the check knows the fix instruction, you do not. The issue stays in `Ready` / `Triaged`; the operator fixes the environment and re-invokes the skill. |
+| non-zero, `On fail = warn` | log a `Comment` discussion-entry with the same detail and continue |
+
+Keep the check's own output intact in the entry. A workspace author who writes a good failure message — one that names the exact command the operator must run — has already solved the operator's problem; do not paraphrase it away.
 
 ### Opt-out
 
-Set `KANBANTIC_SKIP_ABP_CHECK=1` to skip the check entirely. Intended for CI / headless contexts where backend startup is mocked, or for explicit operator override during incident-recovery. The skip is logged as a `Comment` discussion-entry so the audit trail stays complete (mirrors KBT-F238's `KANBANTIC_SKIP_GIT_SYNC` pattern).
+Set `KANBANTIC_SKIP_PREFLIGHT=1` to skip this step entirely. Intended for CI / headless contexts where the environment is mocked, or an explicit operator override during incident recovery. Log the skip as a `Comment` discussion-entry so the audit trail stays complete (same pattern as `KANBANTIC_SKIP_GIT_SYNC`).
 
-### Token-age threshold
-
-Default is 7 days. Override per session via env-var `KANBANTIC_ABP_TOKEN_MAX_AGE_DAYS=<int>`. Empirically a 10-day-old token is already enough to fail `dotnet run` (KBT-F257 incident, 2026-05-12); 7d gives a safety margin without being aggressive.
+> **Migrating from the hard-coded licence check (plugin ≤ v2.32.2).** Until v2.33.0 this step was a licence-runtime check for two named backend applications of one specific workspace, shipped as a PowerShell hook inside the plugin. That was a single workspace's working practice living in a plugin every workspace installs (KBT-B499). The check has not been dropped — it moved to where it belongs: the script now lives in that workspace's own repository under `.claude/preflight/`, declared in its `pre-flight-checks` Toolkit item, where it can evolve without a plugin release. The old check-specific opt-out env-var is replaced by `KANBANTIC_SKIP_PREFLIGHT`. Every other workspace was never affected by the old check and is unaffected by its removal.
 
 ## Step 1: Gate-check — Ready (preferred) or Triaged (legacy) + Ready to Claim
 

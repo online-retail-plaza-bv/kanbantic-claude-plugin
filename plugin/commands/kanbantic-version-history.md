@@ -5,7 +5,7 @@ argument-hint: <application-slug>
 
 Show the chronological Version history for the Application **`$ARGUMENTS`**.
 
-Single positional argument: `$ARGUMENTS` is the **application-slug** (e.g. `kanbantic-api`). If it is empty, ask the user for it before continuing.
+Single positional argument: `$ARGUMENTS` is the **application-slug** (e.g. `my-backend-api`). If it is empty, ask the user for it before continuing.
 
 Steps:
 

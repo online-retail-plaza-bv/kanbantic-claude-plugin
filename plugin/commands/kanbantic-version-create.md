@@ -6,7 +6,7 @@ argument-hint: <application-slug> <version-name> [description]
 Create a new Version from **`$ARGUMENTS`**.
 
 Positional arguments: `$ARGUMENTS` is `<application-slug> <version-name> [description]`.
-- The **first** whitespace-separated token is the **application-slug** (e.g. `kanbantic-api`).
+- The **first** whitespace-separated token is the **application-slug** (e.g. `my-backend-api`).
 - The **next** token is the **version-name** (e.g. `v0.18.0` or `Q3 Hardening`). Quote it if it contains spaces.
 - Anything after that is an optional free-text **description**.
 

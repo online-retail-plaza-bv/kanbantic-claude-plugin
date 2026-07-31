@@ -25,7 +25,8 @@ Agent tool (general-purpose):
 
     [PASTE relevant Toolkit items (patterns, gotchas, rules) from Step 2b.
      Include items relevant to this task's domain (backend/frontend/MCP).
-     Example: ABP AppService pattern, Angular component pattern, EF migration gotchas.]
+     The workspace's own Toolkit defines what those are — service-layer patterns,
+     UI component conventions, database-migration gotchas, and so on.]
 
     ## Context
 
@@ -51,8 +52,8 @@ Agent tool (general-purpose):
 
     Before reporting, verify:
     - [ ] All specified changes implemented
-    - [ ] Build succeeds (`dotnet build` / `npm run build`)
-    - [ ] Tests pass (`dotnet test` / `npm test`)
+    - [ ] Build succeeds (the repo's own build command)
+    - [ ] Tests pass (the repo's own test command)
     - [ ] No unrelated changes included
     - [ ] Code follows existing codebase patterns
     - [ ] YAGNI — only what was requested
