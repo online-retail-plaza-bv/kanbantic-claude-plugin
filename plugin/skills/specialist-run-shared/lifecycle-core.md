@@ -16,7 +16,7 @@ Each wrapper provides four values before invoking this core:
 |---|---|---|
 | `SPECIALIST_CODE` | The global specialist definition code | `SPEC002` |
 | `SPECIALIST_NAME` | Human name (for messages) | `Documentation Specialist` |
-| `SUBAGENT` | The subagent that performs the analysis | `documentation-specialist` |
+| `SUBAGENT` | **Expected** name of the subagent that performs the analysis — a hint, not an assumption. The real name is resolved in Step 3a (KBT-B504). | `documentation-specialist` |
 | `DEFAULT_SCOPE` | Default run scope when the user gives none | `Workspace` |
 
 The wrapper also resolves the target `workspaceId` (slug or GUID) and an optional `scope` /
@@ -68,14 +68,46 @@ MCP: mcp__kanbantic__start_specialist_run(
 
 Capture the returned run `id` as `runId`. The run is now in status **Running**.
 
+## Step 3a: Resolve the subagent's actual name (KBT-B504)
+
+The plugin does **not** get to decide what a workspace calls its subagent. The on-disk agent name is
+the slug of its Toolkit item's title, produced by `/kanbantic-sync-workspace-skills`, and a workspace
+is free to title its items as it likes. `SUBAGENT` is therefore an expected name, not a given.
+
+```
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId: <workspaceId>, category: "Subagent")
+```
+
+Find the item for this specialist (match on `SPECIALIST_NAME`, else on the `SUBAGENT` hint). Derive
+its agent name with the same slug rule the sync script uses: take the part before the first em-dash,
+strip a leading `/`, lowercase, replace every run of non-`[a-z0-9]` with `-`, trim leading/trailing
+`-`. So *"Test Coverage Specialist"* → `test-coverage-specialist`.
+
+Use that resolved name as `subagent_type` in Step 3.
+
+| Situation | What it means | What to do |
+|---|---|---|
+| Item found, resolved name is an available agent type | normal | continue to Step 3 |
+| **No** Subagent item for this specialist in the Toolkit | the workspace never defined one — a legitimate gap | inline fallback (below), note it in the run summary |
+| Item **exists** but its resolved name is not an available agent type | **misconfiguration**, not a gap | STOP the delegation and report it (below) |
+
+<HARD-GATE>
+The third row is not a fallback case. The workspace defined a specialist and the run is about to
+ignore it — silently substituting your own inline analysis would report success while doing something
+other than what the workspace configured. Tell the user instead: name the item's code and title, the
+resolved name you looked for, and the fix — run `/kanbantic-sync-workspace-skills` (the mirror was
+never written), or restart the session (it was written after this session started, and the agent
+registry is only read at startup). Only continue inline if the user explicitly asks you to.
+</HARD-GATE>
+
 ## Step 3: Analyse — delegate to the specialist subagent
 
-Dispatch the matching subagent with the Agent tool, passing the scope context. The subagent owns the
+Dispatch the resolved subagent with the Agent tool, passing the scope context. The subagent owns the
 domain logic (what to inspect, which finding categories, severity criteria) — this core only wraps the
 lifecycle.
 
 ```
-Agent(subagent_type: SUBAGENT, prompt: <see below>)
+Agent(subagent_type: <name resolved in Step 3a>, prompt: <see below>)
 ```
 
 Prompt template:
@@ -87,10 +119,10 @@ Prompt template:
 > optionally `affectedEntityCode` + `affectedEntityType`. Return `[]` if nothing is wrong. Do NOT
 > create, complete, or review any specialist run — only return findings.
 
-If the workspace has no `SUBAGENT` available on disk (it has not been synced via
-`/kanbantic-sync-workspace-skills`), fall back to performing the analysis inline according to the
-specialist definition's responsibilities, producing the same finding shape. Note the fallback in the
-run summary.
+If Step 3a found **no Subagent item at all** for this specialist, fall back to performing the analysis
+inline according to the specialist definition's responsibilities, producing the same finding shape.
+Note the fallback in the run summary. This is the only case that falls back silently — an item that
+exists but cannot be dispatched is a misconfiguration and is reported per the HARD-GATE in Step 3a.
 
 ## Step 4: Persist each finding
 

@@ -1,6 +1,6 @@
 ---
 name: kanbantic-specialist-test-coverage
-description: "Run the Test Coverage Specialist (SPEC001) against a Kanbantic workspace, release, issue, or application. Opens a specialist run, delegates the analysis to the test-specialist subagent, records each finding, computes a deterministic health score, and completes the run at status New for human review. Does not auto-review or auto-convert findings."
+description: "Run the Test Coverage Specialist (SPEC001) against a Kanbantic workspace, release, issue, or application. Opens a specialist run, delegates the analysis to the test-coverage-specialist subagent, records each finding, computes a deterministic health score, and completes the run at status New for human review. Does not auto-review or auto-convert findings."
 user_invocable: true
 command: specialist-test-coverage
 ---
@@ -17,7 +17,7 @@ Thin wrapper around the shared specialist-run lifecycle. It runs the **Test Cove
 |---|---|
 | `SPECIALIST_CODE` | `SPEC001` |
 | `SPECIALIST_NAME` | `Test Coverage Specialist` |
-| `SUBAGENT` | `test-specialist` |
+| `SUBAGENT` | `test-coverage-specialist` |
 | `DEFAULT_SCOPE` | `Workspace` |
 
 ## What to do
