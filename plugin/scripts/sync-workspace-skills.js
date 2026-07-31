@@ -120,8 +120,9 @@ function deriveDescription(item) {
     // generated around it, so it never worked). Skipping it keeps that attempt
     // out of the description — before this, the very first line of ADM-SKIL003
     // rendered as `description: "name: adminhub-ui-ux"`. Deliberately narrow:
-    // only the `name:` key, so no existing description shifts.
-    if (/^name:\s*\S/i.test(line)) continue;
+    // the key `name:` followed by a bare slug and nothing else, so a real
+    // sentence ("Name: John Doe, the owner") is still a valid description.
+    if (/^name:\s*[a-z0-9][a-z0-9-]*$/i.test(line)) continue;
     return truncate(line, 250);
   }
   // Fallback: title minus em-dash prefix or whole title.

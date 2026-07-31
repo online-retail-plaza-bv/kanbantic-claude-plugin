@@ -733,6 +733,11 @@ test('KBT-TC3320: deriveDescription skips a leading `name:` line in the content'
   // A line that merely *contains* "name:" is untouched.
   const it2 = item({ content: 'The name: field is documented below.\n' });
   assert.equal(sync.deriveDescription(it2), 'The name: field is documented below.');
+
+  // ...and so is a real sentence that happens to start with "Name:" — only a
+  // bare slug value is treated as a stray frontmatter attempt.
+  const it3 = item({ content: 'Name: John Doe, the owner of this workflow.\n' });
+  assert.equal(sync.deriveDescription(it3), 'Name: John Doe, the owner of this workflow.');
 });
 
 test('KBT-TC3321: runSync writes an agent mirror whose `name` equals its filename', () => {
