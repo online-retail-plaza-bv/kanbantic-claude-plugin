@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-27",
+  "generatedAt": "2026-07-31",
   "source": "Curated subset of the live tools/list from https://kanbantic.com/mcp (regenerated via the check-bundle-tool-drift transport). Deliberately NOT a wholesale mirror: `curatedOut` lists the names that exist live but are intentionally excluded, so 'excluded on purpose' is machine-readable and distinguishable from 'forgotten' (KBT-B483). Carries the 4 issue<->wireframe link tools (KBT-B476), add_wireframe_version_files (KBT-F487), the KBT-E094 parent/child bundling tools, and the KBT-F472 closure-route + KBT-F442 test-policy tools that were previously missing.",
   "regenerationCommand": "Run `mcp__plugin_kanbantic-claude-plugin_kanbantic__get_mcp_tool_registry` (or copy the `mcp__plugin_kanbantic-claude-plugin_kanbantic__*` deferred-tool list and strip the prefix), THEN apply the curation step: every name in `curatedOut` must be removed from `tools` — they remain live but re-adding them breaks known-mcp-tools.test.js. Update `generatedAt` and `source`. Verify with `npm run check:drift -- --strict`, which now reports live tools absent from `tools` ∪ `curatedOut`.",
   "curatedOut": [
@@ -85,6 +85,7 @@
     "get_application_statistics",
     "get_channel_messages",
     "get_context",
+    "get_current_agent_identity",
     "get_deployment_gate_results",
     "get_document_version",
     "get_documentation_section",
