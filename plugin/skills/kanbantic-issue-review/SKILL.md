@@ -287,7 +287,7 @@ Per falende conditie neem dit ⚠️-blok op in de revieweroutput, met de concre
 
 ```
 ⚠️ WIREFRAME-GETROUWHEID NIET VERIFIEERBAAR — KBT-F627
-[issueCode]: <falende conditie 1/2/3>.
+[issueCode]: <falende conditie 1/2/3/4>.
 Actie vereist (herstel en re-run review):
   1) Relationele pin ontbreekt → link_wireframe_to_issue(wireframeId, issueId) (kanbantic-issue-prepare Step 5W)
   2) UI-contract ontbreekt → schrijf de Decision-entry per kanbantic-issue-prepare 5F.3b (lane-shared/ui-contract.md §1)
