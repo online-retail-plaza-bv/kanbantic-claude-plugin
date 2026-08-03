@@ -64,12 +64,12 @@ states en de waarheid leven in het wireframe (en het eindresultaat in de app), n
 - **Prepare — referentiecrops:** per gepinde pagina een Playwright-screenshot-crop van de
   wireframe-pagina op **1440px breedte**, benoemd:
   ```
-  wf-<versie>-<pagina>-<state>.png      (bv. wf-v27-artikelen-empty.png)
+  wf-<versie>-<pagina>-<state>.png      (bv. wf-v3-detail-empty.png)
   ```
 - **Execute — resultaat-screenshots (bij de handoff):** Playwright-screenshots van het
   eindresultaat op **dezelfde uitsneden en breedtes** (1440px, zelfde pagina's/states), benoemd:
   ```
-  result-<versie>-<pagina>-<state>.png  (bv. result-v27-artikelen-empty.png)
+  result-<versie>-<pagina>-<state>.png  (bv. result-v3-detail-empty.png)
   ```
 
 Zo kan de reviewer beide sets zij-aan-zij leggen (`list_issue_attachments` +

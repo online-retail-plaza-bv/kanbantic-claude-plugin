@@ -449,6 +449,45 @@ test('KBT-F627: reviewer-prompt carries UI-contract input, checkpoint 6, output 
   );
 });
 
+// ─── KBT-F627 review-fix (Important #2/#3): handoff-entry + marker are defined
+//     and produced by named steps ────────────────────────────────────────────────
+
+test('KBT-F627 fix: execute 6e defines the handoff-entry (add_discussion_entry with the deviation section)', () => {
+  const content = readSkill('kanbantic-issue-execute');
+  const sectionMatch = content.match(/### 6e:[\s\S]*?(?=## Step 7)/);
+  assert.ok(sectionMatch, '6e section not found in execute SKILL.md');
+  const section = sectionMatch[0];
+  assert.ok(
+    section.includes('add_discussion_entry'),
+    '6e must CREATE the handoff-entry via add_discussion_entry — not merely reference it'
+  );
+  assert.ok(
+    section.includes('Afgeweken van het wireframe'),
+    '6e handoff-entry template must contain the deviation section'
+  );
+});
+
+test('KBT-F627 fix: execute Step 7 condition 4c produces the "UI-UX review:" marker entry', () => {
+  const content = readSkill('kanbantic-issue-execute');
+  const gateMatch = content.match(/4\. \*\*Wireframe-conformiteit[\s\S]*?(?=<\/HARD-GATE>)/);
+  assert.ok(gateMatch, 'Step 7 condition 4 not found in execute SKILL.md');
+  const gate = gateMatch[0];
+  assert.ok(
+    gate.includes('UI-UX review:') && gate.includes('add_discussion_entry'),
+    'condition 4c must record the conformity confirmation as a discussion-entry starting with "UI-UX review:"'
+  );
+});
+
+test('KBT-F627 fix: review Step 2.5 names the marker-entry producer (execute 7-4c)', () => {
+  const content = readSkill('kanbantic-issue-review');
+  const sectionMatch = content.match(/## Step 2\.5:[\s\S]*?(?=## Step 3)/);
+  assert.ok(sectionMatch, 'Step 2.5 section not found in review SKILL.md');
+  assert.ok(
+    sectionMatch[0].includes('UI-UX review:'),
+    'Step 2.5 must check the "UI-UX review:"-entry and name who writes it'
+  );
+});
+
 // ─── Lint integration: real tree still passes all invariants ─────────────────
 
 test('Integration: lint-skills.js still passes after the KBT-F627 additions', () => {

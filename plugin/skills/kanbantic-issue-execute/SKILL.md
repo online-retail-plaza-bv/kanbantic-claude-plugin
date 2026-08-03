@@ -914,7 +914,19 @@ Voor **UI-issues** (geldig `## Wireframe`-blok, geen opt-out `n.v.t. (geen UI)`)
 MCP: mcp__kanbantic__add_issue_attachment(issueId, <result-<versie>-<pagina>-<state>.png>)
 ```
 
-Naamgeving en conventies conform `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` (§2). Neem daarnaast in de handoff-discussion-entry het kopje **`Afgeweken van het wireframe`** op met elke bewuste afwijking (of expliciet "geen") — een afwijking die daar niet gemeld is, is per de include fix-vereist. Niet-UI-issues: sla deze substap over.
+Naamgeving en conventies conform `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` (§2).
+
+**Schrijf daarna de handoff-entry** — dit is de entry waar Step 7-conditie 4a en de review (Step 1b) naar verwijzen; zonder deze entry bestaat het afwijkingskopje nergens:
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(
+  issueId,
+  content: "## Handoff — <ISSUE-CODE>\n\n### Afgeweken van het wireframe\n<per afwijking: element, wat er in plaats van kwam, waarom — of expliciet \"geen\">\n\n### Resultaat-screenshots\n<lijst van de result-*-attachments>",
+  entryType: "Comment"
+)
+```
+
+Niet-UI-issues: sla deze substap over.
 
 ## Step 7: Verify Review Pre-conditions + Transition
 
@@ -928,9 +940,17 @@ Review transition is allowed **only** when all of the following are true. If any
    c. No test case at any level may have status `Failed` or `Blocked`.
 3. Readiness checks on the issue still pass (`isReadyToClaim` was true at claim time; re-check in case specs/test cases were added mid-flight).
 4. **Wireframe-conformiteit (UI-issues — KBT-F627)** — alleen voor issues met een `## Wireframe`-blok zonder opt-out:
-   a. Het afwijkingskopje **`Afgeweken van het wireframe`** is aanwezig in de handoff-entry (met de lijst afwijkingen of expliciet "geen") — zie Step 6e.
+   a. Het afwijkingskopje **`Afgeweken van het wireframe`** is aanwezig in de 6e-handoff-entry (met de lijst afwijkingen of expliciet "geen") — zie Step 6e voor de entry-definitie.
    b. De resultaat-screenshots zijn geattacht — verifieer via `mcp__kanbantic__list_issue_attachments(issueId)` dat de `result-*`-set naast de prepare-referentiecrops staat.
-   c. De wireframe-conformiteit is bevestigd: element-voor-element tegen het UI-contract (Decision-entry `## UI-contract (bevroren bij claim_issue — KBT-F627)`), per de regels in `lane-shared/ui-contract.md` — nooit pixel-diff.
+   c. De wireframe-conformiteit is bevestigd: element-voor-element tegen het UI-contract (Decision-entry `## UI-contract (bevroren bij claim_issue — KBT-F627)`), per de regels in `lane-shared/ui-contract.md` — nooit pixel-diff. **Leg de bevestiging vast** als discussion-entry waarvan de content **begint met `UI-UX review:`** (per bevinding: pass / fix-vereist + concrete fix):
+      ```
+      MCP: mcp__kanbantic__add_discussion_entry(
+        issueId,
+        content: "UI-UX review: <pass per element-categorie, of fix-vereist + fix>",
+        entryType: "Comment"
+      )
+      ```
+      Dit is het entry dat de `pre-tool-use-ui-gate`-hook als positief bewijs herkent (prefix-match — een citaat van de marker elders telt niet).
    Niet voldaan → de issue blijft `InProgress`.
 </HARD-GATE>
 

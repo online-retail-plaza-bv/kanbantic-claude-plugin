@@ -178,3 +178,49 @@ test('extractArray: unwraps bare arrays and common envelope shapes', () => {
   assert.equal(extractArray(null, ['items']), null);
   assert.equal(extractArray('text', ['items']), null);
 });
+
+// ─── KBT-F627 review-fix (Critical #1 + Important #3): result-* filter and
+//     strict marker detection ──────────────────────────────────────────────────
+
+const { hasResultAttachment, isUiUxReviewEntry } = require(HOOK_PATH);
+
+test('hasResultAttachment: prepare wf-* reference crops alone do NOT satisfy the result signal', () => {
+  const wfOnly = [
+    { fileName: 'wf-v3-detail-empty.png' },
+    { fileName: 'wf-v3-detail-default.png' },
+  ];
+  assert.equal(hasResultAttachment(wfOnly), false);
+  // The composition that motivated the fix: linked wireframe + no review entry
+  // + only wf-* crops ⇒ the gate MUST block (this was inert before the fix).
+  assert.equal(
+    shouldBlock({
+      hasLinkedWireframe: true,
+      hasUiUxReviewEntry: false,
+      hasResultAttachments: hasResultAttachment(wfOnly),
+    }),
+    true
+  );
+});
+
+test('hasResultAttachment: a result-* attachment satisfies the signal (fileName or name)', () => {
+  assert.equal(hasResultAttachment([{ fileName: 'result-v3-detail-empty.png' }]), true);
+  assert.equal(hasResultAttachment([{ name: 'result-v3-detail-default.png' }]), true);
+  assert.equal(hasResultAttachment([{ fileName: 'wf-v3-x.png' }, { fileName: 'result-v3-x.png' }]), true);
+});
+
+test('hasResultAttachment: degenerate inputs are false (fail-safe toward evidence-missing)', () => {
+  assert.equal(hasResultAttachment([]), false);
+  assert.equal(hasResultAttachment(null), false);
+  assert.equal(hasResultAttachment([{}, { fileName: 42 }]), false);
+});
+
+test('isUiUxReviewEntry: prefix-match only — a citation of the marker does not satisfy the gate', () => {
+  assert.equal(isUiUxReviewEntry({ content: 'UI-UX review: pass op alle element-categorieën' }), true);
+  assert.equal(isUiUxReviewEntry({ content: '  \nUI-UX review: pass' }), true); // leading whitespace ok
+  assert.equal(
+    isUiUxReviewEntry({ content: 'De hook meldde: leg vast als entry die begint met "UI-UX review:" — nog doen' }),
+    false
+  );
+  assert.equal(isUiUxReviewEntry({ content: '' }), false);
+  assert.equal(isUiUxReviewEntry(null), false);
+});

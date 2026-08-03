@@ -281,6 +281,7 @@ Flag **automatisch Critical** in de revieweroutput wanneer één of meer van dez
 1. **Geen relationele pin** — `list_issue_wireframes` is leeg (prepare Step 5W heeft `link_wireframe_to_issue` niet uitgevoerd);
 2. **Geen UI-contract-entry** — geen Decision-entry met prefix `## UI-contract` gevonden (Step 1b);
 3. **Geen resultaat-attachments** — `list_issue_attachments` bevat geen `result-*`-set (execute Step 6e is overgeslagen).
+4. **Geen "UI-UX review:"-entry** — geen discussion-entry waarvan de content begint met `UI-UX review:` (de conformiteitsbevestiging die execute Step 7-conditie 4c vóór de Review-transitie schrijft; ook het positieve bewijs voor de `pre-tool-use-ui-gate`-hook).
 
 Per falende conditie neem dit ⚠️-blok op in de revieweroutput, met de concrete herstelactie:
 
@@ -291,6 +292,7 @@ Actie vereist (herstel en re-run review):
   1) Relationele pin ontbreekt → link_wireframe_to_issue(wireframeId, issueId) (kanbantic-issue-prepare Step 5W)
   2) UI-contract ontbreekt → schrijf de Decision-entry per kanbantic-issue-prepare 5F.3b (lane-shared/ui-contract.md §1)
   3) Resultaat-attachments ontbreken → kanbantic-issue-execute Step 6e (add_issue_attachment, result-<versie>-<pagina>-<state>.png)
+  4) "UI-UX review:"-entry ontbreekt → kanbantic-issue-execute Step 7-conditie 4c (add_discussion_entry met prefix "UI-UX review:")
 ```
 
 Deze scan is de deterministische voorpost van de inhoudelijke Wireframe Conformity Check die de reviewer-subagent in Step 3 uitvoert — hij vangt de mechanisch-controleerbare omissies af vóórdat er een subagent aan te pas komt.

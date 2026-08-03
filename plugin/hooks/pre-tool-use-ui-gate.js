@@ -146,7 +146,7 @@ function post(body, sessionId) {
       }
     );
     req.on('error', (e) => reject(new Error(`Connection failed: ${e.message}`)));
-    req.setTimeout(15_000, () => req.destroy(new Error('Request timeout')));
+    req.setTimeout(4_000, () => req.destroy(new Error('Request timeout')));
     req.write(JSON.stringify(body));
     req.end();
   });
@@ -168,9 +168,40 @@ function unwrapToolResult(rpc) {
       }
     }
   }
-  // Some transports forward the object directly.
-  if (typeof result === 'object') return result;
+  // Some transports forward the object directly — only accept shapes that
+  // plausibly are a tool payload (mirrors the locked-version-blocker guard).
+  if (
+    typeof result === 'object' &&
+    (result.success !== undefined ||
+      Array.isArray(result.items) ||
+      Array.isArray(result.wireframes) ||
+      Array.isArray(result.entries) ||
+      Array.isArray(result.attachments))
+  ) {
+    return result;
+  }
   return null;
+}
+
+// A discussion entry counts as the UI-UX review record only when its content
+// STARTS with the marker (after leading whitespace). A mere citation of the
+// marker elsewhere in an entry (e.g. quoting this hook's block message) must
+// not satisfy the gate.
+function isUiUxReviewEntry(entry) {
+  const content = entry && typeof entry.content === 'string' ? entry.content : '';
+  return content.trimStart().startsWith(UI_UX_REVIEW_MARKER);
+}
+
+// Result-screenshot evidence per the lane-shared/ui-contract.md naming
+// convention: only attachments whose file name starts with `result-` count.
+// Prepare's Step 5W reference-crops are named `wf-*` and must NOT satisfy
+// this signal (KBT-F627 review Critical #1).
+function hasResultAttachment(attachments) {
+  if (!Array.isArray(attachments)) return false;
+  return attachments.some((a) => {
+    const name = (a && (a.fileName || a.name)) || '';
+    return /^result-/i.test(String(name));
+  });
 }
 
 // Tool payloads vary in envelope shape (bare array vs { items: [...] } vs a
@@ -214,6 +245,20 @@ async function gatherEvidence(issueId) {
     await callTool('list_issue_wireframes', { issueId }, session),
     ['wireframes', 'items', 'results']
   );
+  if (wireframes === null) return null; // infra/shape failure ⇒ fail-open
+
+  // Short-circuit: no linked wireframe ⇒ the gate can never block. Skip the
+  // two remaining lookups so non-UI Review-transitions pay one call, not three
+  // (also keeps the total well inside the hooks.json 20s budget).
+  if (wireframes.length === 0) {
+    return { hasLinkedWireframe: false, hasUiUxReviewEntry: false, hasResultAttachments: false };
+  }
+
+  // NOTE: both lists are read as a single page. An entry/attachment beyond the
+  // first page is missed, which errs on the BLOCK side for extreme timelines;
+  // acceptable for now because the marker-entry and result-* attachments are
+  // written late in the flow (most-recent), and the operator can always re-run
+  // after adding the missing evidence. Tracked as a known limitation.
   const entries = extractArray(
     await callTool('list_discussion_entries', { issueId }, session),
     ['entries', 'items', 'discussionEntries', 'results']
@@ -225,17 +270,12 @@ async function gatherEvidence(issueId) {
 
   // Any list we could not resolve to an array is an infra/shape failure for
   // that signal — treated as fail-open by the caller (null propagates).
-  if (wireframes === null || entries === null || attachments === null) return null;
-
-  const hasUiUxReviewEntry = entries.some((e) => {
-    const content = e && typeof e.content === 'string' ? e.content : '';
-    return content.startsWith(UI_UX_REVIEW_MARKER) || content.includes(UI_UX_REVIEW_MARKER);
-  });
+  if (entries === null || attachments === null) return null;
 
   return {
-    hasLinkedWireframe: wireframes.length > 0,
-    hasUiUxReviewEntry,
-    hasResultAttachments: attachments.length > 0,
+    hasLinkedWireframe: true,
+    hasUiUxReviewEntry: entries.some(isUiUxReviewEntry),
+    hasResultAttachments: hasResultAttachment(attachments),
   };
 }
 
@@ -293,5 +333,7 @@ module.exports = {
   shouldBlock,
   unwrapToolResult,
   extractArray,
+  isUiUxReviewEntry,
+  hasResultAttachment,
   UI_UX_REVIEW_MARKER,
 };
