@@ -33,6 +33,7 @@ If the readiness-gate is still not green at the end of a run, the issue stays on
    - **Feature** → Step 5F (requirements-dialoog)
    - **Bug** → Step 5B (root-cause-dialoog)
    - **Epic** → Step 5E (requirements + implementation plan, sequentieel)
+4.5. **Wireframe-blok valideren (Step 5W, HARD — KBT-RL191)** — elke type-route eindigt hier vóór de readiness-validatie: parse het `## Wireframe`-blok (of de expliciete `n.v.t. (geen UI)`-opt-out) en valideer elke gepinde pagina
 5. **Validate readiness** — re-check `isReadyToClaim`; report failing checks or confirm ready
 6. **Record Decision entry** — summary of what was added in this run
 6.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any reusable pattern/gotcha/rule discovered this run
@@ -56,7 +57,7 @@ Then the skill stops.
 
 **Epic-route exception (v2.4.0, KBT-F250):** When preparing an `Epic` in the new Phase-of-Features-of-Tasks shape, the skill MAY call `create_issue` to mint child-`Feature`s that fall **within the Epic's already-defined scope**. Those Features must be (a) parented to the Epic via `parentIssueId` at creation, (b) immediately assigned to a Phase via `assign_feature_to_phase`, and (c) covered by the Epic's existing description / acceptance criteria — no scope expansion, no unrelated work.
 
-Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
+Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, `link_wireframe_to_issue` and `add_issue_attachment` (wireframe-pinning + reference-attachments bij UI-issues, Step 5W), and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
 </HARD-GATE>
 
 ## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
@@ -294,7 +295,7 @@ MCP: mcp__kanbantic__add_discussion_entry(
 )
 ```
 
-Go to Step 6.
+Go to Step 5W.
 
 ## Step 5B: Bug — Root-Cause Dialogue
 
@@ -366,7 +367,7 @@ MCP: mcp__kanbantic__add_discussion_entry(
 )
 ```
 
-Go to Step 6.
+Go to Step 5W.
 
 ## Step 5E: Epic — Sequential Design + Implementation Plan
 
@@ -515,7 +516,7 @@ core capabilities. Phase 2 ships the user-facing flows in one batch so the
 review-step can verify them together. Phase 3 wires the new flows to the UI.
 ```
 
-Go to Step 6.
+Go to Step 5W.
 
 ## Step 5W: Wireframe-blok valideren (HARD — KBT-RL191)
 
@@ -532,6 +533,8 @@ Voor **elke** UI-rakende issue (Feature/Bug/Epic) geldt: het `## Wireframe`-blok
   - Slaagt de validatie → ga verder naar Step 6.
 
 > Niet-UI-issues zonder `## Wireframe`-blok zijn vrijgesteld; voeg bij twijfel expliciet `## Wireframe — n.v.t. (geen UI)` toe zodat afwezigheid een keuze is, geen omissie.
+
+Go to Step 6. (Blokkerende paden hierboven rapporteren hun tekortkoming via Step 6b en houden de issue op `Triaged`.)
 
 ## Step 6: Validate Readiness
 
