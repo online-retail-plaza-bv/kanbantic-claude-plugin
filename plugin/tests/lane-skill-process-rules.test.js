@@ -316,6 +316,68 @@ test('TRUL013 supersession: test-policy declaration step references its replacem
   );
 });
 
+// ─── KBT-B513: Step 5W must be reachable from every prepare route ─────────────
+//
+// Regression for KBT-B513 / KBT-TC3368: the wireframe-validation gate (Step 5W,
+// KBT-RL191) was dead text — all three type-routes (5F.6 / 5B.7 / 5E.9) ended
+// with "Go to Step 6." and nothing routed through 5W. These assertions pin the
+// routing so a future restructuring cannot silently orphan the gate again.
+
+test('KBT-B513: 5F.6, 5B.7 and 5E.9 must route to Step 5W (not directly to Step 6)', () => {
+  const content = readSkill('kanbantic-issue-prepare');
+  for (const [label, pattern] of [
+    ['5F.6', /### 5F\.6:[\s\S]*?(?=## Step 5B)/],
+    ['5B.7', /### 5B\.7:[\s\S]*?(?=## Step 5E)/],
+    ['5E.9', /### 5E\.9:[\s\S]*?(?=## Step 5W)/],
+  ]) {
+    const sectionMatch = content.match(pattern);
+    assert.ok(sectionMatch, `${label} section not found in prepare SKILL.md`);
+    const section = sectionMatch[0];
+    assert.ok(
+      section.match(/Go to Step 5W\./),
+      `${label} must end with "Go to Step 5W." so the wireframe gate is reachable`
+    );
+    assert.ok(
+      !section.match(/Go to Step 6\./),
+      `${label} must not route directly to Step 6 — that orphans Step 5W (KBT-B513)`
+    );
+  }
+});
+
+test('KBT-B513: Step 5W must route onward to Step 6', () => {
+  const content = readSkill('kanbantic-issue-prepare');
+  const sectionMatch = content.match(/## Step 5W:[\s\S]*?(?=## Step 6: Validate Readiness)/);
+  assert.ok(sectionMatch, 'Step 5W section not found in prepare SKILL.md');
+  assert.ok(
+    sectionMatch[0].match(/Go to Step 6\./),
+    'Step 5W must close with an explicit "Go to Step 6." so no path is left without a destination'
+  );
+});
+
+test('KBT-B513: the Checklist must include the 5W wireframe-validation step', () => {
+  const content = readSkill('kanbantic-issue-prepare');
+  const checklistMatch = content.match(/## Checklist[\s\S]*?(?=<HARD-GATE>)/);
+  assert.ok(checklistMatch, 'Checklist section not found in prepare SKILL.md');
+  assert.ok(
+    checklistMatch[0].match(/Step 5W/) && checklistMatch[0].match(/[Ww]ireframe/),
+    'Checklist must list the wireframe-validation step (Step 5W) between routing and readiness'
+  );
+});
+
+test('KBT-B513: allowed-writes must include link_wireframe_to_issue and add_issue_attachment', () => {
+  const content = readSkill('kanbantic-issue-prepare');
+  const allowedMatch = content.match(/Allowed MCP writes are:[^\n]*/);
+  assert.ok(allowedMatch, 'Allowed-writes line not found in prepare SKILL.md');
+  assert.ok(
+    allowedMatch[0].includes('link_wireframe_to_issue'),
+    'allowed-writes must permit link_wireframe_to_issue (relational wireframe pinning)'
+  );
+  assert.ok(
+    allowedMatch[0].includes('add_issue_attachment'),
+    'allowed-writes must permit add_issue_attachment (reference-attachments for UI-issues)'
+  );
+});
+
 // ─── Lint integration: real tree still passes all invariants ──────────────────
 
 test('Integration: lint-skills.js still passes on the updated skill tree', () => {
