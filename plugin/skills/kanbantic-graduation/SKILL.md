@@ -5,6 +5,8 @@ description: "Graduates a mature concept domain from Obsidian notes (kladblok) t
 
 # Kanbantic Graduation Skill
 
+> **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
+
 ## Overview
 
 `kanbantic-graduation` promotes a **mature concept domain** from free-form Obsidian notes + wireframes to first-class Kanbantic entities, agent-assisted. The skill reads your kladnotities, validates ripeness (KBT-TRUL018), and creates the full entity tree via existing MCP tools. No new MCP tools are introduced.

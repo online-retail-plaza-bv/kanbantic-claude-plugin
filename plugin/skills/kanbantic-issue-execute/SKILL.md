@@ -7,6 +7,8 @@ description: "Use when a Kanbantic issue needs to be implemented (status Ready �
 
 > **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
 
+> **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
+
 ## Overview
 
 Execute implementation work for any issue type. Handles two modes:
@@ -904,6 +906,16 @@ MCP: mcp__kanbantic__update_test_case(testCaseId, status: "Skipped")  // deliber
 - Without this call the Test Case stays on `Ready`/`Draft` and Step 7 **blocks** the
   Review transition — exactly the KBT-F551 failure mode (issue on Review with 0/5 Passed).
 
+### 6e: Resultaat-screenshots als attachment (UI-issues — KBT-F627)
+
+Voor **UI-issues** (geldig `## Wireframe`-blok, geen opt-out `n.v.t. (geen UI)`): maak Playwright-screenshots van het **eindresultaat** op dezelfde breedtes en uitsneden als de prepare-referentiecrops (1440px, zelfde pagina's/states) en voeg ze toe via:
+
+```
+MCP: mcp__kanbantic__add_issue_attachment(issueId, <result-<versie>-<pagina>-<state>.png>)
+```
+
+Naamgeving en conventies conform `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` (§2). Neem daarnaast in de handoff-discussion-entry het kopje **`Afgeweken van het wireframe`** op met elke bewuste afwijking (of expliciet "geen") — een afwijking die daar niet gemeld is, is per de include fix-vereist. Niet-UI-issues: sla deze substap over.
+
 ## Step 7: Verify Review Pre-conditions + Transition
 
 <HARD-GATE>
@@ -915,6 +927,11 @@ Review transition is allowed **only** when all of the following are true. If any
    b. For each level with `Applicability = N.v.t.`: no minimum count is required; the N.v.t.-rationale in `frozenPolicy[level].reason` must be non-empty (verified at prepare time; warn if missing).
    c. No test case at any level may have status `Failed` or `Blocked`.
 3. Readiness checks on the issue still pass (`isReadyToClaim` was true at claim time; re-check in case specs/test cases were added mid-flight).
+4. **Wireframe-conformiteit (UI-issues — KBT-F627)** — alleen voor issues met een `## Wireframe`-blok zonder opt-out:
+   a. Het afwijkingskopje **`Afgeweken van het wireframe`** is aanwezig in de handoff-entry (met de lijst afwijkingen of expliciet "geen") — zie Step 6e.
+   b. De resultaat-screenshots zijn geattacht — verifieer via `mcp__kanbantic__list_issue_attachments(issueId)` dat de `result-*`-set naast de prepare-referentiecrops staat.
+   c. De wireframe-conformiteit is bevestigd: element-voor-element tegen het UI-contract (Decision-entry `## UI-contract (bevroren bij claim_issue — KBT-F627)`), per de regels in `lane-shared/ui-contract.md` — nooit pixel-diff.
+   Niet voldaan → de issue blijft `InProgress`.
 </HARD-GATE>
 
 ### 7a: Verify tasks

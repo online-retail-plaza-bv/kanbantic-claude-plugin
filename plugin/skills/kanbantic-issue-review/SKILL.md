@@ -7,6 +7,8 @@ description: "Use after kanbantic-issue-execute marks an issue Review (or to run
 
 > **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
 
+> **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
+
 ## Overview
 
 Complete the Review → InDeployment lane transition (per KBT-RL053; backend auto-promotes to Done on merge or remains InDeployment until deploy-gate clears, KBT-F236). This skill:
@@ -226,6 +228,14 @@ Build a requirements checklist from specifications and test cases.
 
 If no test-policy entry is found for a Feature / Bug issue, treat all three levels as Vereist/min=1 and flag the absence as a Critical review issue (the prepare-step was incomplete).
 
+**UI-contract & wireframe (KBT-F627):** for UI-issues (geldig `## Wireframe`-blok, geen opt-out `n.v.t. (geen UI)`) also load:
+
+- the `## Wireframe`-blok from the issue description, **geparsed** via `parseWireframeBlock` (`plugin/scripts/wireframe-block.js`) → `{ wireframe, versie, paginas }`;
+- the UI-contract: the `Decision`-entry whose content starts with the prefix `## UI-contract` (canonical header `## UI-contract (bevroren bij claim_issue — KBT-F627)`);
+- both attachment-sets via `mcp__kanbantic__list_issue_attachments(issueId)` — the prepare-referentiecrops (`wf-*`) and the resultaat-screenshots (`result-*`) — with `mcp__kanbantic__download_issue_attachment` where the reviewer needs the actual pixels side-by-side.
+
+Store the parsed block + contract + attachment references as `uiContract`. If no UI-contract Decision-entry is found on a UI-issue, flag the absence as a Critical review issue (the prepare-step was incomplete).
+
 Include Rules, Patterns, and Gotchas in the review context — the reviewer should verify code adheres to project rules and follows established patterns.
 
 ## Step 2: Get Git Diff (scope by review-level)
@@ -256,6 +266,34 @@ git diff main..HEAD
 ```
 
 For new-shape Epics where each Feature was already mini-reviewed at Feature-level, the Epic-level review is a **lightweight cross-Phase coherence check** — focus on integration points between Phases, not per-Task code-walk.
+
+## Step 2.5: UI-pre-gate-scan (deterministisch — KBT-F627)
+
+Mechanische checks zonder subagent, naar het model van de Deferred-Cancel Scan (Step 6.5). **Alleen voor UI-issues** (wireframe-blok aanwezig, geen opt-out); **niet-UI-issues: continue silently.**
+
+```
+MCP: mcp__kanbantic__list_issue_wireframes(issueId)
+MCP: mcp__kanbantic__list_issue_attachments(issueId)
+```
+
+Flag **automatisch Critical** in de revieweroutput wanneer één of meer van deze deterministische condities faalt:
+
+1. **Geen relationele pin** — `list_issue_wireframes` is leeg (prepare Step 5W heeft `link_wireframe_to_issue` niet uitgevoerd);
+2. **Geen UI-contract-entry** — geen Decision-entry met prefix `## UI-contract` gevonden (Step 1b);
+3. **Geen resultaat-attachments** — `list_issue_attachments` bevat geen `result-*`-set (execute Step 6e is overgeslagen).
+
+Per falende conditie neem dit ⚠️-blok op in de revieweroutput, met de concrete herstelactie:
+
+```
+⚠️ WIREFRAME-GETROUWHEID NIET VERIFIEERBAAR — KBT-F627
+[issueCode]: <falende conditie 1/2/3>.
+Actie vereist (herstel en re-run review):
+  1) Relationele pin ontbreekt → link_wireframe_to_issue(wireframeId, issueId) (kanbantic-issue-prepare Step 5W)
+  2) UI-contract ontbreekt → schrijf de Decision-entry per kanbantic-issue-prepare 5F.3b (lane-shared/ui-contract.md §1)
+  3) Resultaat-attachments ontbreken → kanbantic-issue-execute Step 6e (add_issue_attachment, result-<versie>-<pagina>-<state>.png)
+```
+
+Deze scan is de deterministische voorpost van de inhoudelijke Wireframe Conformity Check die de reviewer-subagent in Step 3 uitvoert — hij vangt de mechanisch-controleerbare omissies af vóórdat er een subagent aan te pas komt.
 
 ## Step 3: Dispatch Reviewer Subagent
 
