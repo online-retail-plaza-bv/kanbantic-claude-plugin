@@ -591,11 +591,28 @@ function resolveFilePathArgument(msg) {
 // — never a hardcoded tool list (KBT-RL134). `filePath` is never added to `required`.
 // ---------------------------------------------------------------------------
 
-const FILE_PATH_PROP_DESCRIPTION =
-  "Optional alternative to passing the content inline: an absolute local file path. " +
-  'The kanbantic-mcp-proxy reads the file locally and substitutes its contents into ' +
-  "the tool's content field before forwarding, so large files never enter the model's " +
-  "context. Provide either 'filePath' or the inline content field, not both.";
+// KBT-B514: the advertised wording must match the CONTENT_FIELD_BY_TOOL mapping.
+// For filesJson-tools the file must contain the filesJson VALUE itself (a JSON
+// array of {path, content} objects) — raw HTML/CSS/JS fails server-side with
+// "Invalid filesJson". The generic wording misled callers into passing raw files.
+function filePathPropDescriptionFor(contentField) {
+  if (contentField === 'filesJson') {
+    return (
+      "Optional alternative to passing filesJson inline: an absolute local file path. " +
+      'The kanbantic-mcp-proxy reads the file locally and substitutes its contents into ' +
+      "the tool's filesJson field before forwarding, so large filesets never enter the " +
+      "model's context. IMPORTANT: the file must contain the filesJson VALUE itself — a " +
+      'JSON array of {"path","content"} objects, e.g. [{"path":"index.html","content":"…"}] — ' +
+      "NOT a raw HTML/CSS/JS file. Provide either 'filePath' or inline filesJson, not both."
+    );
+  }
+  return (
+    "Optional alternative to passing the content inline: an absolute local file path. " +
+    'The kanbantic-mcp-proxy reads the file locally and substitutes its contents into ' +
+    "the tool's content field before forwarding, so large files never enter the model's " +
+    "context. Provide either 'filePath' or the inline content field, not both."
+  );
+}
 
 function augmentToolsListResponse(response) {
   const tools = response && response.result && response.result.tools;
@@ -613,7 +630,7 @@ function augmentToolsListResponse(response) {
     if (!props[contentField]) continue; // only content-bearing tools
     if (props.filePath) continue;       // already advertised — don't clobber
 
-    props.filePath = { type: 'string', description: FILE_PATH_PROP_DESCRIPTION };
+    props.filePath = { type: 'string', description: filePathPropDescriptionFor(contentField) };
 
     // Remove the content field from required so Claude knows it may use filePath
     // instead. Without this, Claude sees content as mandatory and fills it alongside
@@ -623,9 +640,14 @@ function augmentToolsListResponse(response) {
     }
 
     if (typeof tool.description === 'string' && !tool.description.includes('filePath')) {
-      tool.description = tool.description.trimEnd() +
-        `\n\nTip: for large content you may pass 'filePath' (an absolute local path) ` +
-        `instead of '${contentField}'; the proxy reads the file locally so it never enters context.`;
+      const tip = contentField === 'filesJson'
+        ? `\n\nTip: for large filesets you may pass 'filePath' (an absolute local path) ` +
+          `instead of 'filesJson'; the proxy reads the file locally so it never enters context. ` +
+          `The file must contain the filesJson JSON array itself ` +
+          `([{"path":"index.html","content":"…"}]), not a raw HTML/CSS/JS file.`
+        : `\n\nTip: for large content you may pass 'filePath' (an absolute local path) ` +
+          `instead of '${contentField}'; the proxy reads the file locally so it never enters context.`;
+      tool.description = tool.description.trimEnd() + tip;
     }
   }
 }
