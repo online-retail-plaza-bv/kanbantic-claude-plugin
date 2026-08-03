@@ -7,6 +7,8 @@ description: "Use after kanbantic-issue-triage marks an issue Triaged. Consolida
 
 > **Canonieke werkwijze — Kanbantic Workflow v3.** "De Kanbantic Workflow" verwijst naar het Library-document *"Kanbantic Workflow — Plan van Aanpak (v3)"* (slug `kanbantic-workflow--plan-van-aanpak-v3`), de bron-van-waarheid. De per-entiteit statuslevenscyclus (eigenaar + tool-call per status, geverifieerd tegen `get_system_schema`) staat in **§0.2**, de harde roll-up in **§0.3**. Lees bij twijfel via `read_library_document`. Gebruik de echte enum-namen (`Ready`/`Blocked`/`OnHold`/…), geen "mentale mapping". Zie ook `plugin/reference/kanbantic-workflow-v3.md`.
 
+> **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
+
 ## Overview
 
 `kanbantic-issue-prepare` works a Triaged issue all the way to a first-class **`Ready`** status (KBT-F235; renamed from `Prepared` in KBT-E103/v3). It is the **single entry point** for the Triaged → Ready lane transition — regardless of whether the issue is a Feature, Bug, or Epic. Internally it dispatches on `issue.type` so the user never has to choose a sub-skill.
@@ -235,6 +237,20 @@ Present 2–3 approaches with trade-offs (complexity, performance, maintainabili
 
 Scale sections to complexity: Data model / Backend logic / Frontend UI / MCP integration. Ask after each section: "Ziet dit er goed uit?" / "Does this look right?"
 
+### 5F.3b: UI-contract (HARD voor UI-issues — KBT-F627)
+
+Voor issues met een **geldig `## Wireframe`-blok** (geen opt-out `n.v.t. (geen UI)`): schrijf het UI-contract als `Decision`-entry, conform het gedeelde referentiekader `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — een opsombare lijst per element-categorie (knoppen+labels, tabelkolommen+volgorde, titels/breadcrumbs, menu-plaatsing, states), afgeleid van de gepinde wireframe-pagina('s) uit het `## Wireframe`-blok. Het contract wordt bevroren bij `claim_issue`, net als de test-policy (5F.5).
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(
+  issueId,
+  content: "## UI-contract (bevroren bij claim_issue — KBT-F627)\n\n### Knoppen + labels\n- ...\n\n### Tabelkolommen + volgorde\n- ...\n\n### Titels / breadcrumbs\n- ...\n\n### Menu-plaatsing\n- ...\n\n### States\n- ...\n\n_Bron: wireframe `<slug>` v<versie>, pagina('s): <pagina-id's> (uit het `## Wireframe`-blok)._",
+  entryType: "Decision"
+)
+```
+
+Opt-out (`## Wireframe — n.v.t. (geen UI)`) of geen UI-oppervlak → sla deze sectie over.
+
 ### 5F.4: Write user story, specs, test cases
 
 Per requirement:
@@ -356,6 +372,8 @@ MCP: mcp__kanbantic__add_discussion_entry(
   entryType: "Decision"
 )
 ```
+
+**UI-rakende bugs — UI-contract (KBT-F627).** Bugs met een geldig `## Wireframe`-blok (geen opt-out) volgen hetzelfde UI-contract-mechanisme als Features: schrijf de `Decision`-entry per element-categorie zoals in 5F.3b, conform `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md`. Voor een UI-bug legt het contract de **correcte** eindtoestand vast (het wireframe is de norm, niet de kapotte huidige UI).
 
 ### 5B.7: Decision entry
 
@@ -530,7 +548,13 @@ Voor **elke** UI-rakende issue (Feature/Bug/Epic) geldt: het `## Wireframe`-blok
   MCP: get_wireframe(<wireframe-slug|id>, <versie>, <pagina>)   // per pagina
   ```
   - `get_wireframe` geeft `Success:false` (`NotFoundKind` = `PageNotFoundInVersion` óf `AmbiguousPage`), of de referentie laadt niet → **STOP (fail-not-skip)**: rapporteer welke pagina-id's wél in die versie bestaan (of, bij `AmbiguousPage`, de kandidaten — kies een specifieker pad); de issue blijft niet-Ready tot het blok klopt.
-  - Slaagt de validatie → ga verder naar Step 6.
+  - Slaagt de validatie → verzilver de pin (KBT-F627), daarna verder naar Step 6:
+    1. **Relationele pin naast het tekstblok:**
+       ```
+       MCP: mcp__kanbantic__link_wireframe_to_issue(wireframeId, issueId)
+       ```
+       Zo is de koppeling ook queryable (`list_issue_wireframes`), niet alleen als tekst in de beschrijving.
+    2. **Referentiecrops als attachment:** maak per gepinde pagina een Playwright-screenshot-crop op 1440px breedte en voeg die toe via `mcp__kanbantic__add_issue_attachment`, benoemd `wf-<versie>-<pagina>-<state>.png` conform `lane-shared/ui-contract.md`. Noteer in de attachment-omschrijving dat de crop een **afgeleide** is — de states leven in het wireframe, niet in de PNG.
 
 > Niet-UI-issues zonder `## Wireframe`-blok zijn vrijgesteld; voeg bij twijfel expliciet `## Wireframe — n.v.t. (geen UI)` toe zodat afwezigheid een keuze is, geen omissie.
 
@@ -571,6 +595,8 @@ If the transition succeeds, report:
 - UserStories: ✓ (N linked)
 - Specifications: ✓ (N linked)
 - TestCases: ✓ (N linked)
+- Wireframe pinned: ✓ (vN, <pagina's>) / n.v.t.
+- UI-contract: ✓ / n.v.t.
 
 **Next step:** Invoke `kanbantic-issue-execute`. It will call `claim_issue(branch: ...)` which atomically assigns the issue and promotes `Ready → InProgress` in a single MCP call (KBT-RL052)."
 

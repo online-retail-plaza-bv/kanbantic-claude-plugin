@@ -23,6 +23,16 @@
         ]
       },
       {
+        "matcher": "mcp__.*__update_issue_status",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use-ui-gate.js\"",
+            "timeout": 20000
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {

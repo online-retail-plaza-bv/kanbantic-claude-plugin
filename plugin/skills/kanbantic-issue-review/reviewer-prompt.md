@@ -37,6 +37,16 @@ Agent tool (superpowers:code-reviewer):
 
     If no test-policy entry was found on the issue: treat all three levels as Vereist/min=1 and flag as Critical.
 
+    ## UI-contract & Wireframe (KBT-F627)
+    [PASTE for UI-issues (wireframe-blok aanwezig, geen opt-out):
+     - the UI-contract Decision-entry ("## UI-contract (bevroren bij claim_issue — KBT-F627)")
+     - the pinned wireframe reference: slug, versie, pagina('s) from the `## Wireframe`-blok
+     - both attachment-sets: prepare-referentiecrops (wf-*) + resultaat-screenshots (result-*)
+     - the "Afgeweken van het wireframe" section from the handoff-entry (or "geen")
+     For non-UI issues write: n.v.t.]
+
+    If no UI-contract entry was found on a UI-issue: flag as Critical (the prepare-step was incomplete).
+
     ## Project Rules & Patterns (from Kanbantic Toolkit)
     [PASTE relevant Rules, Patterns, and Gotchas from Toolkit.
      The reviewer should verify code adheres to these.]
@@ -78,7 +88,14 @@ Agent tool (superpowers:code-reviewer):
        - Any test case with status `Failed` or `Blocked` → **Critical** issue.
        - Missing coverage ALWAYS yields REJECT — it cannot be overridden by other strengths.
 
-    6. **Issues**: Categorize as:
+    6. **Wireframe Conformity Check** (KBT-F627):
+       - UI-issues only (wireframe-blok aanwezig, geen opt-out); non-UI issues: mark `n.v.t.` and move on.
+       - Verify **element-voor-element** against the UI-contract: knoppen/labels, tabelkolommen + volgorde, titels/breadcrumbs, menu-plaatsing, states. NEVER pixel-diff — wireframe and app are never pixel-identical (lane-shared/ui-contract.md §3).
+       - Compare the prepare-referentiecrops (wf-*) with the resultaat-screenshots (result-*) per pagina/state.
+       - Every deviation must be reported under "Afgeweken van het wireframe" in the handoff-entry. An **unreported deviation = Critical**.
+       - Missing UI-contract, missing result-screenshots, or missing relationele pin → **Critical** (mirrors the deterministic Step 2.5 pre-gate).
+
+    7. **Issues**: Categorize as:
        - **Critical**: Must fix (bugs, security, broken functionality, missing test-policy coverage)
        - **Important**: Should fix (missing requirements, poor patterns)
        - **Minor**: Nice to have (style, naming, minor improvements)
@@ -110,9 +127,20 @@ Agent tool (superpowers:code-reviewer):
     - [x/blank] Integration: [M] Passed / [N] vereist — [Gedekt / ONTBREKENDE COVERAGE]
     - [x/blank] E2E: [M] Passed / [N] vereist — [Gedekt / ONTBREKENDE COVERAGE / N.v.t.: reden]
 
+    ## Wireframe Conformity (KBT-F627)
+    [For non-UI issues write a single line: n.v.t.]
+    - [x/blank] Knoppen + labels — [conform / afwijking: ...]
+    - [x/blank] Tabelkolommen + volgorde — [conform / afwijking: ...]
+    - [x/blank] Titels / breadcrumbs — [conform / afwijking: ...]
+    - [x/blank] Menu-plaatsing — [conform / afwijking: ...]
+    - [x/blank] States — [conform / afwijking: ...]
+    - Gemelde afwijkingen ("Afgeweken van het wireframe"): [lijst / geen]
+    - Ongemelde afwijkingen (Critical): [lijst / geen]
+
     ## Verdict
     APPROVE / REJECT (with reason)
     Note: missing coverage on any Vereist level → always REJECT, no exceptions.
+    Note: missing wireframe conformity on a UI-issue → always REJECT — it cannot be overridden by other strengths.
     ```
 ```
 
