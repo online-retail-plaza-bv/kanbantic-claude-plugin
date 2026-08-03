@@ -202,6 +202,30 @@ test('KBT-B417 (unit): augmentToolsListResponse advertises filePath on add_wiref
   assert.match(t.description, /filePath/, 'description mentions filePath');
 });
 
+test('KBT-B514 (unit): filesJson-tools advertise the fileset-JSON wording, not the generic content wording', () => {
+  const response = { result: { tools: [
+    { name: 'add_wireframe_version_files', description: 'Add a fileset version.', inputSchema: { type: 'object', properties: { wireframeId: { type: 'string' }, filesJson: { type: 'string' } }, required: ['wireframeId', 'filesJson'] } },
+    { name: 'create_wireframe', description: 'Create a wireframe.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, filesJson: { type: 'string' } }, required: ['applicationId', 'filesJson'] } },
+    { name: 'add_discussion_entry', description: 'Add an entry.', inputSchema: { type: 'object', properties: { issueId: { type: 'string' }, content: { type: 'string' } }, required: ['issueId', 'content'] } },
+  ] } };
+  proxy.augmentToolsListResponse(response);
+
+  for (const t of response.result.tools.slice(0, 2)) {
+    const prop = t.inputSchema.properties.filePath.description;
+    assert.match(prop, /filesJson VALUE itself/, `${t.name}: prop-description names the filesJson value`);
+    assert.match(prop, /JSON array/, `${t.name}: prop-description names the JSON array shape`);
+    assert.match(prop, /NOT a raw HTML\/CSS\/JS file/, `${t.name}: prop-description warns against raw files`);
+    assert.match(t.description, /filesJson JSON array itself/, `${t.name}: tip names the array requirement`);
+    assert.match(t.description, /not a raw HTML\/CSS\/JS file/, `${t.name}: tip warns against raw files`);
+  }
+
+  const contentTool = response.result.tools[2];
+  const contentProp = contentTool.inputSchema.properties.filePath.description;
+  assert.doesNotMatch(contentProp, /filesJson/, 'content-tool keeps the generic wording (no filesJson mention)');
+  assert.match(contentProp, /the tool's content field/, 'content-tool prop-description unchanged in intent');
+  assert.match(contentTool.description, /instead of 'content'/, 'content-tool tip unchanged in intent');
+});
+
 test('augmentToolsListResponse: idempotent + tolerant of malformed responses', () => {
   // Idempotent: pre-existing filePath property is not clobbered.
   const custom = { type: 'string', description: 'custom' };
