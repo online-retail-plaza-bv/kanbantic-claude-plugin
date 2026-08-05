@@ -47,6 +47,20 @@ function note(msg) {
   process.stdout.write(`${PREFIX} ${msg}\n`);
 }
 
+/**
+ * Explain a skip — but only when asked.
+ *
+ * Fail-safe silence is right for an operator and wrong for whoever has to work
+ * out why nothing synced. Set KANBANTIC_SYNC_DEBUG=1 to get the reason on
+ * stderr; the exit code stays 0 either way, so turning it on can never change
+ * behaviour, only visibility.
+ */
+function debug(reason, err) {
+  if (!process.env.KANBANTIC_SYNC_DEBUG) return;
+  const detail = err && err.message ? `: ${err.message}` : '';
+  process.stderr.write(`${PREFIX} skipped — ${reason}${detail}\n`);
+}
+
 /** Run a git command in `cwd`; '' when git is unavailable or the call fails. */
 function git(args, cwd) {
   try {
@@ -123,9 +137,11 @@ async function main() {
 
   // ── Preconditions that mean "not our business" ──────────────────────────
   if (!git(['rev-parse', '--git-dir'], rootDir)) {
-    return; // not a git repository — nothing to mirror into
+    debug('not a git repository');
+    return; // nothing to mirror into
   }
   if (!resolveApiKey()) {
+    debug('no API key configured');
     return; // unconfigured workstation; check-update.sh already says so
   }
 
@@ -144,7 +160,8 @@ async function main() {
     let repositories = [];
     try {
       repositories = await fetchWorkspaceRepositories({ client });
-    } catch (_) {
+    } catch (err) {
+      debug('could not load repositories for detection layer 3', err);
       return; // unreachable backend — quietly skip, per KBT-BD206
     }
     detected = detectWorkspace({ env: process.env, manifest, remoteUrl, repositories });
@@ -170,13 +187,15 @@ async function main() {
   let items;
   try {
     items = await fetchToolkitItems({ workspace: detected.workspace, client });
-  } catch (_) {
+  } catch (err) {
+    debug('toolkit fetch failed', err);
     return; // network, protocol, or parse failure — skip quietly
   }
 
   // An empty list is not "nothing changed", it is "the fetch told us nothing".
   // Handing that to the sync with --force would delete every existing mirror.
   if (!Array.isArray(items) || items.length === 0) {
+    debug('fetch returned no items — refusing to run --force against an empty list');
     return;
   }
 
@@ -206,4 +225,4 @@ process.on('uncaughtException', () => process.exit(0));
 
 main()
   .then(() => process.exit(0))
-  .catch(() => process.exit(0));
+  .catch((err) => { debug('unexpected error', err); process.exit(0); });
