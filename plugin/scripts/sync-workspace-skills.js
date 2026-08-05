@@ -148,6 +148,47 @@ function sha256(s) {
 }
 
 /**
+ * Model aliases Claude Code's loader accepts, keyed by every input shape a
+ * caller can realistically hand us:
+ *
+ *   - the enum **integer** — what `GET /api/app/toolkit-item` returns (0/1/2);
+ *   - the enum **name** — what the MCP `list_toolkit_items` tool returns
+ *     ("Opus"/"Sonnet"/"Haiku"), in any casing.
+ *
+ * KBT-B531: normalising here rather than at the call-site is deliberate. There
+ * is no single caller — every workstation that drives the sync brings its own
+ * fetch layer, and each one would otherwise have to rebuild this mapping from
+ * scratch. Doing it once, in the renderer, protects the callers that exist and
+ * the ones still to be written.
+ */
+const MODEL_ALIASES = {
+  0: 'opus',
+  1: 'sonnet',
+  2: 'haiku',
+  opus: 'opus',
+  sonnet: 'sonnet',
+  haiku: 'haiku',
+};
+
+/**
+ * Normalise a toolkit item's model preference to a valid Claude Code alias.
+ *
+ * Returns `''` for "no preference" and for any value not in MODEL_ALIASES.
+ * Emitting nothing is the safer failure mode: a missing `model:` line makes the
+ * loader fall back to the session model, whereas an unrecognised value is a
+ * frontmatter parse error.
+ *
+ * Note the `== null` guard rather than a truthiness test — Opus is enum `0`,
+ * which is falsy in JavaScript. That single detail is what made every Opus
+ * subagent silently lose its model line (KBT-B531).
+ */
+function normalizeModel(raw) {
+  if (raw == null || raw === '') return '';
+  const key = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  return MODEL_ALIASES[key] ?? '';
+}
+
+/**
  * Render the on-disk file body for a toolkit item.
  *
  * Adds a YAML frontmatter block:
@@ -187,10 +228,14 @@ function renderFile(item) {
   const slug = item.slug || slugify(item.title || '');
   const nameLine = item.category === 'Subagent' && slug ? `name: ${slug}\n` : '';
   // KBT-F437: emit a `model:` frontmatter line when the toolkit item carries a
-  // model preference. Alias = lowercase of the enum name (Opus→opus, etc.).
-  // MCP `ListToolkitItems` may surface the field as either `model` or `Model`.
-  const model = item.model || item.Model || '';
-  const modelLine = model ? `model: ${String(model).toLowerCase()}\n` : '';
+  // model preference. KBT-B531: the value is normalised via normalizeModel,
+  // which accepts both the enum name (MCP) and the enum integer (REST), and
+  // treats Opus's `0` as a real value instead of as "absent". An unrecognised
+  // value yields no line — see the normalizeModel doc-comment for why.
+  // MCP `ListToolkitItems` may surface the field as either `model` or `Model`;
+  // `??` keeps a legitimate `0` from falling through to the other casing.
+  const model = normalizeModel(item.model ?? item.Model);
+  const modelLine = model ? `model: ${model}\n` : '';
   const body = (item.content || '').replace(/\r\n/g, '\n');
   // Ensure exactly one trailing newline.
   const trimmed = body.endsWith('\n') ? body : body + '\n';
@@ -244,7 +289,15 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
       content: item.content || '',
       // KBT-F437: carry the model preference so renderFile can emit a `model:`
       // frontmatter line. MCP may surface it as `model` or `Model`.
-      model: item.model || item.Model || '',
+      // KBT-B531: normalise here too, not only in renderFile. The plan layer
+      // sits between the caller and the renderer, so an `||` chain at this
+      // point flattens Opus's enum `0` to `''` before renderFile ever sees it —
+      // which is exactly why the unit tests on renderFile passed while the
+      // files on disk were still missing their model line. Normalising here
+      // also means `entry.model` is the alias the source-hash below folds in,
+      // so re-serialising the same model in a different shape (enum `1` vs
+      // "Sonnet") no longer registers as a spurious UPDATE.
+      model: normalizeModel(item.model ?? item.Model),
       targetPath: target,
     };
     slugged.push(entry);
@@ -771,6 +824,7 @@ module.exports = {
   targetPathFor,
   deriveDescription,
   sha256,
+  normalizeModel,
   renderFile,
   buildPlan,
   applyPlan,
