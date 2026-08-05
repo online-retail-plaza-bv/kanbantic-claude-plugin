@@ -147,6 +147,38 @@ Om een gespawnde agent betrouwbaar in `/agent-sessions` te laten verschijnen, wa
 
 Gevolg voor onboarding: verschijnt een gespawnde agent níet in `/agent-sessions`, controleer dan of de daemon een geldige `AgentApiKey` (met workspace-lidmaatschap + `AgentSessions.Create`) injecteert — de daemon-README (sectie *"Making agent-sessions appear"*) en de F4-diagnostiek (spawn-log + spawn-watchdog + de teller op `/workstations`) wijzen de oorzaak aan.
 
+## Toolkit-mirrors syncen bij sessiestart (KBT-F637)
+
+Sinds de relaxatie van **KBT-TRUL014** zijn `.claude/commands/` en `.claude/agents/` **gegenereerde, gitignorede mirrors** van de Toolkit-items van de workspace. Een verse clone heeft dus geen commands en geen subagents tot er een sync gedraaid heeft. Daarom levert de plugin die sync zelf mee, als tweede `SessionStart`-hook naast `check-update.sh`.
+
+De hook bepaalt zelf bij welke workspace de repo hoort, in vier stappen — elke stap wordt pas geraadpleegd als de vorige niets oplevert:
+
+| # | Bron | Kosten |
+|---|---|---|
+| 1 | `KANBANTIC_WORKSPACE_ID` | gratis — expliciet wint altijd |
+| 2 | het veld `workspace` uit een bestaande `.kanbantic-sync.json` | één bestandslezing |
+| 3 | match van de git-remote tegen de bekende repositories | één netwerkronde, alleen bij een verse clone |
+| 4 | geen match → stil overslaan | — |
+
+Claimen twee workspaces dezelfde remote, dan kiest de hook **niet**: hij meldt de kandidaten en laat het aan jou om stap 1 te zetten. Gokken zou deze repo tegen andermans workspace syncen.
+
+**De hook blokkeert nooit een sessiestart.** Geen API-key, geen git-repo, geen netwerk, een onbereikbare endpoint — alles eindigt op exit 0 met hooguit één regel uitvoer. Wil je weten waaróm er niets gesynct is, zet dan `KANBANTIC_SYNC_DEBUG=1`; de reden gaat naar stderr en de exit-code blijft 0, dus aanzetten verandert nooit gedrag.
+
+### Migratie — had je een eigen hook?
+
+Werkstations die vóór deze versie hun eigen `SessionStart`-sync in `.claude/settings.json` of `settings.local.json` schreven, moeten die entry **verwijderen**. Draaien beide, dan syncen ze bij elke sessiestart om beurten over elkaar heen. Dat is niet destructief — ze schrijven hetzelfde — maar het verdubbelt de opstarttijd en maakt de tijdstempels in het manifest onbruikbaar als diagnose-signaal.
+
+De hook detecteert zo'n entry en meldt hem één keer, met het pad erbij:
+
+```
+[kanbantic-toolkit-sync] a hand-written SessionStart sync is still configured in
+<pad>/.claude/settings.local.json — remove that entry; this hook now ships with the plugin.
+```
+
+Hij past dat bestand **niet** zelf aan. Het zijn jouw instellingen; een hook die ongevraagd andermans configuratie herschrijft richt meer schade aan dan de dubbele sync die hij zou voorkomen.
+
+Let op: een handgeschreven hook die de items via de **REST-API** ophaalde, leverde `category` en `model` als integers aan. Dat is precies hoe elke subagent op het verkeerde model terechtkwam (**KBT-B531**). De meegeleverde hook gebruikt de MCP-endpoint, die de enum-namen al als string levert — daarmee bestaat de mappingstap niet meer, en dus ook niet de plek om hem te vergeten.
+
 ## `filePath` — lokale bestandssubstitutie voor grote content (KBT-F464)
 
 De proxy draait lokaal met filesystem-toegang. Voor tools met een grote `content`-parameter (bijv. `add_wireframe_version` met een 154KB HTML-wireframe) hoeft Claude de inhoud niet langer in zijn context te laden: geef in plaats van `content` een **`filePath`** mee en de proxy resolvet het bestand vóór doorsturen.
