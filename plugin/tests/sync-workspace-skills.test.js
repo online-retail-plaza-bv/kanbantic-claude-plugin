@@ -185,6 +185,119 @@ test('KBT-F437: a model-only change yields an `update` op (not `unchanged`)', ()
 });
 
 // ---------------------------------------------------------------------------
+// KBT-B531 / KBT-TC3403 (Unit) — model normalisation accepts every input shape
+//
+// The REST API serialises the model enum as an integer (0/1/2) where MCP
+// returns the name ("Sonnet"). Before this fix renderFile assumed the caller
+// had already produced an alias, which failed in two independent ways: enum 0
+// (Opus) is falsy and dropped the line entirely, and a numeric value rendered
+// verbatim as `model: 1`. Each case gets its own assertion so a regression
+// points at which of the two defects came back.
+// ---------------------------------------------------------------------------
+
+test('KBT-TC3403: enum 0 (Opus) renders `model: opus` — the falsy value that used to vanish', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Zero Specialist', content: 'x\n', code: 'KBT-SAGN710', model: 0 }));
+  assert.match(body, /\nmodel: opus\n/, 'enum 0 must survive: `||` treated it as absent');
+});
+
+test('KBT-TC3403: enum 1 renders `model: sonnet`', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'One Specialist', content: 'x\n', code: 'KBT-SAGN711', model: 1 }));
+  assert.match(body, /\nmodel: sonnet\n/);
+});
+
+test('KBT-TC3403: enum 2 renders `model: haiku`', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Two Specialist', content: 'x\n', code: 'KBT-SAGN712', model: 2 }));
+  assert.match(body, /\nmodel: haiku\n/);
+});
+
+test('KBT-TC3403: the MCP enum-name form is accepted and lowercased', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Name Specialist', content: 'x\n', code: 'KBT-SAGN713', model: 'Sonnet' }));
+  assert.match(body, /\nmodel: sonnet\n/);
+});
+
+test('KBT-TC3403: an already-normalised alias passes through unchanged (idempotent)', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Idem Specialist', content: 'x\n', code: 'KBT-SAGN714', model: 'sonnet' }));
+  assert.match(body, /\nmodel: sonnet\n/);
+});
+
+test('KBT-TC3403: null and an absent field both yield NO model line', () => {
+  const withNull = sync.renderFile(item({ category: 'Subagent', title: 'Null Specialist', content: 'x\n', code: 'KBT-SAGN715', model: null }));
+  const withNone = sync.renderFile(item({ category: 'Subagent', title: 'None Specialist', content: 'x\n', code: 'KBT-SAGN716' }));
+  assert.doesNotMatch(withNull, /\nmodel:/);
+  assert.doesNotMatch(withNone, /\nmodel:/);
+});
+
+test('KBT-TC3403: an unknown value yields NO model line rather than an invalid alias', () => {
+  const body = sync.renderFile(item({ category: 'Subagent', title: 'Unknown Specialist', content: 'x\n', code: 'KBT-SAGN717', model: 99 }));
+  assert.doesNotMatch(body, /\nmodel:/, 'better no line than a value the loader cannot parse');
+});
+
+test('KBT-TC3403: no input shape can ever put a bare number in the frontmatter', () => {
+  // The property that defines the bug, independent of which integers the enum
+  // happens to use today. If the enum is ever renumbered this assertion still
+  // holds while the per-value ones above would need updating.
+  for (const model of [0, 1, 2, 99, '0', '1', 'Opus', 'sonnet', 'HAIKU', null, undefined, '']) {
+    const body = sync.renderFile(item({ category: 'Subagent', title: 'Sweep Specialist', content: 'x\n', code: 'KBT-SAGN718', model }));
+    assert.doesNotMatch(body, /\nmodel: \d+\n/, `numeric alias leaked for input ${JSON.stringify(model)}`);
+  }
+});
+
+test('KBT-TC3403: normalizeModel is exported and total over its input domain', () => {
+  assert.equal(sync.normalizeModel(0), 'opus');
+  assert.equal(sync.normalizeModel(1), 'sonnet');
+  assert.equal(sync.normalizeModel(2), 'haiku');
+  assert.equal(sync.normalizeModel('  Opus  '), 'opus');
+  assert.equal(sync.normalizeModel(null), '');
+  assert.equal(sync.normalizeModel(undefined), '');
+  assert.equal(sync.normalizeModel(''), '');
+  assert.equal(sync.normalizeModel('fable'), '');
+});
+
+// ---------------------------------------------------------------------------
+// KBT-B531 / KBT-TC3405 (Integration) — the whole script path, not just render
+//
+// renderFile is covered above in isolation. This asserts on the bytes that end
+// up on disk, because the plan layer sits between the two and the bug was only
+// ever visible in the written files.
+// ---------------------------------------------------------------------------
+
+test('KBT-TC3405: a full sync with numeric enums writes valid aliases to disk', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Subagent', title: 'Rest Opus', content: 'a\n', code: 'KBT-SAGN720', model: 0 }),
+      item({ category: 'Subagent', title: 'Rest Sonnet', content: 'b\n', code: 'KBT-SAGN721', model: 1 }),
+      item({ category: 'Subagent', title: 'Rest Haiku', content: 'c\n', code: 'KBT-SAGN722', model: 2 }),
+      item({ category: 'Subagent', title: 'Rest Plain', content: 'd\n', code: 'KBT-SAGN723' }),
+    ];
+    const summary = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    assert.equal(summary.warnings, 0, 'a clean fixture must not produce warnings');
+
+    const read = (slug) => readFileOrNull(path.join(root, '.claude/agents', `${slug}.md`));
+
+    // The Opus item is the one that regressed: the plan layer must not filter
+    // the falsy enum out on its way to disk either.
+    assert.match(read('rest-opus'), /\nmodel: opus\n/);
+    assert.match(read('rest-sonnet'), /\nmodel: sonnet\n/);
+    assert.match(read('rest-haiku'), /\nmodel: haiku\n/);
+    assert.doesNotMatch(read('rest-plain'), /\nmodel:/);
+
+    for (const slug of ['rest-opus', 'rest-sonnet', 'rest-haiku', 'rest-plain']) {
+      assert.doesNotMatch(read(slug), /\nmodel: \d+\n/, `${slug} carries a numeric alias`);
+    }
+
+    // Re-running over the same input must be a no-op: normalisation is stable,
+    // so identical input keeps producing identical bytes.
+    const again = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    assert.equal(again.created, 0);
+    assert.equal(again.updated, 0);
+    assert.equal(again.unchanged, 4);
+  } finally {
+    cleanup(root);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // KBT-TC1933 — fresh-repo sync writes one file per active item
 // ---------------------------------------------------------------------------
 

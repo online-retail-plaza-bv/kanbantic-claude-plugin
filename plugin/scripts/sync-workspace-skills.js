@@ -289,7 +289,15 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
       content: item.content || '',
       // KBT-F437: carry the model preference so renderFile can emit a `model:`
       // frontmatter line. MCP may surface it as `model` or `Model`.
-      model: item.model || item.Model || '',
+      // KBT-B531: normalise here too, not only in renderFile. The plan layer
+      // sits between the caller and the renderer, so an `||` chain at this
+      // point flattens Opus's enum `0` to `''` before renderFile ever sees it —
+      // which is exactly why the unit tests on renderFile passed while the
+      // files on disk were still missing their model line. Normalising here
+      // also means `entry.model` is the alias the source-hash below folds in,
+      // so re-serialising the same model in a different shape (enum `1` vs
+      // "Sonnet") no longer registers as a spurious UPDATE.
+      model: normalizeModel(item.model ?? item.Model),
       targetPath: target,
     };
     slugged.push(entry);
