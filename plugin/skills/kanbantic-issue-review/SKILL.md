@@ -492,9 +492,19 @@ git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionCont
 git push origin main
 ```
 
-**Where `main` is protected** (push-to-main blocked — check the repository's own branch-protection settings): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with body `Closes <ISSUE-CODE>`, let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+**Where `main` is protected** (push-to-main blocked — check the repository's own branch-protection settings): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with title and body stamped with the creating agent's identity (see below), let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
 
-**Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
+**PR-identity stamp (KBT-B538).** GitHub attributes PR authorship to whichever shared, per-repository PAT authenticated the `gh pr create` call (KBT-GTCH086) — it cannot be overridden per-call, and per-agent GitHub accounts don't scale as the agent fleet grows. To make the creating agent visible on GitHub's own PR list anyway, stamp the title and body via `kanbantic-pr-identity-stamp.js` before calling `gh pr create` — do **not** hand-format the `[AgentName]` prefix / `Created by:` footer yourself, the script is the single source of truth for the exact format (and safely no-ops, passing text through unstamped, if identity resolution fails):
+
+```bash
+TITLE="<PR title>"
+BODY="Closes <ISSUE-CODE>"
+STAMPED_TITLE=$(printf '%s' "$TITLE" | node "$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-pr-identity-stamp.js" title)
+STAMPED_BODY=$(printf '%s' "$BODY" | node "$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-pr-identity-stamp.js" body)
+gh pr create --title "$STAMPED_TITLE" --body "$STAMPED_BODY"
+```
+
+**Multi-repo Epics (KBT-F588):** when an Epic touches several repos (e.g. KBT-E102 spans 4), there is one epic-integration branch **per touched repo** and therefore **N PRs**, each stamped and with body `Closes <ISSUE-CODE>`. T3-CI runs per repo-PR; the Epic reaches `InDeployment` only when **all** N PRs are merged. The golf-barrier (§5.1) is defined on Feature-dependencies regardless of which repo each Feature lives in.
 
 Include the Version name (`versionContext` from Step 1b) in the merge commit summary so the merge-historie ties the change to its version-milestone (KBT-F318). For a backlog issue (`versionContext == "—"`) omit the parenthetical.
 
