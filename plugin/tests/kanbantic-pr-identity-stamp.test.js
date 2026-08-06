@@ -37,10 +37,17 @@ test('unit: stampTitle prefixes with [agentName]', () => {
   assert.equal(stampTitle('Fix the thing', 'Axon 04'), '[Axon 04] Fix the thing');
 });
 
-test('unit: stampTitle is idempotent — already-bracket-prefixed title left unchanged', () => {
+test('unit: stampTitle is idempotent — title already carrying THIS agent\'s own stamp is left unchanged', () => {
   assert.equal(stampTitle('[Axon 04] Fix the thing', 'Axon 04'), '[Axon 04] Fix the thing');
-  // even a different agent's prefix is not double-stamped
-  assert.equal(stampTitle('[Axon 03] Fix the thing', 'Axon 04'), '[Axon 03] Fix the thing');
+});
+
+test('unit: stampTitle does not mistake an unrelated bracket-prefixed title for an existing stamp', () => {
+  // regression: a shape-only idempotency check (any [x] prefix) would wrongly
+  // treat these as already-stamped and silently skip stamping them.
+  assert.equal(stampTitle('[skip ci] Fix flaky test', 'Axon 04'), '[Axon 04] [skip ci] Fix flaky test');
+  assert.equal(stampTitle('[WIP] Draft change', 'Axon 04'), '[Axon 04] [WIP] Draft change');
+  // a different agent's own stamp is not mistaken for this agent's stamp either
+  assert.equal(stampTitle('[Axon 03] Fix the thing', 'Axon 04'), '[Axon 04] [Axon 03] Fix the thing');
 });
 
 test('unit: stampBody appends a Created-by footer to a non-empty body', () => {

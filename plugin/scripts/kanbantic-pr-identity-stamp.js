@@ -186,13 +186,18 @@ async function resolveAgentName() {
 // Pure stamping helpers — no network, safe to unit-test in-process.
 // Idempotent: re-stamping already-stamped text is a no-op, so a retried
 // `gh pr create` (or a second pipeline run) never compounds the stamp.
+//
+// The idempotency check is tied to THIS agent's own resolved name, not any
+// bracket-shaped prefix — a shape-only check (e.g. /^\[.+?\]\s/) would
+// mistake an unrelated bracket-prefixed title ("[skip ci] ...", "[WIP] ...")
+// for an existing stamp and silently skip stamping it.
 // ---------------------------------------------------------------------------
-const TITLE_PREFIX_RE = /^\[.+?\]\s/;
 const BODY_FOOTER_MARKER = 'Created by:';
 
 function stampTitle(title, agentName) {
-  if (TITLE_PREFIX_RE.test(title)) return title;
-  return `[${agentName}] ${title}`;
+  const prefix = `[${agentName}] `;
+  if (title.startsWith(prefix)) return title;
+  return `${prefix}${title}`;
 }
 
 function stampBody(body, agentName) {
