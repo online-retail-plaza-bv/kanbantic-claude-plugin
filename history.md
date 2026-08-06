@@ -740,3 +740,5 @@ No code changes — `kanbantic-mcp-proxy.js` is unchanged and still the primary 
 
 ### Takeaway
 Recommend the community/Anthropic‑maintained tool (`mcp-remote`) when the user's host doesn't give us plugin‑resolved paths. The bundled proxy is only worth it when we control the path resolution (Claude Code plugin system). For every other host, `npx -y mcp-remote@latest` is simpler and more robust.
+
+<!-- KBT-B538 E2E verification scratch commit, PR will be closed without merging -->
