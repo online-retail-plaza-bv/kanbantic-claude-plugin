@@ -9,6 +9,8 @@ description: "Use after kanbantic-issue-execute marks an issue Review (or to run
 
 > **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
 
+> **Kanbantic bedienen (KBT-F623).** `$CLAUDE_PLUGIN_ROOT/reference/using-kanbantic.md` bundelt de valkuilen van de MCP-tools en de lane-workflow — geldig in élke workspace. Voor deze lane: **welke gates objectief/non-overridable zijn** versus judgement-gates die een `overrideReason` accepteren, **`InDeployment` is niet `Done`** (Done pas ná deploy-verificatie), **`approve_review` checkt alleen dát er een rij bestaat** — approver ≠ assignee wordt niet afgedwongen, dus self-approve wint de gate — en de **merge-step heeft een eigen detached-HEAD-worktree nodig** wanneer de hoofd-clone `main` al checked-out heeft. Lees het bij een onverwachte fout op deze oppervlakken.
+
 ## Overview
 
 Complete the Review → InDeployment lane transition (per KBT-RL053; backend auto-promotes to Done on merge or remains InDeployment until deploy-gate clears, KBT-F236). This skill:

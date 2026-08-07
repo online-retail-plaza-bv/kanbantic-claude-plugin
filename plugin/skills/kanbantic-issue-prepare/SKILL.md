@@ -9,6 +9,8 @@ description: "Use after kanbantic-issue-triage marks an issue Triaged. Consolida
 
 > **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
 
+> **Kanbantic bedienen (KBT-F623).** `$CLAUDE_PLUGIN_ROOT/reference/using-kanbantic.md` bundelt de valkuilen van de MCP-tools en de lane-workflow — geldig in élke workspace. Voor deze lane: **`update_specification` vereist altijd `content`** (ook bij alleen een statuswijziging), **een user story approven vraagt een Passed E2E op de story zélf** (niet op het issue), **alleen Epics krijgen een Implementation Plan**, en de **test-policy vs. `TestLevelDiversity`**-interactie (N.v.t. + de 500-tekengrens op `notApplicableReason`). Lees het bij een onverwachte fout op deze oppervlakken.
+
 ## Overview
 
 `kanbantic-issue-prepare` works a Triaged issue all the way to a first-class **`Ready`** status (KBT-F235; renamed from `Prepared` in KBT-E103/v3). It is the **single entry point** for the Triaged → Ready lane transition — regardless of whether the issue is a Feature, Bug, or Epic. Internally it dispatches on `issue.type` so the user never has to choose a sub-skill.
