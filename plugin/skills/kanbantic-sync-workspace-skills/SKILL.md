@@ -36,7 +36,9 @@ The skill writes only to:
 | `.claude/commands/<slug>.md` | Mirror for Toolkit category `Skill` |
 | `.claude/agents/<slug>.md`   | Mirror for Toolkit category `Subagent` |
 | `.kanbantic-sync.json`       | Manifest with source/target SHA-256 hashes |
-| `.gitignore`                 | Appends the three patterns above when missing |
+| `.gitignore`                 | Appends the three patterns above when they are not already ignored |
+
+`.gitignore` is only touched when a path is genuinely **not covered** — the check runs `git check-ignore` per pattern rather than looking for the literal string (**KBT-B540**). A repo with a blanket `.claude/` rule already ignores both mirror directories, so nothing is appended and the tracked `.gitignore` stays out of your diff. Outside a git working tree the older literal check still applies as a fallback.
 
 `Command` toolkit-items are **NOT** materialized to disk — per **KBT-BD086** they are reference-only snippets (single shell-command + one-line uitleg), not invocable slash-commands. To read a Command's content, an agent calls `mcp__kanbantic__list_toolkit_items(workspaceId, category: "Command")` directly. Materializing them under `.claude/commands/` would make Claude Code's command-loader expose them as `/foo`-style commands, which is semantically wrong and pollutes the slash-command namespace (the regression that motivated KBT-B250).
 
@@ -224,3 +226,4 @@ For each manifest entry whose slug is no longer in the active toolkit-items list
 - **KBT-TC1967 / 1968 / 1969** — Regression tests for the Command-skip behavior (v2.5.1).
 - **KBT-B489** — Completeness guard: an item list that does not account for every manifest entry aborts instead of deleting mirrors. Test case **KBT-TC3304**.
 - **KBT-B491** — `category` is normalised from both the enum name (MCP) and the enum integer (REST); an unrecognised value aborts instead of being skipped. Test case **KBT-TC3308**. Follows the pattern **KBT-B531** established for `model`.
+- **KBT-B540** — `.gitignore` completion is a coverage check via `git check-ignore`, not a literal string search, so a blanket rule no longer causes a repeat append.

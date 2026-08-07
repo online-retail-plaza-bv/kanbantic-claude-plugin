@@ -40,6 +40,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -774,13 +775,69 @@ function writeFileSafe(absPath, body) {
 }
 
 /**
- * Ensure the .gitignore file lists `.claude/commands/`, `.claude/agents/`,
- * and `.kanbantic-sync.json`. Creates the file if missing; appends only the
- * missing entries.
+ * The patterns this script keeps ignored, each with a representative path used
+ * to ask git whether the pattern's subject is ALREADY covered (KBT-B540).
+ *
+ * The probe filenames need not exist — `git check-ignore` answers from the
+ * ignore rules alone, purely on the path string.
+ */
+const GITIGNORE_PATTERNS = [
+  { pattern: '.claude/commands/', probe: '.claude/commands/kanbantic-probe.md' },
+  { pattern: '.claude/agents/', probe: '.claude/agents/kanbantic-probe.md' },
+  { pattern: '.kanbantic-sync.json', probe: '.kanbantic-sync.json' },
+];
+
+/**
+ * Ask git whether `probePath` is already ignored inside `rootDir`.
+ *
+ * Returns true (ignored), false (not ignored), or null when git could not
+ * answer — no git on PATH, or `rootDir` is not a real working tree. Callers
+ * must treat null as "no opinion" and fall back to the literal check.
+ *
+ * `--no-index` is deliberate: the question is whether the ignore RULES cover
+ * this path, not whether the path happens to be tracked today. Without it a
+ * tracked `.kanbantic-sync.json` would report as "not ignored" and we would
+ * append a pattern that cannot untrack it anyway.
+ */
+function gitIgnoresPath(rootDir, probePath) {
+  let r;
+  try {
+    r = spawnSync('git', ['check-ignore', '--no-index', '-q', '--', probePath], {
+      cwd: rootDir,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch (_) {
+    return null;
+  }
+  if (!r || r.error) return null;
+  if (r.status === 0) return true;   // ignored
+  if (r.status === 1) return false;  // not ignored
+  return null;                       // 128 (not a repo) or anything else
+}
+
+/**
+ * Ensure `.claude/commands/`, `.claude/agents/` and `.kanbantic-sync.json` are
+ * ignored. Creates the file if missing; appends only what is genuinely missing.
+ *
+ * KBT-B540: "missing" is a COVERAGE question, not a string-membership one. The
+ * original check was `want.filter(p => !trimmed.includes(p))`, so a repo with a
+ * blanket `.claude/` rule — which already ignores both mirror directories — did
+ * not contain the literal strings and got the block appended again. `.gitignore`
+ * is tracked, so every fresh clone that synced for the first time produced that
+ * diff in whatever branch happened to be checked out.
+ *
+ * Delegating to `git check-ignore` uses git's own matching, which means blanket
+ * rules, negations, nested `.gitignore` files and `.git/info/exclude` are all
+ * handled for free — none of which a hand-rolled matcher would get right without
+ * reimplementing gitignore semantics (ordering, negation, directory-only,
+ * globstar).
+ *
+ * When git cannot answer we fall back to the original literal check, so the
+ * behaviour outside a working tree is exactly what it was before.
  */
 function ensureGitignore(rootDir) {
   const file = path.join(rootDir, '.gitignore');
-  const want = ['.claude/commands/', '.claude/agents/', '.kanbantic-sync.json'];
   let existing = '';
   try {
     existing = fs.readFileSync(file, 'utf8');
@@ -790,7 +847,15 @@ function ensureGitignore(rootDir) {
   // Split into lines, ignoring leading/trailing whitespace per line.
   const lines = existing.split(/\r?\n/);
   const trimmed = lines.map(l => l.trim());
-  const toAdd = want.filter(p => !trimmed.includes(p));
+  const toAdd = [];
+  for (const { pattern, probe } of GITIGNORE_PATTERNS) {
+    // Literal hit first: cheap, and it guarantees we never duplicate a line we
+    // can already see — whatever git thinks of it.
+    if (trimmed.includes(pattern)) continue;
+    // KBT-B540: not written literally, but possibly already covered.
+    if (gitIgnoresPath(rootDir, probe) === true) continue;
+    toAdd.push(pattern);
+  }
   if (toAdd.length === 0) return;
   let next = existing;
   if (next.length > 0 && !next.endsWith('\n')) next += '\n';
@@ -1035,6 +1100,7 @@ module.exports = {
   sha256,
   normalizeModel,
   normalizeCategory,
+  gitIgnoresPath,
   renderFile,
   buildPlan,
   applyPlan,

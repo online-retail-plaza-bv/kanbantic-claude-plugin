@@ -985,7 +985,7 @@ test('KBT-TC3322 (CLI E2E): every generated agent file is loadable — name == b
 });
 
 // ---------------------------------------------------------------------------
-// KBT-B489 / KBT-B491 — input validation before any write
+// KBT-B489 / KBT-B491 / KBT-B540 — input validation + gitignore coverage
 //
 //   KBT-TC3304 (Integration) — an incomplete item list aborts before any write;
 //                              a complete list still syncs; a genuine
@@ -993,7 +993,20 @@ test('KBT-TC3322 (CLI E2E): every generated agent file is loadable — name == b
 //   KBT-TC3308 (Integration) — integer-shaped `category` (raw REST output) is
 //                              normalised; an unrecognised category aborts
 //                              before any write.
+//   KBT-B540   (Integration) — .gitignore is left alone when a broader rule
+//                              already covers the mirror paths.
 // ---------------------------------------------------------------------------
+
+/** A tmp root that is a REAL git working tree (needed for `git check-ignore`). */
+function mkGitRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b540-'));
+  const r = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' });
+  if (r.error || r.status !== 0) {
+    cleanup(dir);
+    return null; // git unavailable — caller skips
+  }
+  return dir;
+}
 
 // --- KBT-B491 / KBT-TC3308 -------------------------------------------------
 
@@ -1369,5 +1382,86 @@ test('KBT-TC3304 (CLI): an incomplete list exits 2 and names the missing slugs',
     assert.match(r2.stdout, /deleted=0/);
   } finally {
     cleanup(root);
+  }
+});
+
+// --- KBT-B540 --------------------------------------------------------------
+
+test('KBT-B540: a blanket .claude/ rule already covers the mirror dirs — .gitignore is left alone', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    // Exactly the shape from the bug report: a blanket rule, no literal
+    // per-directory patterns, plus the manifest listed on its own.
+    const gitignorePath = path.join(root, '.gitignore');
+    const original = 'node_modules/\n.claude/\n.kanbantic-sync.json\n';
+    fs.writeFileSync(gitignorePath, original, 'utf8');
+
+    sync.runSync({
+      rootDir: root,
+      items: [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })],
+      workspace: 'kanbantic', now: FIXED_NOW,
+    });
+
+    assert.equal(fs.readFileSync(gitignorePath, 'utf8'), original,
+      '.gitignore must be byte-identical when a broader rule already covers the paths');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: only the genuinely uncovered pattern is appended', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    // `.claude/` covers both mirror dirs; the manifest is NOT covered.
+    fs.writeFileSync(gitignorePath, '.claude/\n', 'utf8');
+
+    sync.runSync({
+      rootDir: root,
+      items: [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })],
+      workspace: 'kanbantic', now: FIXED_NOW,
+    });
+
+    const gi = fs.readFileSync(gitignorePath, 'utf8');
+    assert.match(gi, /^\.kanbantic-sync\.json$/m, 'the uncovered pattern is appended');
+    assert.doesNotMatch(gi, /^\.claude\/commands\/$/m, 'a covered pattern is not re-added');
+    assert.doesNotMatch(gi, /^\.claude\/agents\/$/m, 'a covered pattern is not re-added');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: a repo with NO coverage still gets all three patterns, and re-runs stay idempotent', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    fs.writeFileSync(gitignorePath, 'node_modules/\n', 'utf8');
+    const items = [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })];
+
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const after1 = fs.readFileSync(gitignorePath, 'utf8');
+    assert.match(after1, /^\.claude\/commands\/$/m);
+    assert.match(after1, /^\.claude\/agents\/$/m);
+    assert.match(after1, /^\.kanbantic-sync\.json$/m);
+
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    assert.equal(fs.readFileSync(gitignorePath, 'utf8'), after1,
+      'a second run must not append anything');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: gitIgnoresPath returns null (no opinion) outside a git working tree', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b540-nogit-'));
+  try {
+    // No opinion => ensureGitignore falls back to the original literal check, so
+    // behaviour outside a working tree is exactly what it was before.
+    assert.equal(sync.gitIgnoresPath(dir, '.kanbantic-sync.json'), null);
+  } finally {
+    cleanup(dir);
   }
 });
