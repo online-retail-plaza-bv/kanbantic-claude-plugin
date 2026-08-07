@@ -25,6 +25,7 @@ This skill owns the **InProgress → Review** transition. It does NOT merge, clo
 
 ## Checklist
 
+0. **Refresh Toolkit mirrors** — re-run the plugin's toolkit-sync so mid-session Toolkit changes are picked up before the work starts (Step 0c, fail-safe, KBT-F622)
 1. **Gate-check** — verify issue is `Ready` (preferred) or `Triaged` + ready to claim (legacy) (HARD GATE)
 1.5. **Version claim-gate** — issue's Application MUST have a Planned Version, else block the claim with a clear error + `preview_next_version` suggestion (HARD GATE, KBT-F318 / KBT-RL145)
 2. **Claim issue** — atomically sets status to InProgress + records branch (single MCP call, KBT-RL052); auto-assigns the Planned Version
@@ -151,6 +152,39 @@ Capture `sessionId` — reused by `set_current_issue` later, no second `register
 - If no repository is configured in the workspace, skip 0b and proceed — not all work requires code access.
 - If no credential is configured, tell the user: "No repository credential found. Configure a PAT token via Workspace → Repositories → Credentials in the Kanbantic UI."
 - If the repo is already cloned, run `git pull` to get the latest code. Branch creation happens in Step 2.
+</IMPORTANT>
+
+**0c. Refresh the Toolkit mirrors (KBT-F622 / KBT-T3985).** The same sync that
+runs at session start (KBT-F637) runs once more here:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/hooks/session-start-toolkit-sync.js"
+```
+
+**Why again, when SessionStart already did it.** A session outlives the Toolkit.
+Another agent adds a Gotcha, a Skill gets corrected, a Subagent's model changes —
+all while this session is running. Without this call you execute the whole issue
+against the Toolkit as it was when the session opened, which on a long autopilot
+run can be hours stale. Step 0 is the right moment because it is the last point
+before `claim_issue` makes this agent the owner of the work.
+
+**Why re-running is cheap.** The sync is manifest-driven (`.kanbantic-sync.json`,
+KBT-F265): it hashes each source item against the mirror and writes only what
+actually changed. An unchanged Toolkit produces `created=0 updated=0` and no
+file writes — so "trigger on a changed Toolkit" needs no separate change-check,
+the sync *is* the check.
+
+<IMPORTANT>
+- **Fail-safe, exactly like the SessionStart hook (KBT-BD206).** Every failure
+  path exits 0 — no API key, no network, an unparseable answer. If it fails,
+  note it and continue with the mirrors you have. Do NOT treat a failed sync as
+  a blocked step: KBT-RL191's fail-not-skip guards gates that enforce the
+  correctness of *work*; this one costs at most mirrors that are one session
+  out of date, and blocking execution over it is the more expensive mistake.
+- Skip silently when `$CLAUDE_PLUGIN_ROOT` is unset (running outside the plugin,
+  e.g. a bare MCP client) — there is nothing to run.
+- Set `KANBANTIC_SYNC_DEBUG=1` if you need to know *why* a sync skipped; it
+  writes the reason to stderr and never changes the exit code.
 </IMPORTANT>
 
 ## Step 0.5: Worktree HARD-GATE (context-aware)
