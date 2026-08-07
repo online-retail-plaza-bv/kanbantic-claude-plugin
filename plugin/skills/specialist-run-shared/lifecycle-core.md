@@ -8,6 +8,13 @@ reference this file via `$CLAUDE_PLUGIN_ROOT/skills/specialist-run-shared/lifecy
 
 Implements: KBT-PR255, KBT-SR418, KBT-SR419, KBT-RL100, KBT-RL101, KBT-BD125 (Issue KBT-F382).
 
+> **Jij bent de executor (KBT-F623).** Start je een run via `start_specialist_run`, dan **ben je al
+> Claude** en heb je alle MCP-tools die de specialist nodig heeft — voer de analyse zelf uit (of via
+> je subagent, Step 3a). Gebruik **niet** de backend-`SpecialistExecutionService`: die doet een aparte
+> Claude-API-call, is fragiel (API-key-config, HttpClient-timeouts, lange system prompts) en faalt
+> regelmatig stil. Meer valkuilen rond het bedienen van Kanbantic zelf:
+> `$CLAUDE_PLUGIN_ROOT/reference/using-kanbantic.md`.
+
 ## Inputs the wrapper supplies
 
 Each wrapper provides four values before invoking this core:

@@ -9,6 +9,8 @@ description: "Use when a Kanbantic issue needs to be implemented (status Ready �
 
 > **UI-contract & wireframe-getrouwheid (KBT-F627).** Voor UI-issues geldt het gedeelde referentiekader **Read and follow exactly**: `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md` — contract-formaat, attachment-conventies, conformiteitsregels (element-voor-element, nooit pixel-diff) en de `n.v.t. (geen UI)`-opt-out. Do not duplicate that logic here.
 
+> **Kanbantic bedienen (KBT-F623).** `$CLAUDE_PLUGIN_ROOT/reference/using-kanbantic.md` bundelt de valkuilen van de MCP-tools en de lane-workflow — geldig in élke workspace. Voor deze lane: **`isReadyToClaim` is afgeleid van de status** (nooit zelf zetten), **claimen kan alleen vanuit `Ready`** — een directe `update_issue_status → InProgress` faalt op `MissingAssignee`, de bekende **`claim_issue`-500 zonder expliciete `versionId`** (KBT-B443, conditioneel), en **`EnterWorktree` weigert in een subagent** (gebruik `isolation: "worktree"` op de Agent-tool). Lees het bij een onverwachte fout op deze oppervlakken.
+
 ## Overview
 
 Execute implementation work for any issue type. Handles two modes:
