@@ -33,12 +33,14 @@
 // Exit codes (CLI mode):
 //   0 — sync completed (NEW/UPDATE/UNCHANGED/DELETED summary printed).
 //   1 — drift refused (local-edit detected without --force) OR slug-collision.
-//   2 — infrastructure (no git repo / unreadable input / fs error).
+//   2 — infrastructure (no git repo / unreadable input / fs error) OR a
+//       rejected input (unrecognised category / incomplete item list).
 //
 
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -68,10 +70,84 @@ function slugify(title) {
 }
 
 /**
+ * Toolkit-item categories, keyed by every input shape a caller can realistically
+ * hand us:
+ *
+ *   - the enum **integer** — what `GET /api/app/toolkit-item` returns;
+ *   - the enum **name** — what the MCP `list_toolkit_items` tool returns, in any
+ *     casing.
+ *
+ * KBT-B491: this mirrors what KBT-B531 did for `model`, and for the same reason.
+ * Normalising in the renderer rather than at the call-site is deliberate: there
+ * is no single caller — every workstation that drives the sync brings its own
+ * fetch layer, and each one would otherwise have to rebuild this mapping from
+ * scratch. Doing it once, here, protects the callers that exist and the ones
+ * still to be written. Before this, raw REST output matched no category at all:
+ * every item was skipped and — with a manifest present — the entire mirror set
+ * was then reported as deleted.
+ *
+ * The integer values follow the enum's declaration order as documented on
+ * `list_toolkit_items` (ClaudeMd, Skill, Command, Pattern, Gotcha, Rule,
+ * Subagent, Custom). Only `1 = Skill` and `6 = Subagent` are field-verified
+ * (KBT-B491 cross-validated 12 Subagents against the MCP output), and only
+ * those two change behaviour — every other category resolves to "no on-disk
+ * target" regardless of which name it carries. The remaining entries exist so a
+ * legitimate non-materializable item is *recognised* and skipped quietly rather
+ * than tripping the unrecognised-category abort below.
+ *
+ * `RepoContext` has no integer here on purpose: it is named in this file's
+ * original category list but not in the MCP tool's documented enum, so its
+ * ordinal is unknown. Keeping the string alias means that if it does exist, an
+ * MCP-shaped item carrying it never aborts a sync.
+ */
+const CATEGORY_ALIASES = {
+  0: 'ClaudeMd',
+  1: 'Skill',
+  2: 'Command',
+  3: 'Pattern',
+  4: 'Gotcha',
+  5: 'Rule',
+  6: 'Subagent',
+  7: 'Custom',
+  claudemd: 'ClaudeMd',
+  skill: 'Skill',
+  command: 'Command',
+  pattern: 'Pattern',
+  gotcha: 'Gotcha',
+  rule: 'Rule',
+  subagent: 'Subagent',
+  custom: 'Custom',
+  repocontext: 'RepoContext',
+};
+
+/**
+ * Normalise a toolkit item's category to its canonical enum name.
+ *
+ * Returns `null` for anything not in CATEGORY_ALIASES — including a missing or
+ * empty category. Callers MUST treat that null as an input error rather than as
+ * "skip this one": silently skipping unrecognised categories is precisely the
+ * failure mode KBT-B491 describes, because the skipped items then look
+ * deactivated and their mirrors get deleted.
+ *
+ * Note the `== null` guard rather than a truthiness test. ClaudeMd is enum `0`,
+ * which is falsy in JavaScript — the same trap that cost Opus its model line in
+ * KBT-B531. It changes no behaviour here (ClaudeMd has no on-disk target either
+ * way), but getting it wrong would turn a recognised category into a hard abort.
+ */
+function normalizeCategory(raw) {
+  if (raw == null || raw === '') return null;
+  const key = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  return CATEGORY_ALIASES[key] ?? null;
+}
+
+/**
  * Decide the on-disk target path for a toolkit item of the given category.
  *
  * - Skill     → .claude/commands/<slug>.md
  * - Subagent  → .claude/agents/<slug>.md
+ *
+ * Accepts either input shape for `category` (enum name or enum integer) via
+ * normalizeCategory — see KBT-B491.
  *
  * Returns null for an unknown or non-materializable category.
  *
@@ -89,10 +165,11 @@ function slugify(title) {
  * caller, targetPathFor still refuses to assign Command items a target path.
  */
 function targetPathFor(category, slug) {
-  if (category === 'Skill') {
+  const canonical = normalizeCategory(category);
+  if (canonical === 'Skill') {
     return path.posix.join('.claude', 'commands', `${slug}.md`);
   }
-  if (category === 'Subagent') {
+  if (canonical === 'Subagent') {
     return path.posix.join('.claude', 'agents', `${slug}.md`);
   }
   return null;
@@ -251,15 +328,52 @@ function renderFile(item) {
  *              targetPath, body, prevTargetHash, reason }],
  *     collisions: [{ slug, items: [{code, title, category}] }],
  *     localEdits: [{ slug, targetPath, expectedHash, actualHash }],
+ *     unknownCategories: [{ code, title, category, type }],
+ *     missingFromInput: [{ slug, category, sourceCode, targetPath }],
  *   }
  *
  * `op` is one of: 'create', 'update', 'unchanged', 'delete', 'restore',
  * 'skip-local-edit', 'force-overwrite', 'force-delete'.
  *
+ * `unknownCategories` and `missingFromInput` are the two input-validation
+ * rejections (KBT-B491 / KBT-B489). When either is non-empty the returned plan
+ * is deliberately EMPTY: runSync turns them into a SyncError, so the caller
+ * aborts before applyPlan touches a single file — the same shape the existing
+ * slug-collision check already uses.
+ *
  * Pure function over `{ items, prevManifest, diskHashes, options }`.
  */
 function buildPlan({ items, prevManifest, diskHashes, options }) {
   const force = !!(options && options.force);
+  const prevEntries = prevManifest && Array.isArray(prevManifest.items) ? prevManifest.items : [];
+
+  // -------- 0. Category validation on ACTIVE items (KBT-B491) --------------
+  // Runs before everything else: if we cannot tell what an item IS, no other
+  // conclusion drawn from the list can be trusted either. An unrecognised
+  // category used to be indistinguishable from "not a mirror category", so raw
+  // REST output (integer enums) skipped every item and then deleted every
+  // mirror. Note this checks ACTIVE items only — a deactivated item is on its
+  // way out regardless of how its category is spelled.
+  //
+  // KBT-TC3308: a partially recognised list aborts just as hard as a fully
+  // unrecognised one. Since normalizeCategory now accepts both the enum name
+  // and the enum integer, a list mixing the two shapes is fully recognised and
+  // syncs normally — "mixed" only aborts when something is left over that we
+  // genuinely cannot place.
+  const unknownCategories = [];
+  for (const item of items) {
+    if (!item || item.isActive === false) continue;
+    if (normalizeCategory(item.category) !== null) continue;
+    unknownCategories.push({
+      code: item.code || '<no-code>',
+      title: item.title || '',
+      category: item.category,
+      type: item.category === null ? 'null' : typeof item.category,
+    });
+  }
+  if (unknownCategories.length > 0) {
+    return { plan: [], collisions: [], localEdits: [], unknownCategories, missingFromInput: [] };
+  }
 
   // -------- 1. Slug computation + collision check on ACTIVE items ----------
   const slugged = [];
@@ -268,10 +382,13 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
     if (!item || item.isActive === false) continue;
     // KBT-B250: skip categories that don't materialize to disk (e.g. Command —
     // reference-only snippets per KBT-BD086, plus ClaudeMd/Pattern/Gotcha/Rule/
-    // RepoContext/Custom which have no on-disk target). This filter runs
-    // BEFORE slug-validation so a non-materializable item with an empty-slug
-    // title cannot produce a spurious EMPTY_SLUG error.
-    if (item.category !== 'Skill' && item.category !== 'Subagent') continue;
+    // Custom which have no on-disk target). This filter runs BEFORE
+    // slug-validation so a non-materializable item with an empty-slug title
+    // cannot produce a spurious EMPTY_SLUG error.
+    // KBT-B491: compare against the NORMALISED category so an integer-shaped
+    // `category` routes the same as its enum name.
+    const category = normalizeCategory(item.category);
+    if (category !== 'Skill' && category !== 'Subagent') continue;
     const slug = slugify(item.title || '');
     if (!slug) {
       throw new SyncError(
@@ -279,10 +396,13 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
         `Toolkit item ${item.code || '<no-code>'} title "${item.title}" produced an empty slug. Rename the toolkit item or set isActive: false.`
       );
     }
-    const target = targetPathFor(item.category, slug);
+    const target = targetPathFor(category, slug);
     if (!target) continue; // ignore unrelated categories (defense-in-depth — buildPlan filter above is primary)
     const entry = {
-      slug, category: item.category,
+      // KBT-B491: the CANONICAL category travels onward, so renderFile's
+      // `category === 'Subagent'` check and the manifest both see the enum name
+      // whichever shape the caller supplied.
+      slug, category,
       sourceId: item.id || '',
       sourceCode: item.code || '',
       title: item.title || '',
@@ -314,14 +434,59 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
     }
   }
   if (collisions.length > 0) {
-    return { plan: [], collisions, localEdits: [] };
+    return { plan: [], collisions, localEdits: [], unknownCategories: [], missingFromInput: [] };
+  }
+
+  // -------- 1b. Completeness guard on the input list (KBT-B489) ------------
+  // Step 3 below turns every manifest entry whose slug is absent from the input
+  // into a `delete`. That is correct for an item the user deactivated, and
+  // catastrophic for an item the caller merely forgot to fetch — and the two are
+  // indistinguishable once you only look at the ACTIVE items. The input is
+  // assembled by an agent from separate `list_toolkit_items` calls that honour
+  // `maxResults`, so a short list is a routine accident, not an exotic one: a
+  // real near-miss returned 200 of 224 items and would have deleted two live
+  // subagent mirrors, reported as a plain `deleted=2`.
+  //
+  // The distinction we can make is this: a deactivation still SHOWS UP in the
+  // input (carrying `isActive: false`), whereas an item that was never fetched
+  // is absent entirely. So a manifest entry is accounted for when the input
+  // mentions it at all — by slug, by source id, or by source code, active or
+  // not. Matching on id/code as well as slug keeps a renamed toolkit item (new
+  // title ⇒ new slug) from reading as a disappearance.
+  //
+  // `--force` bypasses this, because an item HARD-deleted from the Toolkit is
+  // genuinely absent from every future input and its mirror must still be able
+  // to go away.
+  const missingFromInput = [];
+  if (!force && prevEntries.length > 0) {
+    const inputSlugs = new Set();
+    const inputIds = new Set();
+    const inputCodes = new Set();
+    for (const item of items) {
+      if (!item) continue;
+      const s = slugify(item.title || '');
+      if (s) inputSlugs.add(s);
+      if (item.id) inputIds.add(String(item.id));
+      if (item.code) inputCodes.add(String(item.code));
+    }
+    for (const prev of prevEntries) {
+      if (inputSlugs.has(prev.slug)) continue;
+      if (prev.sourceId && inputIds.has(String(prev.sourceId))) continue;
+      if (prev.sourceCode && inputCodes.has(String(prev.sourceCode))) continue;
+      missingFromInput.push({
+        slug: prev.slug,
+        category: prev.category,
+        sourceCode: prev.sourceCode || '',
+        targetPath: prev.targetPath,
+      });
+    }
+  }
+  if (missingFromInput.length > 0) {
+    return { plan: [], collisions: [], localEdits: [], unknownCategories: [], missingFromInput };
   }
 
   // -------- 2. Build plan entries for each active item ---------------------
-  const prevByEntrySlug = new Map(
-    (prevManifest && Array.isArray(prevManifest.items) ? prevManifest.items : [])
-      .map(e => [e.slug, e])
-  );
+  const prevByEntrySlug = new Map(prevEntries.map(e => [e.slug, e]));
   const plan = [];
   const localEdits = [];
   const seenSlugs = new Set();
@@ -388,7 +553,6 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
   }
 
   // -------- 3. Handle deletions (manifest entries no longer active) --------
-  const prevEntries = prevManifest && Array.isArray(prevManifest.items) ? prevManifest.items : [];
   for (const prev of prevEntries) {
     if (seenSlugs.has(prev.slug)) continue;
     const onDisk = diskHashes[prev.targetPath];
@@ -435,7 +599,7 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
     });
   }
 
-  return { plan, collisions: [], localEdits };
+  return { plan, collisions: [], localEdits, unknownCategories: [], missingFromInput: [] };
 }
 
 /**
@@ -611,13 +775,69 @@ function writeFileSafe(absPath, body) {
 }
 
 /**
- * Ensure the .gitignore file lists `.claude/commands/`, `.claude/agents/`,
- * and `.kanbantic-sync.json`. Creates the file if missing; appends only the
- * missing entries.
+ * The patterns this script keeps ignored, each with a representative path used
+ * to ask git whether the pattern's subject is ALREADY covered (KBT-B540).
+ *
+ * The probe filenames need not exist — `git check-ignore` answers from the
+ * ignore rules alone, purely on the path string.
+ */
+const GITIGNORE_PATTERNS = [
+  { pattern: '.claude/commands/', probe: '.claude/commands/kanbantic-probe.md' },
+  { pattern: '.claude/agents/', probe: '.claude/agents/kanbantic-probe.md' },
+  { pattern: '.kanbantic-sync.json', probe: '.kanbantic-sync.json' },
+];
+
+/**
+ * Ask git whether `probePath` is already ignored inside `rootDir`.
+ *
+ * Returns true (ignored), false (not ignored), or null when git could not
+ * answer — no git on PATH, or `rootDir` is not a real working tree. Callers
+ * must treat null as "no opinion" and fall back to the literal check.
+ *
+ * `--no-index` is deliberate: the question is whether the ignore RULES cover
+ * this path, not whether the path happens to be tracked today. Without it a
+ * tracked `.kanbantic-sync.json` would report as "not ignored" and we would
+ * append a pattern that cannot untrack it anyway.
+ */
+function gitIgnoresPath(rootDir, probePath) {
+  let r;
+  try {
+    r = spawnSync('git', ['check-ignore', '--no-index', '-q', '--', probePath], {
+      cwd: rootDir,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch (_) {
+    return null;
+  }
+  if (!r || r.error) return null;
+  if (r.status === 0) return true;   // ignored
+  if (r.status === 1) return false;  // not ignored
+  return null;                       // 128 (not a repo) or anything else
+}
+
+/**
+ * Ensure `.claude/commands/`, `.claude/agents/` and `.kanbantic-sync.json` are
+ * ignored. Creates the file if missing; appends only what is genuinely missing.
+ *
+ * KBT-B540: "missing" is a COVERAGE question, not a string-membership one. The
+ * original check was `want.filter(p => !trimmed.includes(p))`, so a repo with a
+ * blanket `.claude/` rule — which already ignores both mirror directories — did
+ * not contain the literal strings and got the block appended again. `.gitignore`
+ * is tracked, so every fresh clone that synced for the first time produced that
+ * diff in whatever branch happened to be checked out.
+ *
+ * Delegating to `git check-ignore` uses git's own matching, which means blanket
+ * rules, negations, nested `.gitignore` files and `.git/info/exclude` are all
+ * handled for free — none of which a hand-rolled matcher would get right without
+ * reimplementing gitignore semantics (ordering, negation, directory-only,
+ * globstar).
+ *
+ * When git cannot answer we fall back to the original literal check, so the
+ * behaviour outside a working tree is exactly what it was before.
  */
 function ensureGitignore(rootDir) {
   const file = path.join(rootDir, '.gitignore');
-  const want = ['.claude/commands/', '.claude/agents/', '.kanbantic-sync.json'];
   let existing = '';
   try {
     existing = fs.readFileSync(file, 'utf8');
@@ -627,7 +847,15 @@ function ensureGitignore(rootDir) {
   // Split into lines, ignoring leading/trailing whitespace per line.
   const lines = existing.split(/\r?\n/);
   const trimmed = lines.map(l => l.trim());
-  const toAdd = want.filter(p => !trimmed.includes(p));
+  const toAdd = [];
+  for (const { pattern, probe } of GITIGNORE_PATTERNS) {
+    // Literal hit first: cheap, and it guarantees we never duplicate a line we
+    // can already see — whatever git thinks of it.
+    if (trimmed.includes(pattern)) continue;
+    // KBT-B540: not written literally, but possibly already covered.
+    if (gitIgnoresPath(rootDir, probe) === true) continue;
+    toAdd.push(pattern);
+  }
   if (toAdd.length === 0) return;
   let next = existing;
   if (next.length > 0 && !next.endsWith('\n')) next += '\n';
@@ -667,9 +895,46 @@ function runSync({ rootDir, items, workspace, force, now, skipGitignore }) {
 
   const prevManifest = readManifest(rootDir);
   const diskHashes = hashDisk(rootDir);
-  const { plan, collisions, localEdits } = buildPlan({
+  const { plan, collisions, localEdits, unknownCategories, missingFromInput } = buildPlan({
     items, prevManifest, diskHashes, options: { force: !!force },
   });
+
+  // KBT-B491 — unrecognised category on an active item. Checked first: it is the
+  // most likely CAUSE of a list that also looks incomplete, so reporting it
+  // first points at the real problem instead of a symptom.
+  if (unknownCategories && unknownCategories.length > 0) {
+    const detail = unknownCategories.slice(0, 5).map(u =>
+      `  ${u.code}: category ${JSON.stringify(u.category)} (${u.type}) — "${u.title}"`
+    ).join('\n');
+    const more = unknownCategories.length > 5
+      ? `\n  ...and ${unknownCategories.length - 5} more.` : '';
+    throw new SyncError(
+      'UNKNOWN_CATEGORY',
+      `${unknownCategories.length} active toolkit item(s) carry a category this script does not recognise. ` +
+      `Nothing was written. Accepted shapes are the enum name ("Skill", "Subagent", ...) and the enum integer ` +
+      `(1 = Skill, 6 = Subagent). Got:\n${detail}${more}`,
+      { unknownCategories }
+    );
+  }
+
+  // KBT-B489 — the input does not account for every manifest entry.
+  if (missingFromInput && missingFromInput.length > 0) {
+    const detail = missingFromInput.slice(0, 10).map(m =>
+      `  ${m.slug} (${m.category}${m.sourceCode ? `, ${m.sourceCode}` : ''}) → ${m.targetPath}`
+    ).join('\n');
+    const more = missingFromInput.length > 10
+      ? `\n  ...and ${missingFromInput.length - 10} more.` : '';
+    throw new SyncError(
+      'INCOMPLETE_INPUT',
+      `${missingFromInput.length} manifest entr${missingFromInput.length === 1 ? 'y is' : 'ies are'} ` +
+      `not mentioned anywhere in the supplied item list. Nothing was written. This usually means the list is ` +
+      `truncated — check that every list_toolkit_items call returned all of totalCount, and that the Skill and ` +
+      `Subagent categories were both fetched. A deactivated item must still be PRESENT in the list (with ` +
+      `isActive: false) to be removed. Re-run with --force if these items were genuinely deleted from the ` +
+      `Toolkit.\n${detail}${more}`,
+      { missingFromInput }
+    );
+  }
 
   if (collisions.length > 0) {
     const detail = collisions.map(c => {
@@ -806,12 +1071,21 @@ const USAGE = [
   'root (or --root <path>). Writes a .kanbantic-sync.json manifest, ensures',
   '.gitignore lists the mirror paths, and detects drift on subsequent runs.',
   '',
-  'Pass --force to overwrite local edits (warning preserved in summary).',
+  'The item list must be COMPLETE: every entry in an existing manifest has to be',
+  'mentioned in it. A deactivated item stays in the list with isActive: false —',
+  'omitting it entirely is treated as a truncated fetch and aborts (KBT-B489).',
+  '',
+  '`category` is accepted as the enum name ("Skill", "Subagent") or as the enum',
+  'integer (1 = Skill, 6 = Subagent); an unrecognised value aborts (KBT-B491).',
+  '',
+  'Pass --force to overwrite local edits (warning preserved in summary). --force',
+  'also waives the completeness guard, for items hard-deleted from the Toolkit.',
   '',
   'Exit codes:',
   '  0 — sync completed without warnings.',
   '  1 — warnings preserved (local edit), or slug collision detected.',
-  '  2 — infrastructure error (not a git repo, unreadable input, etc.).',
+  '  2 — infrastructure error (not a git repo, unreadable input, etc.), or a',
+  '      rejected input (unrecognised category / incomplete item list).',
   '',
 ].join('\n');
 
@@ -825,6 +1099,8 @@ module.exports = {
   deriveDescription,
   sha256,
   normalizeModel,
+  normalizeCategory,
+  gitIgnoresPath,
   renderFile,
   buildPlan,
   applyPlan,

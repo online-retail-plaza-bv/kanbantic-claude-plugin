@@ -983,3 +983,485 @@ test('KBT-TC3322 (CLI E2E): every generated agent file is loadable — name == b
     cleanup(root);
   }
 });
+
+// ---------------------------------------------------------------------------
+// KBT-B489 / KBT-B491 / KBT-B540 — input validation + gitignore coverage
+//
+//   KBT-TC3304 (Integration) — an incomplete item list aborts before any write;
+//                              a complete list still syncs; a genuine
+//                              deactivation still deletes.
+//   KBT-TC3308 (Integration) — integer-shaped `category` (raw REST output) is
+//                              normalised; an unrecognised category aborts
+//                              before any write.
+//   KBT-B540   (Integration) — .gitignore is left alone when a broader rule
+//                              already covers the mirror paths.
+// ---------------------------------------------------------------------------
+
+/** A tmp root that is a REAL git working tree (needed for `git check-ignore`). */
+function mkGitRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b540-'));
+  const r = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' });
+  if (r.error || r.status !== 0) {
+    cleanup(dir);
+    return null; // git unavailable — caller skips
+  }
+  return dir;
+}
+
+// --- KBT-B491 / KBT-TC3308 -------------------------------------------------
+
+test('KBT-TC3308: normalizeCategory accepts the enum name and the enum integer', () => {
+  // Field-verified pair from the bug report: 1 = Skill, 6 = Subagent.
+  assert.equal(sync.normalizeCategory(1), 'Skill');
+  assert.equal(sync.normalizeCategory(6), 'Subagent');
+  assert.equal(sync.normalizeCategory('Skill'), 'Skill');
+  assert.equal(sync.normalizeCategory('subagent'), 'Subagent');
+  assert.equal(sync.normalizeCategory('  SUBAGENT  '), 'Subagent');
+  assert.equal(sync.normalizeCategory('Command'), 'Command');
+  assert.equal(sync.normalizeCategory(2), 'Command');
+  // ClaudeMd is enum 0 — falsy, and must NOT be mistaken for "absent"
+  // (the KBT-B531 lesson, applied here as well).
+  assert.equal(sync.normalizeCategory(0), 'ClaudeMd');
+
+  // Anything we cannot place is null — never a silent skip.
+  assert.equal(sync.normalizeCategory(99), null);
+  assert.equal(sync.normalizeCategory('Nonsense'), null);
+  assert.equal(sync.normalizeCategory(undefined), null);
+  assert.equal(sync.normalizeCategory(null), null);
+  assert.equal(sync.normalizeCategory(''), null);
+});
+
+test('KBT-TC3308: targetPathFor routes integer categories to the same paths as their names', () => {
+  assert.equal(sync.targetPathFor(1, 'foo'), '.claude/commands/foo.md');
+  assert.equal(sync.targetPathFor(6, 'bar'), '.claude/agents/bar.md');
+  assert.equal(sync.targetPathFor('Skill', 'foo'), '.claude/commands/foo.md');
+  assert.equal(sync.targetPathFor('Subagent', 'bar'), '.claude/agents/bar.md');
+  // Non-materializable categories keep returning null in both shapes.
+  assert.equal(sync.targetPathFor(2, 'baz'), null);
+  assert.equal(sync.targetPathFor('Command', 'baz'), null);
+  assert.equal(sync.targetPathFor(99, 'baz'), null);
+});
+
+test('KBT-TC3308: raw REST-shaped input (integer category + integer model) syncs normally', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 1, title: '/rest-foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 6, title: 'Rest Specialist', content: 'Bar body.\n', code: 'KBT-SAGN201', id: 'id-201', model: 0 }),
+      item({ category: 2, title: 'npm run build', content: 'npm run build\n', code: 'KBT-CMND301', id: 'id-301' }),
+    ];
+    const s = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    assert.equal(s.created, 2, 'Skill(1) + Subagent(6) materialize; Command(2) is skipped');
+    assert.equal(s.deleted, 0);
+
+    assert.ok(readFileOrNull(path.join(root, '.claude/commands/rest-foo.md')));
+    const agn = readFileOrNull(path.join(root, '.claude/agents/rest-specialist.md'));
+    assert.ok(agn);
+    // The canonical category travels onward, so the Subagent still gets `name:`
+    // and its integer model still resolves (0 = Opus, per KBT-B531).
+    assert.match(agn, /^---\nname: rest-specialist\n/);
+    assert.match(agn, /\nmodel: opus\n/);
+
+    // The manifest records canonical enum NAMES, never the integers.
+    const manifest = readManifest(root);
+    assert.deepEqual(manifest.items.map(i => i.category).sort(), ['Skill', 'Subagent']);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3308: a string-shaped and an integer-shaped run produce byte-identical output', () => {
+  const rootA = mkTmpRoot();
+  const rootB = mkTmpRoot();
+  try {
+    const asNames = [
+      item({ category: 'Skill', title: '/twin — Twin', content: 'Body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 'Subagent', title: 'Twin Agent', content: 'Agent body.\n', code: 'KBT-SAGN201', id: 'id-201', model: 'Sonnet' }),
+    ];
+    const asIntegers = [
+      item({ category: 1, title: '/twin — Twin', content: 'Body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 6, title: 'Twin Agent', content: 'Agent body.\n', code: 'KBT-SAGN201', id: 'id-201', model: 1 }),
+    ];
+    sync.runSync({ rootDir: rootA, items: asNames, workspace: 'kanbantic', now: FIXED_NOW });
+    sync.runSync({ rootDir: rootB, items: asIntegers, workspace: 'kanbantic', now: FIXED_NOW });
+
+    for (const rel of ['.claude/commands/twin.md', '.claude/agents/twin-agent.md', '.kanbantic-sync.json']) {
+      assert.equal(
+        fs.readFileSync(path.join(rootB, rel), 'utf8'),
+        fs.readFileSync(path.join(rootA, rel), 'utf8'),
+        rel + ' must not depend on which shape the caller used'
+      );
+    }
+  } finally {
+    cleanup(rootA);
+    cleanup(rootB);
+  }
+});
+
+test('KBT-TC3308: an unrecognised category on an active item aborts before any write', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 42, title: 'Mystery Item', content: 'x\n', code: 'KBT-XXXX999', id: 'id-999' }),
+    ];
+    let caught = null;
+    try {
+      sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    } catch (e) { caught = e; }
+
+    assert.ok(caught, 'expected runSync to throw on an unrecognised category');
+    assert.equal(caught.name, 'SyncError');
+    assert.equal(caught.kind, 'UNKNOWN_CATEGORY');
+    // The message must show what actually arrived — that is what turns a
+    // 30-minute debug session into a 30-second one.
+    assert.match(caught.message, /KBT-XXXX999/);
+    assert.match(caught.message, /42/);
+    assert.equal(caught.data.unknownCategories.length, 1);
+
+    // Nothing written — not even the item that WAS valid.
+    assert.equal(readFileOrNull(path.join(root, '.claude/commands/foo.md')), null);
+    assert.equal(readFileOrNull(path.join(root, '.kanbantic-sync.json')), null);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3308: a partially unrecognised list aborts and leaves an existing manifest byte-identical', () => {
+  const root = mkTmpRoot();
+  try {
+    const good = [
+      item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 'Subagent', title: 'Bar Specialist', content: 'Bar body.\n', code: 'KBT-SAGN201', id: 'id-201' }),
+    ];
+    sync.runSync({ rootDir: root, items: good, workspace: 'kanbantic', now: FIXED_NOW });
+    const manifestBefore = fs.readFileSync(path.join(root, '.kanbantic-sync.json'), 'utf8');
+    const cmdBefore = fs.readFileSync(path.join(root, '.claude/commands/foo.md'), 'utf8');
+    const agnBefore = fs.readFileSync(path.join(root, '.claude/agents/bar-specialist.md'), 'utf8');
+
+    // Same two items, but one now carries a category we cannot place. This is
+    // the scenario that used to wipe the WHOLE mirror set: unrecognised items
+    // were skipped, so their manifest entries read as deletions.
+    const mixed = [
+      good[0],
+      Object.assign({}, good[1], { category: 'Subagentt' }),
+    ];
+    assert.throws(
+      () => sync.runSync({ rootDir: root, items: mixed, workspace: 'kanbantic', now: FIXED_NOW }),
+      (e) => e.kind === 'UNKNOWN_CATEGORY'
+    );
+
+    assert.equal(fs.readFileSync(path.join(root, '.kanbantic-sync.json'), 'utf8'), manifestBefore,
+      '.kanbantic-sync.json must be byte-identical after a rejected run');
+    assert.equal(fs.readFileSync(path.join(root, '.claude/commands/foo.md'), 'utf8'), cmdBefore);
+    assert.equal(fs.readFileSync(path.join(root, '.claude/agents/bar-specialist.md'), 'utf8'), agnBefore);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3308: a list mixing enum names and enum integers is fully recognised — it does NOT abort', () => {
+  // The test case was written before the fix and read "mixed" as
+  // "partially recognised". Now that both shapes normalise, a name/integer mix
+  // is fully recognised, and only a genuinely unplaceable value aborts — which
+  // the two tests above cover.
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 'Skill', title: '/named — Named', content: 'A\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 6, title: 'Numbered Agent', content: 'B\n', code: 'KBT-SAGN201', id: 'id-201' }),
+    ];
+    const s = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    assert.equal(s.created, 2);
+    assert.ok(readFileOrNull(path.join(root, '.claude/commands/named.md')));
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/numbered-agent.md')));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3308 (CLI): raw REST-shaped input exits 2 only when a category is unplaceable', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = [
+      item({ category: 1, title: '/cli-rest — CLI rest', content: 'A\n', code: 'KBT-SKIL101', id: 'id-101' }),
+      item({ category: 77, title: 'Bad Category', content: 'B\n', code: 'KBT-SAGN201', id: 'id-201' }),
+    ];
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', root, '--workspace', 'kanbantic'], {
+      input: JSON.stringify(items), encoding: 'utf8',
+    });
+    assert.equal(r.status, 2, 'expected exit 2, got ' + r.status + '; stderr: ' + r.stderr);
+    assert.match(r.stderr, /UNKNOWN_CATEGORY/);
+    assert.match(r.stderr, /KBT-SAGN201/);
+    assert.equal(readFileOrNull(path.join(root, '.kanbantic-sync.json')), null);
+
+    // Drop the bad item and the same integer shape sails through.
+    const r2 = spawnSync(process.execPath, [SCRIPT, '--root', root, '--workspace', 'kanbantic'], {
+      input: JSON.stringify([items[0]]), encoding: 'utf8',
+    });
+    assert.equal(r2.status, 0, 'expected exit 0, got ' + r2.status + '; stderr: ' + r2.stderr);
+    assert.match(r2.stdout, /created=1/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+// --- KBT-B489 / KBT-TC3304 -------------------------------------------------
+
+/** Three distinct active items — ids and codes unique so the guard can match on them. */
+function trio() {
+  return [
+    item({ category: 'Skill', title: '/alpha — Alpha', content: 'Alpha body.\n', code: 'KBT-SKIL101', id: 'id-101' }),
+    item({ category: 'Subagent', title: 'Beta Specialist', content: 'Beta body.\n', code: 'KBT-SAGN201', id: 'id-201' }),
+    item({ category: 'Subagent', title: 'Gamma Specialist', content: 'Gamma body.\n', code: 'KBT-SAGN202', id: 'id-202' }),
+  ];
+}
+
+/** Snapshot every mirror file + the manifest, as raw bytes. */
+function snapshot(root) {
+  const out = {};
+  for (const rel of ['.claude/commands', '.claude/agents']) {
+    const dir = path.join(root, rel);
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir)) {
+      out[rel + '/' + f] = fs.readFileSync(path.join(dir, f), 'utf8');
+    }
+  }
+  out['.kanbantic-sync.json'] = readFileOrNull(path.join(root, '.kanbantic-sync.json'));
+  return out;
+}
+
+test('KBT-TC3304: an incomplete item list aborts before any write', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const before = snapshot(root);
+    assert.equal(Object.keys(before).length, 4, 'baseline: three mirrors + manifest');
+
+    // Drop the two Subagents — exactly what a truncated list_toolkit_items page
+    // looks like. Before the guard this reported a cheerful `deleted=2`.
+    let caught = null;
+    try {
+      sync.runSync({ rootDir: root, items: [items[0]], workspace: 'kanbantic', now: FIXED_NOW });
+    } catch (e) { caught = e; }
+
+    assert.ok(caught, 'expected runSync to throw on an incomplete item list');
+    assert.equal(caught.name, 'SyncError');
+    assert.equal(caught.kind, 'INCOMPLETE_INPUT');
+    // The message must name the slugs that went missing.
+    assert.match(caught.message, /beta-specialist/);
+    assert.match(caught.message, /gamma-specialist/);
+    assert.equal(caught.data.missingFromInput.length, 2);
+
+    // Not one byte moved.
+    assert.deepEqual(snapshot(root), before);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304: a complete list still syncs — deleted=0, every mirror intact', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const s = sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    assert.equal(s.deleted, 0);
+    assert.equal(s.unchanged, 3);
+    assert.equal(s.warnings, 0);
+    assert.ok(readFileOrNull(path.join(root, '.claude/commands/alpha.md')));
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/beta-specialist.md')));
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/gamma-specialist.md')));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304: a genuine deactivation still deletes — the guard blocks omission, not intent', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    // Gamma stays IN the list, flagged inactive. That is the signal the guard
+    // looks for, and the whole reason it can tell the two cases apart.
+    const withDeactivated = [items[0], items[1], Object.assign({}, items[2], { isActive: false })];
+    const s = sync.runSync({ rootDir: root, items: withDeactivated, workspace: 'kanbantic', now: FIXED_NOW });
+
+    assert.equal(s.deleted, 1);
+    assert.equal(s.warnings, 0);
+    assert.equal(readFileOrNull(path.join(root, '.claude/agents/gamma-specialist.md')), null);
+    const manifest = readManifest(root);
+    assert.equal(manifest.items.length, 2);
+    assert.equal(manifest.items.find(e => e.slug === 'gamma-specialist'), undefined);
+    // The other two survived.
+    assert.ok(readFileOrNull(path.join(root, '.claude/commands/alpha.md')));
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/beta-specialist.md')));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304: --force waives the guard, for items hard-deleted from the Toolkit', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    const s = sync.runSync({ rootDir: root, items: [items[0]], workspace: 'kanbantic', now: FIXED_NOW, force: true });
+    assert.equal(s.deleted, 2);
+    assert.equal(readFileOrNull(path.join(root, '.claude/agents/beta-specialist.md')), null);
+    assert.ok(readFileOrNull(path.join(root, '.claude/commands/alpha.md')));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304: renaming a toolkit item is not mistaken for an omission', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+
+    // Same id + code, new title => new slug. The old slug is absent from the
+    // input, but the item plainly still exists, so this must not abort.
+    const renamed = [
+      items[0], items[1],
+      Object.assign({}, items[2], { title: 'Delta Specialist' }),
+    ];
+    const s = sync.runSync({ rootDir: root, items: renamed, workspace: 'kanbantic', now: FIXED_NOW });
+
+    assert.equal(s.created, 1, 'the new slug is materialized');
+    assert.equal(s.deleted, 1, 'the old slug is retired');
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/delta-specialist.md')));
+    assert.equal(readFileOrNull(path.join(root, '.claude/agents/gamma-specialist.md')), null);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304: an empty list against a populated manifest aborts instead of wiping everything', () => {
+  const root = mkTmpRoot();
+  try {
+    sync.runSync({ rootDir: root, items: trio(), workspace: 'kanbantic', now: FIXED_NOW });
+    const before = snapshot(root);
+
+    assert.throws(
+      () => sync.runSync({ rootDir: root, items: [], workspace: 'kanbantic', now: FIXED_NOW }),
+      (e) => e.kind === 'INCOMPLETE_INPUT'
+    );
+    assert.deepEqual(snapshot(root), before);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-TC3304 (CLI): an incomplete list exits 2 and names the missing slugs', () => {
+  const root = mkTmpRoot();
+  try {
+    const items = trio();
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const before = snapshot(root);
+
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', root, '--workspace', 'kanbantic'], {
+      input: JSON.stringify([items[0]]), encoding: 'utf8',
+    });
+    assert.equal(r.status, 2, 'expected exit 2, got ' + r.status + '; stdout: ' + r.stdout + '; stderr: ' + r.stderr);
+    assert.match(r.stderr, /INCOMPLETE_INPUT/);
+    assert.match(r.stderr, /beta-specialist/);
+    assert.deepEqual(snapshot(root), before);
+
+    // The complete list, over the CLI, is still a clean no-op.
+    const r2 = spawnSync(process.execPath, [SCRIPT, '--root', root, '--workspace', 'kanbantic'], {
+      input: JSON.stringify(items), encoding: 'utf8',
+    });
+    assert.equal(r2.status, 0, 'expected exit 0, got ' + r2.status + '; stderr: ' + r2.stderr);
+    assert.match(r2.stdout, /deleted=0/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+// --- KBT-B540 --------------------------------------------------------------
+
+test('KBT-B540: a blanket .claude/ rule already covers the mirror dirs — .gitignore is left alone', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    // Exactly the shape from the bug report: a blanket rule, no literal
+    // per-directory patterns, plus the manifest listed on its own.
+    const gitignorePath = path.join(root, '.gitignore');
+    const original = 'node_modules/\n.claude/\n.kanbantic-sync.json\n';
+    fs.writeFileSync(gitignorePath, original, 'utf8');
+
+    sync.runSync({
+      rootDir: root,
+      items: [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })],
+      workspace: 'kanbantic', now: FIXED_NOW,
+    });
+
+    assert.equal(fs.readFileSync(gitignorePath, 'utf8'), original,
+      '.gitignore must be byte-identical when a broader rule already covers the paths');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: only the genuinely uncovered pattern is appended', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    // `.claude/` covers both mirror dirs; the manifest is NOT covered.
+    fs.writeFileSync(gitignorePath, '.claude/\n', 'utf8');
+
+    sync.runSync({
+      rootDir: root,
+      items: [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })],
+      workspace: 'kanbantic', now: FIXED_NOW,
+    });
+
+    const gi = fs.readFileSync(gitignorePath, 'utf8');
+    assert.match(gi, /^\.kanbantic-sync\.json$/m, 'the uncovered pattern is appended');
+    assert.doesNotMatch(gi, /^\.claude\/commands\/$/m, 'a covered pattern is not re-added');
+    assert.doesNotMatch(gi, /^\.claude\/agents\/$/m, 'a covered pattern is not re-added');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: a repo with NO coverage still gets all three patterns, and re-runs stay idempotent', (t) => {
+  const root = mkGitRepo();
+  if (!root) return t.skip('git not available');
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    fs.writeFileSync(gitignorePath, 'node_modules/\n', 'utf8');
+    const items = [item({ category: 'Skill', title: '/foo — Foo helper', content: 'Foo body.\n', code: 'KBT-SKIL101', id: 'id-101' })];
+
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    const after1 = fs.readFileSync(gitignorePath, 'utf8');
+    assert.match(after1, /^\.claude\/commands\/$/m);
+    assert.match(after1, /^\.claude\/agents\/$/m);
+    assert.match(after1, /^\.kanbantic-sync\.json$/m);
+
+    sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
+    assert.equal(fs.readFileSync(gitignorePath, 'utf8'), after1,
+      'a second run must not append anything');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('KBT-B540: gitIgnoresPath returns null (no opinion) outside a git working tree', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b540-nogit-'));
+  try {
+    // No opinion => ensureGitignore falls back to the original literal check, so
+    // behaviour outside a working tree is exactly what it was before.
+    assert.equal(sync.gitIgnoresPath(dir, '.kanbantic-sync.json'), null);
+  } finally {
+    cleanup(dir);
+  }
+});
