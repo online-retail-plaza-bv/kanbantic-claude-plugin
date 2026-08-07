@@ -104,6 +104,14 @@ MCP: mcp__kanbantic__list_toolkit_items(workspaceId: "<slug>", category: "<Skill
 Concatenate the three result arrays into one flat list of items. Each item must contain at minimum `id`, `code`, `category`, `title`, `content`, and `isActive`.
 
 <IMPORTANT>
+**The list must be COMPLETE.** Every manifest entry not mentioned anywhere in the list used to be treated as a deletion, and its mirror was unlinked — reported as a plain `deleted=N`. Since **KBT-B489** the script refuses instead (exit 2), but that only turns silent damage into a visible stop; it is still on you to fetch everything:
+
+- Make the three per-category calls. One unfiltered call is **not** equivalent — it shares a single `maxResults` budget across all categories and silently truncates. A real near-miss returned 200 of 224 items and would have removed two live subagent mirrors.
+- Compare each response's `totalCount` against the number of items you actually received. If they differ, raise `maxResults` and call again.
+- A deactivated item must stay **in** the list with `isActive: false`. That is how the script tells "the user retired this" apart from "you forgot to fetch it". Omitting it entirely aborts the run.
+
+**Do not hand raw REST output through unchecked.** `GET /api/app/toolkit-item` returns `category` and `model` as integer enums, the MCP tool returns their names. The script accepts both shapes (`1` = Skill, `6` = Subagent — **KBT-B491**; `0`/`1`/`2` = Opus/Sonnet/Haiku — **KBT-B531**), but anything it cannot place aborts the run with exit 2 rather than being skipped. That abort is deliberate: skipping an unrecognised item makes it look deactivated, which is what wiped entire mirror sets before the fix.
+
 Some MCP responses include extra fields (tags, createdAt, etc.) — the sync script ignores anything it doesn't recognise, so passing the full payload through is fine.
 
 `Command`-items can also be passed through verbatim; the sync script silently skips them (per **KBT-B250** / **KBT-BD086**, they are reference-only and not materialized to disk). A future optimization could filter Command-category server-side before the pipe, but pulling all three categories keeps the orchestrator code symmetrical with the SKILL.md checklist.
@@ -139,7 +147,7 @@ sync-workspace-skills: created=2 updated=1 unchanged=6 deleted=0 warnings=0 forc
 | `--input <path>` | Read items from a file instead of stdin (handy for debugging). |
 | `--root <path>`  | Run against an alternative repo root (defaults to cwd). |
 | `--workspace <slug>` | Workspace slug to record in the manifest. |
-| `--force`        | Overwrite locally-edited files (warning still reported). |
+| `--force`        | Overwrite locally-edited files (warning still reported). Also waives the completeness guard — see below. |
 
 ### Exit codes
 
@@ -147,7 +155,20 @@ sync-workspace-skills: created=2 updated=1 unchanged=6 deleted=0 warnings=0 forc
 |---|---|
 | `0` | Sync completed without warnings. |
 | `1` | Local-edit warnings preserved (or slug collision) — re-run with `--force` after reviewing. |
-| `2` | Infrastructure failure (not a git repo, malformed input, fs error). |
+| `2` | Infrastructure failure (not a git repo, malformed input, fs error), **or** a rejected input: `UNKNOWN_CATEGORY` (KBT-B491) / `INCOMPLETE_INPUT` (KBT-B489). |
+
+### Input rejections (KBT-B489 / KBT-B491)
+
+Both rejections happen in the planning phase, so **nothing is written** — no file created, updated or deleted, and `.kanbantic-sync.json` stays byte-identical.
+
+| Kind | Trigger | What to do |
+|---|---|---|
+| `UNKNOWN_CATEGORY` | An **active** item carries a `category` that is neither an enum name nor an enum integer. The message shows the offending codes and the raw value received. | Fix the fetch layer — you are probably feeding a shape neither the MCP tool nor the REST API produces. |
+| `INCOMPLETE_INPUT` | A manifest entry is not mentioned anywhere in the list — not by slug, not by `id`, not by `code`. The message names the missing slugs. | Re-fetch with a higher `maxResults`, or add the item back with `isActive: false` if you meant to retire it. |
+
+A renamed toolkit item does **not** trip the completeness guard: its `id` and `code` are unchanged, so the script recognises it, retires the old slug and materializes the new one in the same run.
+
+`--force` waives the completeness guard, for the one legitimate case it cannot otherwise express: an item **hard-deleted** from the Toolkit is absent from every future list, so its mirror could never be cleaned up. Review the reported slugs before reaching for it — `--force` also overwrites local edits.
 
 ## Step 4: Report summary
 
@@ -175,7 +196,9 @@ Then per slug:
 | present, hash matches | present, hash matches | no | **UPDATE** |
 | present, hash matches | present, hash differs | — | **SKIP-LOCAL-EDIT** (warn; `--force` overwrites) |
 
-For each manifest entry whose slug is no longer in the active toolkit-items list:
+Before any of that, the input itself is validated (**KBT-B491** then **KBT-B489**): every active item's category must resolve, and every manifest entry must be mentioned somewhere in the list. Either check failing aborts the run before a single write, exactly as a slug collision does.
+
+For each manifest entry whose slug is no longer in the active toolkit-items list (the item is present but `isActive: false`, or its title changed):
 
 | On-disk file | hash matches manifest | Decision |
 |---|---|---|
@@ -199,3 +222,5 @@ For each manifest entry whose slug is no longer in the active toolkit-items list
 - **KBT-US557** — User story for the v2.5.1 scope-narrowing (no slash-command namespace pollution).
 - **KBT-TC1933 / 1934 / 1935 / 1936 / 1937 / 1938 / 1939** — Test cases covering fresh-sync, idempotency, update, slug collision, isActive-false removal, local-edit warning, `.gitignore` management.
 - **KBT-TC1967 / 1968 / 1969** — Regression tests for the Command-skip behavior (v2.5.1).
+- **KBT-B489** — Completeness guard: an item list that does not account for every manifest entry aborts instead of deleting mirrors. Test case **KBT-TC3304**.
+- **KBT-B491** — `category` is normalised from both the enum name (MCP) and the enum integer (REST); an unrecognised value aborts instead of being skipped. Test case **KBT-TC3308**. Follows the pattern **KBT-B531** established for `model`.
