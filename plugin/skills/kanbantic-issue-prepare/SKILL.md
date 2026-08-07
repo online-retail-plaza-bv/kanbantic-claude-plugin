@@ -286,12 +286,13 @@ Determine per level:
 |---|---|---|
 | **Unit** | Vereist / min 1 | Alleen als er nul logische code-paden zijn (bijv. puur data-migratie, DTO-only) |
 | **Integration** | Vereist / min 1 | Alleen bij pure client-side issues zonder service-/DB-aanroepen |
-| **E2E** | Vereist / min 1 (real-proxy voor plugin; Playwright voor UI) | Geen UI-oppervlak EN geen publieke API-oppervlak (pure domain-logica / parser / achtergrondtaak) |
+| **E2E** | Vereist / min 1 (real-proxy voor plugin; Playwright voor UI) | Geen UI-oppervlak EN geen publieke API-oppervlak EN geen runtime die het artefact inleest (pure domain-logica / parser / achtergrondtaak) |
 
 Rules:
 - Default alle drie niveaus naar **Vereist / minimum 1**.
 - N.v.t. vereist een **rationale van ≥20 chars** die verklaart waarom het niveau niet van toepassing is.
 - Zet **niet** alle drie op N.v.t. — minstens één niveau moet Vereist zijn.
+- **Derde E2E-voorwaarde (ADM-TRUL015):** raakt het issue een artefact dat een runtime bij opstart inleest (`.claude/agents/*.md`, `.claude/commands/*.md`, plugin-manifesten, compose-files, CI-workflows, EF-migraties, appsettings-secties, wireframe-filesets)? Dan blijft E2E **Vereist**, ook zonder UI- en API-oppervlak. De test is dan niet "het bestand bestaat en klopt", maar "een verse instantie van de runtime laadt het en gebruikt het" — wat doorgaans een nieuwe sessie of herstart vereist, omdat runtimes zulke artefacten bij opstart inlezen. Volledige onderbouwing: **ADM-TRUL015**.
 - Deze declaratie vervangt KBT-TRUL013 (opgeheven per KBT-F449).
 
 ```
@@ -364,6 +365,8 @@ MCP: mcp__kanbantic__create_test_case(
 Declare the per-level test-policy for this Bug **before transitioning to Ready**. Same rules as 5F.5 — defaults all three levels to Vereist/min=1; N.v.t. requires ≥20-char rationale.
 
 For bugs, the E2E level typically maps to the applicable stack from the issue's application (Playwright for UI-bugs, real-proxy for plugin-bugs, integration-style for API-bugs without UI surface).
+
+De derde E2E-voorwaarde uit 5F.5 geldt hier onverkort: raakt de fix een artefact dat een runtime bij opstart inleest, dan blijft E2E **Vereist** ook zonder UI- en API-oppervlak, en luidt de assertie "een verse instantie van de runtime laadt het en gebruikt het" — niet "het bestand klopt" (**ADM-TRUL015**).
 
 ```
 MCP: mcp__kanbantic__add_discussion_entry(
