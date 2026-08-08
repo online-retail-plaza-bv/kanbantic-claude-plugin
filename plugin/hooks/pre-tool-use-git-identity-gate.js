@@ -66,10 +66,16 @@ function extractTargetDir(command, eventCwd) {
   return eventCwd || process.cwd();
 }
 
-function identityAlreadyConfigured(cwd) {
-  if (process.env.GIT_AUTHOR_NAME && process.env.GIT_AUTHOR_EMAIL) return true;
-  const name = getGitConfig(cwd, 'user.name');
-  const email = getGitConfig(cwd, 'user.email');
+// KBT-B546 — `env` is an explicit parameter (default `process.env`) so a test
+// can name the git-config source it is asserting against. In production this
+// reads the same system → global → local cascade as before: an identity the
+// operator configured globally is still honoured, and this hook still no-ops
+// on it. What changed is only that the test no longer has to *hope* the
+// machine has no global identity.
+function identityAlreadyConfigured(cwd, { env = process.env } = {}) {
+  if (env.GIT_AUTHOR_NAME && env.GIT_AUTHOR_EMAIL) return true;
+  const name = getGitConfig(cwd, 'user.name', { env });
+  const email = getGitConfig(cwd, 'user.email', { env });
   return Boolean(name && email);
 }
 
@@ -86,11 +92,12 @@ async function main() {
   const command = event.tool_input && event.tool_input.command;
   if (!isGitCommitCommand(command)) return allow();
 
+  const env = process.env;
   const cwd = extractTargetDir(command, event.cwd);
-  if (identityAlreadyConfigured(cwd)) return allow();
+  if (identityAlreadyConfigured(cwd, { env })) return allow();
 
   try {
-    const result = await resolveAndApplyIdentity({ cwd });
+    const result = await resolveAndApplyIdentity({ cwd, env });
     if (result.applied) log(`self-healed git identity (${result.source}) in ${cwd}`);
   } catch (e) {
     log(`resolution failed: ${e.message} — allowing commit with whatever identity git already has`);

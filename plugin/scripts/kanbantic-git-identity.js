@@ -54,14 +54,23 @@ function log(msg) {
 
 // ---------------------------------------------------------------------------
 // API key resolution — identical to kanbantic-git-credential-helper.js.
+//
+// KBT-B546 — every function below that reads or writes git config takes an
+// explicit `env` (default `process.env`). Production behaviour is unchanged;
+// tests inject a config source (GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM) so their
+// outcome no longer depends on the developer's own `~/.gitconfig`. The
+// dependency is visible in the signature instead of hidden behind a prepared
+// HOME — and, unlike an in-process stub, an env object also survives the
+// process boundary to the spawned CLI/hook.
 // ---------------------------------------------------------------------------
-function resolveApiKey() {
-  if (process.env.KANBANTIC_API_KEY) return process.env.KANBANTIC_API_KEY;
+function resolveApiKey({ env = process.env } = {}) {
+  if (env.KANBANTIC_API_KEY) return env.KANBANTIC_API_KEY;
   if (process.platform === 'win32') {
     try {
       const out = execSync('reg query HKCU\\Environment /v KANBANTIC_API_KEY', {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        env,
       });
       const m = out.match(/KANBANTIC_API_KEY\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/i);
       if (m) return m[1].trim();
@@ -76,15 +85,16 @@ function resolveApiKey() {
 // Repository id resolution — env override, then git config. Same convention
 // as the credential helper; used here for the layer-3 (per-repo) fallback.
 // ---------------------------------------------------------------------------
-function resolveRepositoryId(cwd) {
-  if (process.env.KANBANTIC_REPOSITORY_ID) {
-    return process.env.KANBANTIC_REPOSITORY_ID.trim();
+function resolveRepositoryId(cwd, { env = process.env } = {}) {
+  if (env.KANBANTIC_REPOSITORY_ID) {
+    return env.KANBANTIC_REPOSITORY_ID.trim();
   }
   try {
     const out = execFileSync('git', ['config', '--get', 'kanbantic.repositoryId'], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env,
     });
     const id = out.trim();
     return id || null;
@@ -94,12 +104,13 @@ function resolveRepositoryId(cwd) {
   }
 }
 
-function getGitConfig(cwd, key) {
+function getGitConfig(cwd, key, { env = process.env } = {}) {
   try {
     const out = execFileSync('git', ['config', '--get', key], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env,
     });
     return out.trim() || null;
   } catch {
@@ -107,8 +118,8 @@ function getGitConfig(cwd, key) {
   }
 }
 
-function setGitConfig(cwd, key, value) {
-  execFileSync('git', ['config', key, value], { cwd, stdio: ['ignore', 'ignore', 'ignore'] });
+function setGitConfig(cwd, key, value, { env = process.env } = {}) {
+  execFileSync('git', ['config', key, value], { cwd, stdio: ['ignore', 'ignore', 'ignore'], env });
 }
 
 // ---------------------------------------------------------------------------
@@ -116,9 +127,9 @@ function setGitConfig(cwd, key, value) {
 // Bearer auth. Mirrors kanbantic-git-credential-helper.js's `forward` exactly
 // — the server is stateless, so no initialize handshake is needed.
 // ---------------------------------------------------------------------------
-function forward(apiKey, body) {
+function forward(apiKey, body, mcpUrl = MCP_URL) {
   return new Promise((resolve, reject) => {
-    const url = new URL(MCP_URL);
+    const url = new URL(mcpUrl);
     const transport = url.protocol === 'https:' ? https : http;
     const req = transport.request(
       {
@@ -194,14 +205,14 @@ function parseToolResult(response) {
   }
 }
 
-async function callTool(apiKey, name, args) {
+async function callTool(apiKey, name, args, mcpUrl = MCP_URL) {
   const body = JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
     method: 'tools/call',
     params: { name, arguments: args },
   });
-  const responses = await forward(apiKey, body);
+  const responses = await forward(apiKey, body, mcpUrl);
   return parseToolResult((responses || []).find((r) => r && r.id === 1) || {});
 }
 
@@ -209,15 +220,17 @@ async function callTool(apiKey, name, args) {
 // resolveAndApplyIdentity — the exported entry point, shared by the CLI and
 // the PreToolUse gate.
 // ---------------------------------------------------------------------------
-async function resolveAndApplyIdentity({ cwd = process.cwd() } = {}) {
+async function resolveAndApplyIdentity({ cwd = process.cwd(), env = process.env } = {}) {
+  const mcpUrl = env.KANBANTIC_MCP_URL || MCP_URL;
+
   // Layer 1 — operator override via native git env vars. Git already honors
   // these over `git config`; do nothing.
-  if (process.env.GIT_AUTHOR_NAME && process.env.GIT_AUTHOR_EMAIL) {
+  if (env.GIT_AUTHOR_NAME && env.GIT_AUTHOR_EMAIL) {
     log('GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL set — workstation override active, no git config change');
     return { applied: false, source: 'env-override' };
   }
 
-  const apiKey = resolveApiKey();
+  const apiKey = resolveApiKey({ env });
   if (!apiKey) {
     log('no KANBANTIC_API_KEY in env or HKCU\\Environment — cannot resolve, leaving git config untouched');
     return { applied: false, source: null };
@@ -225,10 +238,10 @@ async function resolveAndApplyIdentity({ cwd = process.cwd() } = {}) {
 
   // Layer 2 — the calling agent's own identity (KBT-F615, read-only).
   try {
-    const identity = await callTool(apiKey, 'get_current_agent_identity', {});
+    const identity = await callTool(apiKey, 'get_current_agent_identity', {}, mcpUrl);
     if (identity && identity.success && identity.claudeAgentName && identity.claudeAgentEmail) {
-      setGitConfig(cwd, 'user.name', identity.claudeAgentName);
-      setGitConfig(cwd, 'user.email', identity.claudeAgentEmail);
+      setGitConfig(cwd, 'user.name', identity.claudeAgentName, { env });
+      setGitConfig(cwd, 'user.email', identity.claudeAgentEmail, { env });
       log(`identity set from get_current_agent_identity: ${identity.claudeAgentName} <${identity.claudeAgentEmail}>`);
       return { applied: true, source: 'agent-identity', name: identity.claudeAgentName, email: identity.claudeAgentEmail };
     }
@@ -237,17 +250,17 @@ async function resolveAndApplyIdentity({ cwd = process.cwd() } = {}) {
   }
 
   // Layer 3 — the repository's configured gitAuthorName/gitAuthorEmail.
-  const repositoryId = resolveRepositoryId(cwd);
+  const repositoryId = resolveRepositoryId(cwd, { env });
   if (!repositoryId) {
     log('no repositoryId (kanbantic.repositoryId git config or KANBANTIC_REPOSITORY_ID) — cannot resolve layer 3');
     return { applied: false, source: null };
   }
 
   try {
-    const repo = await callTool(apiKey, 'get_repository', { repositoryId });
+    const repo = await callTool(apiKey, 'get_repository', { repositoryId }, mcpUrl);
     if (repo && repo.success && repo.gitAuthorName && repo.gitAuthorEmail) {
-      setGitConfig(cwd, 'user.name', repo.gitAuthorName);
-      setGitConfig(cwd, 'user.email', repo.gitAuthorEmail);
+      setGitConfig(cwd, 'user.name', repo.gitAuthorName, { env });
+      setGitConfig(cwd, 'user.email', repo.gitAuthorEmail, { env });
       log(`identity set from get_repository: ${repo.gitAuthorName} <${repo.gitAuthorEmail}>`);
       return { applied: true, source: 'repository', name: repo.gitAuthorName, email: repo.gitAuthorEmail };
     }
@@ -263,7 +276,7 @@ async function resolveAndApplyIdentity({ cwd = process.cwd() } = {}) {
 // CLI entry point — `node kanbantic-git-identity.js` from within the clone.
 // ---------------------------------------------------------------------------
 async function main() {
-  await resolveAndApplyIdentity({ cwd: process.cwd() });
+  await resolveAndApplyIdentity({ cwd: process.cwd(), env: process.env });
 }
 
 if (require.main === module) {
