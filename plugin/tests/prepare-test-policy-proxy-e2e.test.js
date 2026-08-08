@@ -226,7 +226,6 @@ test('KBT-TC3433: the prescribed set_test_policy sequence reaches the backend wi
 
     assert.equal(byLevel.Integration.applicability, 'NotApplicable');
     assert.equal(byLevel.Integration.notApplicableReason, REASON, 'the N.v.t. reason must survive the proxy unmodified');
-    assert.ok(REASON.length >= 20, 'guard: the fixture reason must satisfy the ≥20-char rule');
 
     assert.equal(byLevel.E2E.applicability, 'Required');
     assert.equal(byLevel.E2E.minCount, 1);
@@ -261,8 +260,11 @@ test('KBT-TC3433: the prescribed set_test_policy sequence reaches the backend wi
 test('KBT-TC3433 (counterfactual): skipping set_test_policy leaves the record on the defaults', async () => {
   // The pre-fix behaviour, reproduced through the real proxy. Writing only a
   // Decision-entry (here: no policy call at all) leaves every level at
-  // Required/min 1 — which is what claim_issue then freezes. This is the
-  // control that gives the test above its meaning.
+  // Required/min 1 — which is what claim_issue then freezes.
+  //
+  // Scope note, deliberately not overstated: the returned defaults come from the
+  // stub, so that half is thin. The load-bearing assertion is the last one — the
+  // proxy forwarded the read and fabricated no write of its own.
   const backend = makePolicyBackend();
   const stub = await startStub(backend);
   const proxy = spawnProxy(stub.port);

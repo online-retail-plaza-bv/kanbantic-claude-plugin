@@ -51,45 +51,83 @@ function readPrepare() {
 }
 
 // Both type-routes declare the policy and both were broken the same way.
+// The 4th element is the heading that must fall OUTSIDE the matched span.
 const POLICY_SECTIONS = [
-  ['5F.5', /### 5F\.5:[\s\S]*?(?=### 5F\.\d|## Step 5B|## Step 6)/, 'Feature route'],
-  ['5B.6', /### 5B\.6:[\s\S]*?(?=### 5B\.\d|## Step 5W|## Step 6)/, 'Bug route'],
+  ['5F.5', /### 5F\.5:[\s\S]*?(?=### 5F\.\d|## Step 5B|## Step 6)/, 'Feature route', '### 5F.6'],
+  ['5B.6', /### 5B\.6:[\s\S]*?(?=### 5B\.\d|## Step 5W|## Step 6)/, 'Bug route', '### 5B.7'],
 ];
 
-function section(label, re) {
+// The `assert.ok(m, ...)` guard only catches "matched nothing". The opposite
+// failure is worse and silent: if a following heading is renamed, the lazy match
+// runs on to the next fallback anchor and swallows several sections — every
+// `includes()` below would still pass, on a span many times too wide.
+//
+// The precise guard is `containsNext`: the next sibling heading must fall
+// OUTSIDE the match. MAX_SECTION_CHARS is coarse defence-in-depth for the case
+// where that sibling is renamed too. Sized well above the real spans (5F.5 is
+// ~4.7k, 5B.6 ~3.2k) but far below the ~45k full file, so a runaway match that
+// swallows neighbouring sections still trips it.
+const MAX_SECTION_CHARS = 8000;
+
+function section(label, re, nextHeading) {
   const m = readPrepare().match(re);
   assert.ok(m, `${label} section not found in prepare SKILL.md`);
-  return m[0];
+  const s = m[0];
+  assert.ok(
+    s.length <= MAX_SECTION_CHARS,
+    `${label} span is ${s.length} chars (> ${MAX_SECTION_CHARS}) — the regex almost certainly over-matched past its section; assertions on it would be meaningless`
+  );
+  assert.ok(
+    !s.includes(nextHeading),
+    `${label} span must not contain ${nextHeading} — the lookahead failed to terminate the match at the section boundary`
+  );
+  return s;
 }
 
 // ─── KBT-TC3430 — the record is written, before the freeze ────────────────────
 
-for (const [label, re, route] of POLICY_SECTIONS) {
-  test(`KBT-TC3430: prepare ${label} (${route}) prescribes set_test_policy, not only a Decision-entry`, () => {
-    const s = section(label, re);
+// The exact parameter names of the live set_test_policy tool. The whole bug was
+// a prescribed procedure that did not match reality, so the prescribed CALL must
+// be checked against the real signature — not merely be present.
+const REQUIRED_CALL_PARAMS = ['issueId', 'level', 'applicability', 'minimumCount', 'notApplicableReason'];
 
+for (const [label, re, route, nextHeading] of POLICY_SECTIONS) {
+  test(`KBT-TC3430: prepare ${label} (${route}) prescribes set_test_policy, not only a Decision-entry`, () => {
+    const s = section(label, re, nextHeading);
+
+    // Three DISTINCT calls, not one call plus a prose list of levels.
+    const callCount = (s.match(/mcp__kanbantic__set_test_policy\(/g) || []).length;
     assert.ok(
-      s.includes('mcp__kanbantic__set_test_policy'),
-      `${label} must prescribe an affirmative set_test_policy call — a Decision-entry never reaches the policy record the Done-gates read`
+      callCount >= 3,
+      `${label} must prescribe at least three distinct set_test_policy calls (one per level) — found ${callCount}. A Decision-entry never reaches the policy record the Done-gates read.`
     );
 
     // All three levels named explicitly, so none can silently keep its default.
     for (const level of ['Unit', 'Integration', 'E2E']) {
       assert.ok(
-        new RegExp(`set_test_policy[\\s\\S]{0,400}?level:\\s*"${level}"`).test(s),
+        new RegExp(`set_test_policy\\([\\s\\S]{0,200}?level:\\s*"${level}"`).test(s),
         `${label} must show a set_test_policy call for level ${level}`
       );
     }
 
-    assert.ok(s.includes('applicability'), `${label} must pass the applicability parameter`);
+    // Parameter names must match the live tool signature exactly. `minimumCount`
+    // is the trap: Step 6.1's comparison table legitimately says `minCount`
+    // (the RESPONSE field), so a slip from minimumCount → minCount in the call
+    // is an easy and completely silent way to reintroduce KBT-B551.
+    for (const param of REQUIRED_CALL_PARAMS) {
+      assert.ok(
+        s.includes(param),
+        `${label} must use the live parameter name "${param}" — a prescribed call that does not match the tool signature is exactly the failure class of KBT-B551`
+      );
+    }
     assert.ok(
-      s.includes('notApplicableReason'),
-      `${label} must document notApplicableReason — without it the NotApplicable route is unusable`
+      /minimumCount:\s*<N>/.test(s),
+      `${label} must pass minimumCount (not minCount, which is the response field) in the prescribed call`
     );
   });
 
   test(`KBT-TC3430: prepare ${label} places the record-write BEFORE the Ready-transition`, () => {
-    const s = section(label, re);
+    const s = section(label, re, nextHeading);
 
     // Ordering is the whole point of the fix: after claim_issue the record is
     // frozen and lowering it requires a reviewer-akkoord.
@@ -104,7 +142,7 @@ for (const [label, re, route] of POLICY_SECTIONS) {
   });
 
   test(`KBT-TC3430: prepare ${label} keeps the Decision-entry and cross-references the record`, () => {
-    const s = section(label, re);
+    const s = section(label, re, nextHeading);
 
     // The fix augments, it does not replace: the entry explains *why*, which a
     // policy record cannot express (richting-punt 2 of the issue).
@@ -163,6 +201,35 @@ test('KBT-TC3431: Step 6.1 verifies the policy record against the declaration', 
   for (const field of ['applicability', 'minCount', 'notApplicableReason', 'isFrozen']) {
     assert.ok(s.includes(field), `Step 6.1 must compare the ${field} field`);
   }
+});
+
+test('KBT-TC3431: Step 6.1 is scoped to Feature/Bug — the Epic route has no policy to verify', () => {
+  // Step 6 is reached by every route (5F / 5B / 5E all converge via 5W), but only
+  // 5F.5 and 5B.6 declare a test-policy; the Epic route has none, because Epic
+  // coverage is a roll-up of its child-Features (Regel A / KBT-RL121). An
+  // unconditional HARD-GATE here would be unsatisfiable on the Epic route and
+  // could wedge Epic preparation.
+  const content = readPrepare();
+  const m = content.match(/### 6\.1:[\s\S]*?(?=### 6a:)/);
+  assert.ok(m, '6.1 section not found');
+  const s = m[0];
+
+  assert.ok(
+    /Feature \/ Bug|Feature- en Bug-issues/.test(s),
+    'Step 6.1 must state that it applies to Feature and Bug issues only'
+  );
+  assert.ok(
+    /Epic.*n\.v\.t\.|Voor een Epic: sla deze stap over/.test(s),
+    'Step 6.1 must give the Epic route an explicit skip, not leave it undefined'
+  );
+
+  // The 6a report line must carry the same n.v.t. escape as its neighbours.
+  const reportLine = content.match(/- Test-policy record:[^\n]*/);
+  assert.ok(reportLine, '6a report line for the test-policy record not found');
+  assert.ok(
+    reportLine[0].includes('n.v.t.'),
+    'the 6a report line must offer an n.v.t. variant like its Wireframe/UI-contract neighbours, or an Epic run cannot report it truthfully'
+  );
 });
 
 test('KBT-TC3431: the 6.1 verification precedes the 6a Ready-transition in file order', () => {

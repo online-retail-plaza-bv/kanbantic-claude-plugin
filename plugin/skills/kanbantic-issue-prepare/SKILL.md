@@ -647,7 +647,9 @@ MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter t
 - **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Ready transition on this.
 - **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Ready transition. Let op: `create_version` is **app-scoped** — de `applicationId` is verplicht (PR #242) en nieuwe Versions starten in `Planned`.
 
-### 6.1: Test-policy record-verificatie — HARD (KBT-B551)
+### 6.1: Test-policy record-verificatie — HARD (Feature / Bug; Epic: n.v.t.) (KBT-B551)
+
+**Alleen voor Feature- en Bug-issues.** De test-policy wordt gedeclareerd in 5F.5 respectievelijk 5B.6; de Epic-route (5E) kent geen test-policy-declaratie, omdat coverage bij Epics een roll-up is van de child-Features die elk hun eigen policy krijgen wanneer ze zelf voorbereid worden (Regel A / KBT-RL121). Dit spoort met `kanbantic-issue-execute` Step 3c, dat `frozenPolicy` eveneens als "Feature / Bug only" scopet. **Voor een Epic: sla deze stap over zónder fout en ga door naar 6a.**
 
 De declaratie uit Step 5F.5 / 5B.6 staat op twee plaatsen: als `Decision`-entry en als beleidsrecord. Alleen het record telt voor de gates. Toets hier, **vóór** de transitie in 6a en dus vóór de bevriezing door `claim_issue`, dat de twee werkelijk overeenkomen:
 
@@ -662,7 +664,9 @@ Vergelijk per niveau (`Unit`, `Integration`, `E2E`) het teruggegeven record met 
 | `applicability` | `Required` ↔ "Vereist", `NotApplicable` ↔ "N.v.t." |
 | `minCount` | het `Minimum` uit dezelfde rij |
 | `notApplicableReason` | gevuld voor elk `NotApplicable`-niveau |
-| `isFrozen` | `false` — een `true` hier betekent dat het issue al geclaimd is geweest |
+| `isFrozen` | `false` — zie hieronder wanneer dit `true` is |
+
+**`isFrozen == true` op dit punt** betekent dat het issue al eens geclaimd is geweest en daarna is teruggekomen naar `Triaged` (bijvoorbeeld via een bounce-back). Dat is op zichzelf legitiem en **geen blokkade**: ga door naar 6a wanneer record en declaratie overeenkomen. Wijken ze áf, dan geldt de HARD-GATE hieronder onverkort, maar is de correctie duurder — een bevroren niveau verlagen of op `NotApplicable` zetten vereist `overrideReason` (≥20 chars, reviewer-akkoord). Verhogen van `minimumCount` blijft vrij.
 
 <HARD-GATE>
 **Divergentie is een readiness-tekortkoming, geen waarschuwing.** Wijkt ook maar één niveau af, ga dan **niet** door naar 6a. Corrigeer met een hernieuwde `set_test_policy`-aanroep voor dat niveau en lees opnieuw uit; blijft het afwijken, rapporteer via 6b en laat het issue op `Triaged`.
@@ -689,7 +693,7 @@ If the transition succeeds, report:
 - TestCases: ✓ (N linked)
 - Wireframe pinned: ✓ (vN, <pagina's>) / n.v.t.
 - UI-contract: ✓ / n.v.t.
-- Test-policy record: ✓ (Unit <a>/<n> · Integration <a>/<n> · E2E <a>/<n>, record == declaratie)
+- Test-policy record: ✓ (Unit <a>/<n> · Integration <a>/<n> · E2E <a>/<n>, record == declaratie) / n.v.t. (Epic)
 
 **Next step:** Invoke `kanbantic-issue-execute`. It will call `claim_issue(branch: ...)` which atomically assigns the issue and promotes `Ready → InProgress` in a single MCP call (KBT-RL052)."
 
