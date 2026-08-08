@@ -127,7 +127,17 @@ Capture `sessionId` — reused by `set_current_issue` later, no second `register
    helper feeds the token to git over stdin; see KBT-B330. Clone the **clean** URL:
    ```bash
    # Configure once, reuse for clone + every later fetch/push in this clone.
-   HELPER="!node \"$CLAUDE_PLUGIN_ROOT/scripts/kanbantic-git-credential-helper.js\""
+   # KBT-B547 — never persist $CLAUDE_PLUGIN_ROOT into `.git/config`: `git config`
+   # stores the EXPANDED string, which pins the plugin version and dies on the next
+   # upgrade. The installer writes a versionless shim outside the plugin cache and
+   # prints the value to persist.
+   PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
+   if [ -z "$PLUGIN_ROOT" ]; then
+     # Claude Code puts the ACTIVE plugin's bin/ on PATH; derive the root from it.
+     PLUGIN_ROOT="$(IFS=:; for p in $PATH; do case "$p" in *kanbantic-claude-plugin*)
+       echo "${p%/bin}"; break;; esac; done)"
+   fi
+   HELPER="$(node "$PLUGIN_ROOT/scripts/install-git-credential-helper.js" --print-helper)"
    git clone \
      -c credential.helper="$HELPER" \
      -c kanbantic.repositoryId="<repositoryId>" \

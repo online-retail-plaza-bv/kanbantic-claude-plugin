@@ -20,6 +20,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const { spawn, spawnSync } = require('node:child_process');
+const { isolatedGitEnv } = require('./helpers/git-env.js');
 
 const HOOK = path.resolve(__dirname, '..', 'hooks', 'pre-tool-use-git-identity-gate.js');
 
@@ -40,8 +41,11 @@ function mkTmpRepo() {
   return dir;
 }
 
-function gitConfig(dir, key) {
-  const r = spawnSync('git', ['config', '--get', key], { cwd: dir, encoding: 'utf8' });
+// KBT-B546 — the config source is passed in, never assumed. Without it this
+// reads the developer's ~/.gitconfig and the assertions below become claims
+// about the machine rather than about the hook.
+function gitConfig(dir, key, env = process.env) {
+  const r = spawnSync('git', ['config', '--get', key], { cwd: dir, encoding: 'utf8', env });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
@@ -72,9 +76,9 @@ function startStub(identity) {
   });
 }
 
-function runHook({ payload, port, apiKey = 'test-key', cwd }) {
+function runHook({ payload, port, apiKey = 'test-key', cwd, baseEnv = process.env }) {
   return new Promise((resolve) => {
-    const env = { ...process.env };
+    const env = { ...baseEnv };
     delete env.GIT_AUTHOR_NAME;
     delete env.GIT_AUTHOR_EMAIL;
     if (port) env.KANBANTIC_MCP_URL = `http://127.0.0.1:${port}/mcp`;
@@ -114,6 +118,11 @@ test('allow: Bash tool but not a git commit is ignored', async () => {
 test('self-heals: git commit with no identity configured → sets git config, exit 0', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  // The premise 'no identity configured' is now ENFORCED via the injected
+  // config source instead of assumed of the machine (KBT-B546). The
+  // complementary branch — a global identity present, hook must no-op — is
+  // asserted in git-identity-workstation-isolation.test.js.
+  const env = isolatedGitEnv();
   const stub = await startStub({
     success: true,
     authenticated: true,
@@ -124,10 +133,11 @@ test('self-heals: git commit with no identity configured → sets git config, ex
     const r = await runHook({
       payload: { tool_name: 'Bash', tool_input: { command: 'git commit -m "test"' }, cwd: dir },
       port: stub.port,
+      baseEnv: env,
     });
     assert.equal(r.code, 0);
-    assert.equal(gitConfig(dir, 'user.name'), 'Axon Beta');
-    assert.equal(gitConfig(dir, 'user.email'), 'axon-beta@agents.kanbantic.local');
+    assert.equal(gitConfig(dir, 'user.name', env), 'Axon Beta');
+    assert.equal(gitConfig(dir, 'user.email', env), 'axon-beta@agents.kanbantic.local');
   } finally {
     stub.server.close();
   }
@@ -136,15 +146,17 @@ test('self-heals: git commit with no identity configured → sets git config, ex
 test('no-op: identity already configured → allow without touching config', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
-  spawnSync('git', ['config', 'user.name', 'Existing Name'], { cwd: dir });
-  spawnSync('git', ['config', 'user.email', 'existing@example.com'], { cwd: dir });
+  const env = isolatedGitEnv();
+  spawnSync('git', ['config', 'user.name', 'Existing Name'], { cwd: dir, env });
+  spawnSync('git', ['config', 'user.email', 'existing@example.com'], { cwd: dir, env });
   const r = await runHook({
     payload: { tool_name: 'Bash', tool_input: { command: 'git commit -m "test"' }, cwd: dir },
     port: undefined,
     apiKey: null,
+    baseEnv: env,
   });
   assert.equal(r.code, 0);
-  assert.equal(gitConfig(dir, 'user.name'), 'Existing Name');
+  assert.equal(gitConfig(dir, 'user.name', env), 'Existing Name');
 });
 
 test('fail-open: no API key + no identity configured → still exit 0 (never blocks)', async (t) => {
@@ -154,6 +166,7 @@ test('fail-open: no API key + no identity configured → still exit 0 (never blo
     payload: { tool_name: 'Bash', tool_input: { command: 'git commit -m "test"' }, cwd: dir },
     port: undefined,
     apiKey: null,
+    baseEnv: isolatedGitEnv(),
   });
   assert.equal(r.code, 0);
 });
@@ -161,6 +174,7 @@ test('fail-open: no API key + no identity configured → still exit 0 (never blo
 test('recognizes `git -C <dir> commit` and targets that dir', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  const env = isolatedGitEnv();
   const stub = await startStub({
     success: true,
     authenticated: true,
@@ -171,9 +185,10 @@ test('recognizes `git -C <dir> commit` and targets that dir', async (t) => {
     const r = await runHook({
       payload: { tool_name: 'Bash', tool_input: { command: `git -C "${dir}" commit -m "test"` } },
       port: stub.port,
+      baseEnv: env,
     });
     assert.equal(r.code, 0);
-    assert.equal(gitConfig(dir, 'user.name'), 'Axon Gamma');
+    assert.equal(gitConfig(dir, 'user.name', env), 'Axon Gamma');
   } finally {
     stub.server.close();
   }
@@ -195,16 +210,7 @@ test('helper: extractTargetDir prefers `git -C <dir>`, else eventCwd, else proce
 });
 
 test('helper: identityAlreadyConfigured true when GIT_AUTHOR_NAME/EMAIL env vars set', () => {
-  const prevName = process.env.GIT_AUTHOR_NAME;
-  const prevEmail = process.env.GIT_AUTHOR_EMAIL;
-  process.env.GIT_AUTHOR_NAME = 'X';
-  process.env.GIT_AUTHOR_EMAIL = 'x@example.com';
-  try {
-    assert.equal(identityAlreadyConfigured('/nonexistent/path'), true);
-  } finally {
-    if (prevName === undefined) delete process.env.GIT_AUTHOR_NAME;
-    else process.env.GIT_AUTHOR_NAME = prevName;
-    if (prevEmail === undefined) delete process.env.GIT_AUTHOR_EMAIL;
-    else process.env.GIT_AUTHOR_EMAIL = prevEmail;
-  }
+  // Injected, not mutated — no write to the shared process.env.
+  const env = { ...isolatedGitEnv(), GIT_AUTHOR_NAME: 'X', GIT_AUTHOR_EMAIL: 'x@example.com' };
+  assert.equal(identityAlreadyConfigured('/nonexistent/path', { env }), true);
 });

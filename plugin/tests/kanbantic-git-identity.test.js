@@ -31,6 +31,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const { spawn, spawnSync } = require('node:child_process');
+const { isolatedGitEnv } = require('./helpers/git-env.js');
 
 const SCRIPT = path.resolve(__dirname, '..', 'scripts', 'kanbantic-git-identity.js');
 
@@ -82,9 +83,9 @@ function startStub({ identity, repository } = {}) {
   });
 }
 
-function runScript({ cwd, port, apiKey = 'test-key', extraEnv = {} }) {
+function runScript({ cwd, port, apiKey = 'test-key', extraEnv = {}, baseEnv = process.env }) {
   return new Promise((resolve) => {
-    const env = { ...process.env };
+    const env = { ...baseEnv };
     delete env.GIT_AUTHOR_NAME;
     delete env.GIT_AUTHOR_EMAIL;
     delete env.KANBANTIC_REPOSITORY_ID;
@@ -106,20 +107,23 @@ function runScript({ cwd, port, apiKey = 'test-key', extraEnv = {} }) {
 test('layer 1: GIT_AUTHOR_NAME/EMAIL env vars set → no-op, git config untouched', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  const env = isolatedGitEnv();
   const r = await runScript({
     cwd: dir,
     apiKey: null,
+    baseEnv: env,
     extraEnv: { GIT_AUTHOR_NAME: 'Workstation Override', GIT_AUTHOR_EMAIL: 'override@example.com' },
   });
   assert.equal(r.code, 0);
   assert.match(r.stderr, /workstation override active/);
-  assert.equal(getGitConfig(dir, 'user.name'), null);
-  assert.equal(getGitConfig(dir, 'user.email'), null);
+  assert.equal(getGitConfig(dir, 'user.name', { env }), null);
+  assert.equal(getGitConfig(dir, 'user.email', { env }), null);
 });
 
 test('layer 2: get_current_agent_identity resolves → git config set to agent identity', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  const env = isolatedGitEnv();
   const stub = await startStub({
     identity: {
       success: true,
@@ -129,10 +133,10 @@ test('layer 2: get_current_agent_identity resolves → git config set to agent i
     },
   });
   try {
-    const r = await runScript({ cwd: dir, port: stub.port });
+    const r = await runScript({ cwd: dir, port: stub.port, baseEnv: env });
     assert.equal(r.code, 0);
-    assert.equal(getGitConfig(dir, 'user.name'), 'Axon Alpha');
-    assert.equal(getGitConfig(dir, 'user.email'), 'axon-alpha@agents.kanbantic.local');
+    assert.equal(getGitConfig(dir, 'user.name', { env }), 'Axon Alpha');
+    assert.equal(getGitConfig(dir, 'user.email', { env }), 'axon-alpha@agents.kanbantic.local');
   } finally {
     stub.server.close();
   }
@@ -141,15 +145,18 @@ test('layer 2: get_current_agent_identity resolves → git config set to agent i
 test('layer 3: agent identity unauthenticated, get_repository resolves → git config set to repo identity', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  const env = isolatedGitEnv();
   const stub = await startStub({
     identity: { success: true, authenticated: false },
     repository: { success: true, gitAuthorName: 'Repo Bot', gitAuthorEmail: 'repo-bot@example.com' },
   });
   try {
-    const r = await runScript({ cwd: dir, port: stub.port, extraEnv: { KANBANTIC_REPOSITORY_ID: 'repo-123' } });
+    const r = await runScript({
+      cwd: dir, port: stub.port, baseEnv: env, extraEnv: { KANBANTIC_REPOSITORY_ID: 'repo-123' },
+    });
     assert.equal(r.code, 0);
-    assert.equal(getGitConfig(dir, 'user.name'), 'Repo Bot');
-    assert.equal(getGitConfig(dir, 'user.email'), 'repo-bot@example.com');
+    assert.equal(getGitConfig(dir, 'user.name', { env }), 'Repo Bot');
+    assert.equal(getGitConfig(dir, 'user.email', { env }), 'repo-bot@example.com');
   } finally {
     stub.server.close();
   }
@@ -158,15 +165,16 @@ test('layer 3: agent identity unauthenticated, get_repository resolves → git c
 test('layer 3 fallback via git config kanbantic.repositoryId (no env var needed)', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
-  spawnSync('git', ['config', 'kanbantic.repositoryId', 'repo-456'], { cwd: dir });
+  const env = isolatedGitEnv();
+  spawnSync('git', ['config', 'kanbantic.repositoryId', 'repo-456'], { cwd: dir, env });
   const stub = await startStub({
     identity: { success: true, authenticated: false },
     repository: { success: true, gitAuthorName: 'Repo Bot 2', gitAuthorEmail: 'repo-bot-2@example.com' },
   });
   try {
-    const r = await runScript({ cwd: dir, port: stub.port });
+    const r = await runScript({ cwd: dir, port: stub.port, baseEnv: env });
     assert.equal(r.code, 0);
-    assert.equal(getGitConfig(dir, 'user.name'), 'Repo Bot 2');
+    assert.equal(getGitConfig(dir, 'user.name', { env }), 'Repo Bot 2');
   } finally {
     stub.server.close();
   }
@@ -175,19 +183,21 @@ test('layer 3 fallback via git config kanbantic.repositoryId (no env var needed)
 test('nothing resolves (no API key) → git config left untouched, no throw', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
-  const r = await runScript({ cwd: dir, apiKey: null });
+  const env = isolatedGitEnv();
+  const r = await runScript({ cwd: dir, apiKey: null, baseEnv: env });
   assert.equal(r.code, 0);
-  assert.equal(getGitConfig(dir, 'user.name'), null);
+  assert.equal(getGitConfig(dir, 'user.name', { env }), null);
 });
 
 test('nothing resolves (agent unauthenticated + no repositoryId) → left untouched', async (t) => {
   if (!HAS_GIT) return t.skip('git not on PATH');
   const dir = mkTmpRepo();
+  const env = isolatedGitEnv();
   const stub = await startStub({ identity: { success: true, authenticated: false } });
   try {
-    const r = await runScript({ cwd: dir, port: stub.port });
+    const r = await runScript({ cwd: dir, port: stub.port, baseEnv: env });
     assert.equal(r.code, 0);
-    assert.equal(getGitConfig(dir, 'user.name'), null);
+    assert.equal(getGitConfig(dir, 'user.name', { env }), null);
   } finally {
     stub.server.close();
   }
@@ -197,19 +207,19 @@ test('nothing resolves (agent unauthenticated + no repositoryId) → left untouc
 test('helper: resolveRepositoryId prefers env var over git config', () => {
   if (!HAS_GIT) return;
   const dir = mkTmpRepo();
-  spawnSync('git', ['config', 'kanbantic.repositoryId', 'from-config'], { cwd: dir });
-  const prev = process.env.KANBANTIC_REPOSITORY_ID;
-  process.env.KANBANTIC_REPOSITORY_ID = 'from-env';
-  try {
-    assert.equal(resolveRepositoryId(dir), 'from-env');
-  } finally {
-    if (prev === undefined) delete process.env.KANBANTIC_REPOSITORY_ID;
-    else process.env.KANBANTIC_REPOSITORY_ID = prev;
-  }
+  const env = isolatedGitEnv();
+  spawnSync('git', ['config', 'kanbantic.repositoryId', 'from-config'], { cwd: dir, env });
+  // Injected, not mutated: no write to the shared process.env, no restore-in-finally,
+  // and the two branches of the precedence are asserted against the same fixture.
+  const withOverride = { ...env, KANBANTIC_REPOSITORY_ID: 'from-env' };
+  const withoutOverride = { ...env };
+  delete withoutOverride.KANBANTIC_REPOSITORY_ID;
+  assert.equal(resolveRepositoryId(dir, { env: withOverride }), 'from-env');
+  assert.equal(resolveRepositoryId(dir, { env: withoutOverride }), 'from-config');
 });
 
 test('helper: getGitConfig returns null for an unset key', () => {
   if (!HAS_GIT) return;
   const dir = mkTmpRepo();
-  assert.equal(getGitConfig(dir, 'user.name'), null);
+  assert.equal(getGitConfig(dir, 'user.name', { env: isolatedGitEnv() }), null);
 });
