@@ -38,7 +38,7 @@ If the readiness-gate is still not green at the end of a run, the issue stays on
    - **Bug** → Step 5B (root-cause-dialoog)
    - **Epic** → Step 5E (requirements + implementation plan, sequentieel)
 4.5. **Wireframe-blok valideren (Step 5W, HARD — KBT-RL191)** — elke type-route eindigt hier vóór de readiness-validatie: parse het `## Wireframe`-blok (of de expliciete `n.v.t. (geen UI)`-opt-out) en valideer elke gepinde pagina
-5. **Validate readiness** — re-check `isReadyToClaim`; report failing checks or confirm ready
+5. **Validate readiness** — re-check `isReadyToClaim`; verifieer het test-policy-record tegen de declaratie (Step 6.1, HARD); report failing checks or confirm ready
 6. **Record Decision entry** — summary of what was added in this run
 6.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any reusable pattern/gotcha/rule discovered this run
 7. **Handoff** — instruct user to invoke `kanbantic-issue-execute`
@@ -61,7 +61,7 @@ Then the skill stops.
 
 **Epic-route exception (v2.4.0, KBT-F250):** When preparing an `Epic` in the new Phase-of-Features-of-Tasks shape, the skill MAY call `create_issue` to mint child-`Feature`s that fall **within the Epic's already-defined scope**. Those Features must be (a) parented to the Epic via `parentIssueId` at creation, (b) immediately assigned to a Phase via `assign_feature_to_phase`, and (c) covered by the Epic's existing description / acceptance criteria — no scope expansion, no unrelated work.
 
-Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, `link_wireframe_to_issue` and `add_issue_attachment` (wireframe-pinning + reference-attachments bij UI-issues, Step 5W), and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
+Allowed MCP writes are: `create_specification`, `create_test_case`, `create_user_story`, `create_phase`, `add_task`, `add_discussion_entry`, `create_implementation_plan`, `set_test_policy` (the per-level test-policy record, Step 5F.5 / 5B.6 — KBT-B551), `update_issue` (for description clarification), `assign_feature_to_phase`, `assign_features_to_phase`, `link_wireframe_to_issue` and `add_issue_attachment` (wireframe-pinning + reference-attachments bij UI-issues, Step 5W), and — under the Epic-route exception only — `create_issue` for in-scope child-Features.
 </HARD-GATE>
 
 ## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
@@ -297,13 +297,47 @@ Rules:
 - **Derde E2E-voorwaarde (ADM-TRUL015):** raakt het issue een artefact dat een runtime bij opstart inleest (`.claude/agents/*.md`, `.claude/commands/*.md`, plugin-manifesten, compose-files, CI-workflows, EF-migraties, appsettings-secties, wireframe-filesets)? Dan blijft E2E **Vereist**, ook zonder UI- en API-oppervlak. De test is dan niet "het bestand bestaat en klopt", maar "een verse instantie van de runtime laadt het en gebruikt het" — wat doorgaans een nieuwe sessie of herstart vereist, omdat runtimes zulke artefacten bij opstart inlezen. Volledige onderbouwing: **ADM-TRUL015**.
 - Deze declaratie vervangt KBT-TRUL013 (opgeheven per KBT-F449).
 
+Leg de uitkomst vervolgens **twee keer** vast — één keer machinaal, één keer leesbaar. Beide zijn nodig en geen van beide vervangt de ander.
+
+#### Stap 1 — schrijf het beleidsrecord met `set_test_policy` (VERPLICHT — KBT-B551)
+
+<HARD-GATE>
+De Done-gates lezen **uitsluitend het beleidsrecord**, nooit een discussion-entry. Een declaratie die alleen als `Decision`-entry bestaat heeft **geen enkel effect**: het record blijft dan op de standaardwaarden (alle drie `Required`, min 1) en `claim_issue` bevriest het in díé staat. Het verschil blijkt pas bij de Done-transitie — ná de merge, wanneer `IsFrozen == true` en alleen nog een `overrideReason` helpt (reviewer-akkoord voor iets wat hier al bewust besloten was).
+
+Roep `set_test_policy` daarom **per niveau** aan, en wel **nu** — vóór de Ready-transitie in Step 6a en dus ruim vóór de bevriezing door `claim_issue`. Drie aanroepen, altijd alle drie, ook wanneer een niveau op de standaardwaarde uitkomt: expliciet gezet is controleerbaar, impliciet overgeslagen niet.
+</HARD-GATE>
+
+```
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "Unit",        applicability: "Required", minimumCount: <N>)
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "Integration", applicability: "Required", minimumCount: <N>)
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "E2E",         applicability: "Required", minimumCount: <N>)
+```
+
+Voor een niveau dat op N.v.t. uitkomt:
+
+```
+MCP: mcp__kanbantic__set_test_policy(
+  issueId, level: "<Unit|Integration|E2E>",
+  applicability: "NotApplicable",
+  notApplicableReason: "<reden ≥20 chars, ≤500 tekens>"
+)
+```
+
+`notApplicableReason` is verplicht bij `NotApplicable` en kent een bovengrens van 500 tekens (zie `reference/using-kanbantic.md`). Schrijf de reden die je in de `Decision`-entry gebruikt hier beknopt terug, zodat het record zelfstandig leesbaar is.
+
+#### Stap 2 — leg de motivering vast als `Decision`-entry
+
+Het record legt vast *wat* het beleid is; het kan niet vastleggen *waarom*. Die verklaring hoort in de entry, mét een expliciete verwijzing naar het gezette record zodat beide vanuit elkaar vindbaar zijn:
+
 ```
 MCP: mcp__kanbantic__add_discussion_entry(
   issueId,
-  content: "## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)\n\n| Niveau | Applicabiliteit | Minimum |\n|---|---|---|\n| Unit | Vereist | <N> |\n| Integration | Vereist | <N> |\n| E2E | Vereist | <N> |\n\n_N.v.t.-rationale (indien van toepassing per niveau):_ <reden ≥20 chars>",
+  content: "## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)\n\n| Niveau | Applicabiliteit | Minimum |\n|---|---|---|\n| Unit | Vereist | <N> |\n| Integration | Vereist | <N> |\n| E2E | Vereist | <N> |\n\n_N.v.t.-rationale (indien van toepassing per niveau):_ <reden ≥20 chars>\n\n_Gezet in het beleidsrecord via `set_test_policy` (3 aanroepen, vóór de Ready-transitie). Deze entry is de motivering; het record is het gezag — geverifieerd in Step 6.1._",
   entryType: "Decision"
 )
 ```
+
+De verificatie dat beide daadwerkelijk overeenkomen gebeurt in **Step 6.1**, vóór de Ready-transitie. Sla die niet over: een half-geslaagde reeks `set_test_policy`-aanroepen is even stil als helemaal geen aanroep.
 
 ### 5F.6: Decision entry
 
@@ -370,13 +404,41 @@ For bugs, the E2E level typically maps to the applicable stack from the issue's 
 
 De derde E2E-voorwaarde uit 5F.5 geldt hier onverkort: raakt de fix een artefact dat een runtime bij opstart inleest, dan blijft E2E **Vereist** ook zonder UI- en API-oppervlak, en luidt de assertie "een verse instantie van de runtime laadt het en gebruikt het" — niet "het bestand klopt" (**ADM-TRUL015**).
 
+Ook de tweeledige vastlegging uit 5F.5 geldt hier onverkort.
+
+#### Stap 1 — schrijf het beleidsrecord met `set_test_policy` (VERPLICHT — KBT-B551)
+
+<HARD-GATE>
+De Done-gates lezen **uitsluitend het beleidsrecord**, nooit een discussion-entry. Een `Decision`-entry alleen laat het record op de standaardwaarden staan (alle drie `Required`, min 1), en `claim_issue` bevriest het zo. Roep `set_test_policy` daarom **per niveau** aan, **vóór de Ready-transitie** in Step 6a en dus vóór de bevriezing. Altijd alle drie de aanroepen, ook voor een niveau dat op de standaardwaarde uitkomt.
+</HARD-GATE>
+
+```
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "Unit",        applicability: "Required", minimumCount: <N>)
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "Integration", applicability: "Required", minimumCount: <N>)
+MCP: mcp__kanbantic__set_test_policy(issueId, level: "E2E",         applicability: "Required", minimumCount: <N>)
+```
+
+Voor een niveau dat op N.v.t. uitkomt — `notApplicableReason` is dan verplicht (≥20 chars, ≤500 tekens):
+
+```
+MCP: mcp__kanbantic__set_test_policy(
+  issueId, level: "<Unit|Integration|E2E>",
+  applicability: "NotApplicable",
+  notApplicableReason: "<reden ≥20 chars, ≤500 tekens>"
+)
+```
+
+#### Stap 2 — leg de motivering vast als `Decision`-entry
+
 ```
 MCP: mcp__kanbantic__add_discussion_entry(
   issueId,
-  content: "## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)\n\n| Niveau | Applicabiliteit | Minimum |\n|---|---|---|\n| Unit | Vereist | <N> |\n| Integration | Vereist | <N> |\n| E2E | Vereist | <N> |\n\n_N.v.t.-rationale (indien van toepassing per niveau):_ <reden ≥20 chars>",
+  content: "## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)\n\n| Niveau | Applicabiliteit | Minimum |\n|---|---|---|\n| Unit | Vereist | <N> |\n| Integration | Vereist | <N> |\n| E2E | Vereist | <N> |\n\n_N.v.t.-rationale (indien van toepassing per niveau):_ <reden ≥20 chars>\n\n_Gezet in het beleidsrecord via `set_test_policy` (3 aanroepen, vóór de Ready-transitie). Deze entry is de motivering; het record is het gezag — geverifieerd in Step 6.1._",
   entryType: "Decision"
 )
 ```
+
+Step 6.1 verifieert vóór de Ready-transitie dat record en declaratie werkelijk overeenkomen.
 
 **UI-rakende bugs — UI-contract (KBT-F627).** Bugs met een geldig `## Wireframe`-blok (geen opt-out) volgen hetzelfde UI-contract-mechanisme als Features: schrijf de `Decision`-entry per element-categorie zoals in 5F.3b, conform `$CLAUDE_PLUGIN_ROOT/skills/lane-shared/ui-contract.md`. Voor een UI-bug legt het contract de **correcte** eindtoestand vast (het wireframe is de norm, niet de kapotte huidige UI).
 
@@ -585,6 +647,35 @@ MCP: mcp__kanbantic__list_versions(workspaceId)   // live version tool; filter t
 - **A Planned Version exists** but the issue carries a `VersionId` of a **different** Application → warn (KBT-RL144 scope-mismatch); recommend re-running triage to fix the Version. Do **not** block the Ready transition on this.
 - **No Planned Version** for the Application → warn: `ℹ️ Application <X> heeft nog geen Planned Version — kanbantic-issue-execute zal de claim blokkeren tot er één is (gebruik preview_next_version + create_version).` This is informational only; it does **not** stop the Ready transition. Let op: `create_version` is **app-scoped** — de `applicationId` is verplicht (PR #242) en nieuwe Versions starten in `Planned`.
 
+### 6.1: Test-policy record-verificatie — HARD (Feature / Bug; Epic: n.v.t.) (KBT-B551)
+
+**Alleen voor Feature- en Bug-issues.** De test-policy wordt gedeclareerd in 5F.5 respectievelijk 5B.6; de Epic-route (5E) kent geen test-policy-declaratie, omdat coverage bij Epics een roll-up is van de child-Features die elk hun eigen policy krijgen wanneer ze zelf voorbereid worden (Regel A / KBT-RL121). Dit spoort met `kanbantic-issue-execute` Step 3c, dat `frozenPolicy` eveneens als "Feature / Bug only" scopet. **Voor een Epic: sla deze stap over zónder fout en ga door naar 6a.**
+
+De declaratie uit Step 5F.5 / 5B.6 staat op twee plaatsen: als `Decision`-entry en als beleidsrecord. Alleen het record telt voor de gates. Toets hier, **vóór** de transitie in 6a en dus vóór de bevriezing door `claim_issue`, dat de twee werkelijk overeenkomen:
+
+```
+MCP: mcp__kanbantic__get_test_policy(issueId)
+```
+
+Vergelijk per niveau (`Unit`, `Integration`, `E2E`) het teruggegeven record met de tabel die je in de `Decision`-entry hebt geschreven:
+
+| Vergelijking | Verwacht |
+|---|---|
+| `applicability` | `Required` ↔ "Vereist", `NotApplicable` ↔ "N.v.t." |
+| `minCount` | het `Minimum` uit dezelfde rij |
+| `notApplicableReason` | gevuld voor elk `NotApplicable`-niveau |
+| `isFrozen` | `false` — zie hieronder wanneer dit `true` is |
+
+**`isFrozen == true` op dit punt** betekent dat het issue al eens geclaimd is geweest en daarna is teruggekomen naar `Triaged` (bijvoorbeeld via een bounce-back). Dat is op zichzelf legitiem en **geen blokkade**: ga door naar 6a wanneer record en declaratie overeenkomen. Wijken ze áf, dan geldt de HARD-GATE hieronder onverkort, maar is de correctie duurder — een bevroren niveau verlagen of op `NotApplicable` zetten vereist `overrideReason` (≥20 chars, reviewer-akkoord). Verhogen van `minimumCount` blijft vrij.
+
+<HARD-GATE>
+**Divergentie is een readiness-tekortkoming, geen waarschuwing.** Wijkt ook maar één niveau af, ga dan **niet** door naar 6a. Corrigeer met een hernieuwde `set_test_policy`-aanroep voor dat niveau en lees opnieuw uit; blijft het afwijken, rapporteer via 6b en laat het issue op `Triaged`.
+
+Waarom dit een aparte harde stap is en geen aanname: de faalmodus van KBT-B551 was volledig **stil**. De declaratie zag er correct uit, het record stond op de standaardwaarden, en niets vergeleek de twee tot de Done-gates — ná de merge, met een bevroren record en alleen nog een `overrideReason` als uitweg. Deze stap dekt de hele klasse af (elke declaratie die niet in het record landt), niet alleen een vergeten aanroep: ook een half-geslaagde reeks, een handmatige afwijking, of een record dat een eerdere run al gezet had, komt hier boven water.
+</HARD-GATE>
+
+Komt alles overeen, rapporteer `Test-policy: Unit <a>/<n> · Integration <a>/<n> · E2E <a>/<n> ✓ (record == declaratie)` en ga door naar 6a.
+
 ### 6a: All checks green — transition to Ready
 
 ```
@@ -602,6 +693,7 @@ If the transition succeeds, report:
 - TestCases: ✓ (N linked)
 - Wireframe pinned: ✓ (vN, <pagina's>) / n.v.t.
 - UI-contract: ✓ / n.v.t.
+- Test-policy record: ✓ (Unit <a>/<n> · Integration <a>/<n> · E2E <a>/<n>, record == declaratie) / n.v.t. (Epic)
 
 **Next step:** Invoke `kanbantic-issue-execute`. It will call `claim_issue(branch: ...)` which atomically assigns the issue and promotes `Ready → InProgress` in a single MCP call (KBT-RL052)."
 
@@ -641,4 +733,5 @@ If 6a fires: issue is `Ready`; hand off to `kanbantic-issue-execute`. If 6b fire
 - **Epics are sequential design+plan in one run** — leaving a half-prepared Epic is a failure mode
 - **Root cause before fix (Bug)** — prepare captures understanding, execute captures the fix
 - **Readiness gate is the exit criterion** — the skill is done when `isReadyToClaim == true`
+- **Het beleidsrecord is het gezag, de entry de motivering** — een test-policy die alleen als `Decision`-entry bestaat is voor de gates onzichtbaar; `set_test_policy` schrijft hem, Step 6.1 verifieert hem (KBT-B551)
 - **Kanbantic is source of truth** — everything persists via MCP
