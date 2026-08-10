@@ -651,19 +651,31 @@ If the deploy fails: **there is no legal `InDeployment → Review` transition** 
 ## Step 8.5: Versie-registratie — a shipped version must be recorded (KBT-B545)
 
 <HARD-GATE>
-If the merge in Step 7 also **bumped the version files of the repository** — for the Kanbantic Claude Code Plugin that is `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and `package.json` in lockstep — then that merge **is a release**, and the release must be registered in Kanbantic before this skill returns. Do not defer it to "whoever picks up the next issue".
+If the merge in Step 7 **changed the repository's version number**, then that merge **is a release**, and the release must be registered in Kanbantic before this skill returns. Do not defer it to "whoever picks up the next issue".
 </HARD-GATE>
 
 **Why this step exists.** KBT-B545: the plugin repo cut a release per merged issue while Kanbantic only ever got a new Version when the claim-gate demanded a bucket for new work. One bucket served dozens of issues, so nineteen shipped minors were never recorded. `preview_next_version` reckons from the highest **registered** Version, so it went on proposing numbers that had been out for weeks. Nothing was broken — a step simply did not exist. This is that step.
 
 ### 8.5a: Determine whether this merge shipped a release
 
+**The version carrier is repo-specific — resolve it before you test it.** This skill runs for every repository in the workspace, and they do not agree on where the number lives:
+
+| Repository | Version carrier | Notes |
+|---|---|---|
+| `kanbantic-claude-plugin` | `plugin/.claude-plugin/plugin.json` → `version` | `.claude-plugin/marketplace.json` must match it in lockstep; `npm run check:version` enforces that. `package.json` is the test-harness package and is **not** the carrier (see `plugin/scripts/check-version-sync.js`). |
+| `kanbantic` (monorepo) | git tags (`git describe --tags`) | CI auto-creates the next PATCH tag on every push to `main`; the tag stream is a build counter, deliberately decoupled from the Kanbantic Versions. This step does **not** apply — go to Step 9. |
+| any other repo | resolve from its own release convention | If you cannot identify a carrier, this step does not apply. |
+
+Then compare the **value**, not the file's mtime — an edit to a carrier file that leaves `version` alone (an added npm script, a reworded description) is not a release:
+
 ```bash
-git diff --name-only <merge-base>..HEAD -- \
-  plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json package.json
+BASE=$(git merge-base origin/main HEAD)
+OLD=$(git show "$BASE":plugin/.claude-plugin/plugin.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+NEW=$(node -p "require('./plugin/.claude-plugin/plugin.json').version")
+[ "$OLD" = "$NEW" ] && echo "no release" || echo "released $NEW (was $OLD)"
 ```
 
-No version files touched ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
+Version unchanged ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
 
 ### 8.5b: Close out the shipped Version
 

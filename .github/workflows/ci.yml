@@ -24,3 +24,10 @@ jobs:
         run: npm test
       - name: Version-sync guard (marketplace.json <-> plugin.json)
         run: npm run check:version
+      # KBT-B545: the release ritual lived entirely in agent attentiveness — no release
+      # workflow, no enforcement, and a Kanbantic Version registry that fell nineteen
+      # minors behind as a result. Registering the Version needs API credentials this CI
+      # does not have; requiring notes for a shipped number does not, and the repo's own
+      # history (19 notes without a tag, 4 tags without notes) shows it is worth checking.
+      - name: Release-notes guard (a shipped version must say what it contains)
+        run: npm run check:notes

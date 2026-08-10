@@ -22,23 +22,28 @@ Drift was dus geen incident maar de verwachte uitkomst. Dezelfde vorm als **KBT-
 
 ## Wat er verandert
 
-### `kanbantic-issue-review` — Step 8.5: Release-registratie
+### `kanbantic-issue-review` — Step 8.5: Versie-registratie
 
-Een merge die de drie versiebestanden bumpt **is** een release, en wordt vanaf nu ook als zodanig afgehandeld voordat de skill terugkeert:
+Een merge die het **versienummer** van de repo wijzigt **is** een release, en wordt vanaf nu ook als zodanig afgehandeld voordat de skill terugkeert:
 
-- **8.5a** — de trigger is de diff, niet het geheugen: raakte de merge `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` of `package.json`? Zo nee, stilzwijgend door naar Step 9. Dat is het normale geval.
+- **8.5a** — de trigger is de diff, niet het geheugen. En het is de *waarde*, niet de bestandsdatum: `git show <merge-base>:plugin/.claude-plugin/plugin.json` tegen de huidige. Een bewerking die `version` ongemoeid laat (een npm-script erbij, een herschreven omschrijving) is geen release. De **versiedrager verschilt per repo** — voor de plugin is dat `plugin.json`, voor de monorepo de git-tagstroom, die per beleid ontkoppeld is en waar deze stap dus niet geldt. Dat staat nu in een tabel in de skill, want een generieke lane-skill die stilzwijgend maar in één repo werkt is een no-op met een geruststellende naam.
 - **8.5b** — het uitgebrachte nummer wordt uit de repo gelezen (nooit geraden), de bijbehorende Version gaat door `freeze_version` → `mark_version_released`. Bestaat hij nog niet, dan eerst `create_version` — app-scoped, en zonder `description` vanwege KBT-B557.
 - **8.5c** — de volgende `Planned` Version wordt hier geopend in plaats van door de volgende agent onder tijdsdruk. `preview_next_version` blijft een *suggestie*: ligt zijn `baselineNumber` onder wat de repo draagt, dan is de registratie gedreven en wordt de repo als waarheid genomen, met de discrepantie als Decision-entry.
 
-### `skill-docs-release-registration.test.js` — de stap kan niet meer stilletjes verdwijnen
+### Twee guards, en het eerlijke onderscheid ertussen
 
-Vier assertions in `npm test`, naar het model van `skill-docs-version-hint.test.js`: de sectie bestaat, hij noemt `freeze_version` én `mark_version_released`, hij triggert op de versiebestanden, en hij waarschuwt tegen het blind volgen van `preview_next_version`. Alle vier falen tegen `origin/main` — de guard kan aantoonbaar rood worden (KBT-B483).
+**`skill-docs-release-registration.test.js`** houdt de stap op zijn plek: vijf assertions, gescoped op de sectie zelf in plaats van op het hele bestand, zodat een herschrijving die de kop laat staan maar de tool-calls verplaatst er niet doorheen glipt. Alle vijf falen tegen `origin/main` (KBT-B483). Maar dit blijft een *aanwezigheidstest*: hij bewijst dat de instructie er staat, niet dat een agent hem uitvoert.
+
+**`check-release-notes.js`** is het deel dat een machine wél kan afdwingen, en draait mee in CI: een versienummer in `plugin.json` zonder bijbehorende `RELEASE_NOTES_v<versie>.md` is een harde faal — een leeg bestand ook, want een guard die met een leeg bestand tevreden is kan niet falen. Dat registreert de Kanbantic-Version niet (daarvoor heeft deze CI geen API-sleutel), maar het maakt de helft die checkbaar is machinaal. Dat die helft de moeite waard is, laat de repo zelf zien: **19 release-notes-bestanden zonder tag, en 4 tags zonder release-notes.**
 
 ## Wat er in de API-repo bij hoort
 
-`preview_next_version` kreeg in dezelfde issue een monotonie-invariant (`VersionAppService.ComputeNextVersionAsync`): het voorstel ligt altijd strikt boven élke geregistreerde Version. Dat sluit twee bereikbare gaten — een naam-parser die `Plugin v2.36.0 — …` stil oversloeg, en een CalVer-teller die bij een periodewissel onder zijn eigen baseline kon zakken.
+`preview_next_version` kreeg in dezelfde issue een monotonie-invariant (`VersionAppService.ComputeNextVersionAsync`). Twee samenwerkende delen, met een duidelijke taakverdeling:
 
-Die clamp voorkomt dat er een *fout nummer* wordt uitgedeeld. Hij kan niet voorkomen dat de registratie achter de repo aan gaat lopen — niets aan de serverkant kan dat. Alleen Step 8.5 kan dat, en daarom staat hij hier.
+- **De naam-parser draagt het SemVer-pad.** `CreateAsync` zet `Number` nooit, dus élke Version wordt uit zijn naam teruggelezen. Twee regels: een `v`-prefix is een expliciete claim dat een token een versie is en wint dus, en noemt een naam er meerdere, dan staat de rij voor de **hoogste**. Zonder die regels leest "Angular 18.2 — v2.36.0" als versie 18.2, en "Hotfix na v2.35.0 → v2.40.0" als v2.35.0 — dat laatste is dit hele issue, nog eens.
+- **De clamp is de CalVer-backstop, niet de invariant.** Op het SemVer-pad hoogt `ComputeSemVer` altijd de baseline op die hij kreeg, dus daar vuurt de clamp nooit. Waar hij wél telt is CalVer: de periodeteller reset, en `VersionController` laat de aanroeper de timestamp bepalen. Hij heeft nu ook een postconditie, want een guard die "opgehoogd" meldt zonder iets te hebben opgehoogd is precies het anti-patroon dat KBT-B483 moet uitsluiten.
+
+Samen voorkomen ze dat er een *fout nummer* wordt uitgedeeld. Ze kunnen niet voorkomen dat de registratie achter de repo aan gaat lopen — niets aan de serverkant kan dat. Alleen Step 8.5 kan dat, en daarom staat hij hier.
 
 ## Wat er bewust niet is gedaan
 

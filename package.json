@@ -9,7 +9,8 @@
     "test:signals:docker": "sh plugin/scripts/run-signal-tests-in-docker.sh",
     "check:drift": "node plugin/scripts/check-bundle-tool-drift.js",
     "check:param-drift": "node plugin/scripts/check-tool-param-drift.js",
-    "check:version": "node plugin/scripts/check-version-sync.js"
+    "check:version": "node plugin/scripts/check-version-sync.js",
+    "check:notes": "node plugin/scripts/check-release-notes.js"
   },
   "engines": {
     "node": ">=18"

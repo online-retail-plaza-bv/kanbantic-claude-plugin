@@ -32,46 +32,80 @@ const REVIEW_SKILL = path.join(
 
 const content = fs.readFileSync(REVIEW_SKILL, 'utf8');
 
+const HEADING = '## Step 8.5: Versie-registratie';
+
+/**
+ * Returns the Step 8.5 section only — from its heading to the next `## ` heading.
+ *
+ * Scoping matters: an assertion against the whole 800-line SKILL.md passes on a
+ * mention anywhere in the file, so a rewrite that keeps the heading but moves the
+ * tool calls elsewhere would slip through the guard while gutting the step.
+ * Slicing from `indexOf` alone is no better — on a renamed heading it returns -1
+ * and `slice(-1)` yields the file's last character, failing for a reason that
+ * misdescribes the cause.
+ */
+function section() {
+  const start = content.indexOf(HEADING);
+  assert.notEqual(
+    start, -1,
+    `kanbantic-issue-review/SKILL.md must keep the "${HEADING}" section — the step `
+      + 'that records a shipped version in Kanbantic (KBT-B545).');
+  const rest = content.slice(start + HEADING.length);
+  const end = rest.indexOf('\n## ');
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
 test('kanbantic-issue-review carries a release-registration step', () => {
-  assert.match(
-    content,
-    /##\s*Step\s*8\.5:\s*Versie-registratie/,
-    'kanbantic-issue-review/SKILL.md must keep the "Step 8.5: Versie-registratie" '
-      + 'section — the step that records a shipped version in Kanbantic (KBT-B545).'
-  );
+  assert.ok(section().trim().length > 0, `${HEADING} must not be an empty section`);
 });
 
 test('the release-registration step names the tools that actually record a release', () => {
   // Without these two calls the step is a reminder, not a procedure: a Planned Version
   // that is never frozen and never marked Released leaves the registry looking like
   // nothing ever shipped.
+  const body = section();
   for (const tool of ['freeze_version', 'mark_version_released']) {
     assert.ok(
-      content.includes(tool),
-      `kanbantic-issue-review/SKILL.md must call ${tool} in the release-registration `
-        + `step; recording a release is the whole point of KBT-B545.`
+      body.includes(tool),
+      `the ${HEADING} section must call ${tool}; recording a release is the whole `
+        + `point of KBT-B545. A mention elsewhere in the file does not count.`
     );
   }
 });
 
-test('the release-registration step is triggered by the version files, not by memory', () => {
-  // The trigger has to be observable from the diff. "Remember to register the release"
-  // is precisely the instruction that failed for nineteen consecutive releases.
-  const section = content.slice(content.indexOf('## Step 8.5: Versie-registratie'));
+test('the release-registration step triggers on a changed version, not a touched file', () => {
+  // The trigger has to be observable from the diff, and it has to be the *value*:
+  // an edit to a carrier file that leaves `version` alone is not a release, and
+  // firing a HARD-GATE on every such PR trains agents to wave it through.
+  const body = section();
   assert.ok(
-    section.includes('plugin/.claude-plugin/plugin.json')
-      && section.includes('.claude-plugin/marketplace.json'),
-    'the release-registration step must key off the repo version files '
-      + '(plugin.json + marketplace.json) so the trigger is visible in the diff.'
+    body.includes('plugin/.claude-plugin/plugin.json'),
+    'the step must name the plugin version carrier explicitly.'
+  );
+  assert.ok(
+    body.includes('merge-base') && body.includes('git show'),
+    'the step must compare the version value across the merge-base rather than '
+      + 'testing whether a file was touched.'
+  );
+});
+
+test('the step states that the version carrier is repo-specific', () => {
+  // kanbantic-issue-review runs for every repo in the workspace. The monorepo's
+  // carrier is its git-tag stream, not a JSON file; without saying so, the gate is
+  // a silent no-op everywhere except one repo.
+  const body = section();
+  assert.ok(
+    body.includes('repo-specific') || body.includes('Version carrier'),
+    'the step must make clear which repository each version carrier belongs to.'
   );
 });
 
 test('the step warns against trusting preview_next_version over the repo', () => {
-  const section = content.slice(content.indexOf('## Step 8.5: Versie-registratie'));
+  const body = section();
   assert.ok(
-    section.includes('preview_next_version') && section.includes('baselineNumber'),
-    'the release-registration step must tell the agent to check '
-      + "preview_next_version's baselineNumber against the repo's own version — "
-      + 'following the proposal blind is what produced the v2.16.0 collision in KBT-B545.'
+    body.includes('preview_next_version') && body.includes('baselineNumber'),
+    "the step must tell the agent to check preview_next_version's baselineNumber "
+      + "against the repo's own version — following the proposal blind is what "
+      + 'produced the v2.16.0 collision in KBT-B545.'
   );
 });
