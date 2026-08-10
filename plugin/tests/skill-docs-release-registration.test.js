@@ -83,9 +83,26 @@ test('the release-registration step triggers on a changed version, not a touched
     'the step must name the plugin version carrier explicitly.'
   );
   assert.ok(
-    body.includes('merge-base') && body.includes('git show'),
-    'the step must compare the version value across the merge-base rather than '
-      + 'testing whether a file was touched.'
+    body.includes('detect-release-bump.js'),
+    'the step must delegate the trigger to detect-release-bump.js. An inline snippet '
+      + 'is not executed by anything, which is how the first attempt shipped a '
+      + 'comparison against git merge-base that can never fire after Step 7 has '
+      + 'already merged and checked out main.'
+  );
+  // Forbid *running* merge-base, not mentioning it. The prose explains at length why
+  // merge-base is the wrong comparison, and that explanation is the thing keeping a
+  // later editor from reintroducing it — so only the runnable blocks are checked.
+  const fenced = body.match(/```[\s\S]*?```/g) || [];
+  assert.ok(
+    !fenced.some((block) => block.includes('merge-base')),
+    'no runnable block in the step may compare against git merge-base: Step 8.5 runs '
+      + 'after Step 7 checked out main, so merge-base(origin/main, HEAD) == HEAD and '
+      + 'the trigger would report "no release" on every real release.'
+  );
+  assert.ok(
+    body.includes('first parent'),
+    'the step must say why the comparison is against the first parent, so a later '
+      + 'edit does not "simplify" it back into an inert form.'
   );
 });
 

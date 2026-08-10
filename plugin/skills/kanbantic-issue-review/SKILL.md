@@ -666,16 +666,18 @@ If the merge in Step 7 **changed the repository's version number**, then that me
 | `kanbantic` (monorepo) | git tags (`git describe --tags`) | CI auto-creates the next PATCH tag on every push to `main`; the tag stream is a build counter, deliberately decoupled from the Kanbantic Versions. This step does **not** apply — go to Step 9. |
 | any other repo | resolve from its own release convention | If you cannot identify a carrier, this step does not apply. |
 
-Then compare the **value**, not the file's mtime — an edit to a carrier file that leaves `version` alone (an added npm script, a reworded description) is not a release:
+Then compare the **value**, not whether the file was touched — an edit that leaves `version` alone (an added npm script, a reworded description) is not a release. For the plugin repo, run the detector:
 
 ```bash
-BASE=$(git merge-base origin/main HEAD)
-OLD=$(git show "$BASE":plugin/.claude-plugin/plugin.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
-NEW=$(node -p "require('./plugin/.claude-plugin/plugin.json').version")
-[ "$OLD" = "$NEW" ] && echo "no release" || echo "released $NEW (was $OLD)"
+node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-bump.js" .
+# → {"old":"2.36.0","new":"2.37.0","released":true}
 ```
 
-Version unchanged ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
+It compares HEAD against its **first parent**. That matters here: by the time this step runs, Step 7 has already merged and checked out `main`, so HEAD *is* `origin/main` and any comparison against `origin/main` or `git merge-base` answers "no release" every single time. The first parent of a `--no-ff` merge commit is pre-merge `main`, which is the state you actually want to diff against. The script is covered by `plugin/tests/detect-release-bump.test.js`, which drives it over real synthetic merge commits — this trigger is not prose, it is executed.
+
+`released: false` ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
+
+A **non-zero exit** means the script could not tell (not a repo, no parent, unreadable manifest). That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
 
 ### 8.5b: Close out the shipped Version
 

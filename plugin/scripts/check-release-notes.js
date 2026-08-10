@@ -41,7 +41,13 @@ const pluginManifestPath = path.join(
  */
 function resolveReleaseNotes(root = repoRoot) {
   const manifestPath = path.join(root, 'plugin', '.claude-plugin', 'plugin.json');
-  const version = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).version;
+  let version;
+  try {
+    version = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).version;
+  } catch (err) {
+    // An absent or malformed manifest should say so, not surface as a stack trace.
+    throw new Error(`could not read a version from ${manifestPath}: ${err.message}`);
+  }
   const expected = `RELEASE_NOTES_v${version}.md`;
   const expectedPath = path.join(root, expected);
   return {
@@ -54,7 +60,14 @@ function resolveReleaseNotes(root = repoRoot) {
 }
 
 function main() {
-  const { version, expected, exists, isEmpty } = resolveReleaseNotes();
+  let resolved;
+  try {
+    resolved = resolveReleaseNotes();
+  } catch (err) {
+    console.error(`[release-notes] ${err.message}`);
+    process.exit(1);
+  }
+  const { version, expected, exists, isEmpty } = resolved;
 
   if (!version) {
     console.error(`[release-notes] Could not read a version from ${pluginManifestPath}.`);
