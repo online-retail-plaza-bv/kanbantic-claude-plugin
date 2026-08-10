@@ -75,19 +75,42 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
   // release happened at that old commit — confidently, and wrong. So also refuse when a
   // known tip is strictly ahead. A local merge that has not been pushed yet stays fine:
   // there `origin/main` is an ancestor of HEAD, not ahead of it.
+  //
+  // KBT-B585 — the ahead-test alone was not enough either, because "strictly behind" is
+  // only one of the two ways a ref can be off the shared line. A local `main` that has
+  // DIVERGED from `origin/main` — its own commit on one side, upstream's on the other —
+  // is a known tip and is not an ancestor of anything, so both arms stayed false and the
+  // detector answered from the wrong line. Measured: a local main carrying 2.35.0 against
+  // an upstream that shipped 2.36.0 returned {"old":"2.33.0","new":"2.35.0","released":
+  // true} with exit 0.
+  //
+  // Both cases share one property: some tip holds a commit this ref does not. So invert
+  // the test — answer only when this ref is a tip AND every other tip is an ANCESTOR of
+  // it. Behind and diverged then both fall out as unanswerable, and the un-pushed local
+  // merge (origin/main an ancestor of HEAD) still answers.
   const head = git(repoRoot, ['rev-parse', '--verify', ref]).stdout.trim();
   const tips = ['main', 'origin/main', 'master', 'origin/master']
     .map((r) => git(repoRoot, ['rev-parse', '--verify', r]))
     .filter((r) => r.status === 0)
     .map((r) => r.stdout.trim());
 
-  const ahead = tips.filter((t) => t !== head
-    && git(repoRoot, ['merge-base', '--is-ancestor', head, t]).status === 0);
+  const isAncestor = (a, b) =>
+    git(repoRoot, ['merge-base', '--is-ancestor', a, b]).status === 0;
 
-  if (tips.length > 0 && (!tips.includes(head) || ahead.length > 0)) {
-    const why = ahead.length > 0
-      ? `is behind the default branch (${ahead[0].slice(0, 8)} is ahead of it)`
-      : 'is not the tip of the default branch';
+  const others = tips.filter((t) => t !== head);
+  const ahead = others.filter((t) => isAncestor(head, t));
+  const diverged = others.filter((t) => !isAncestor(head, t) && !isAncestor(t, head));
+
+  if (tips.length > 0 && (!tips.includes(head) || ahead.length > 0 || diverged.length > 0)) {
+    let why;
+    if (diverged.length > 0) {
+      why = `has diverged from the default branch (${diverged[0].slice(0, 8)} holds `
+        + `commits this ref does not, and vice versa)`;
+    } else if (ahead.length > 0) {
+      why = `is behind the default branch (${ahead[0].slice(0, 8)} is ahead of it)`;
+    } else {
+      why = 'is not the tip of the default branch';
+    }
     throw new Error(
       `${ref} (${head.slice(0, 8)}) ${why}. Step 8.5 runs on the merge commit, so this `
       + `ref cannot say what just shipped. Run "git fetch origin" and re-run against `
@@ -102,7 +125,52 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
     throw new Error(`no readable version in ${CARRIER} at ${ref}.`);
   }
 
-  return { old: before, new: after, released: before !== after };
+  const result = { old: before, new: after, released: before !== after };
+
+  // KBT-B585 — say how wide the window was, when the answer depends on it.
+  //
+  // The first-parent diff spans exactly one commit. On a --no-ff merge commit that is
+  // the whole merge, which is why Step 7 prescribes --no-ff. Deviate from that path —
+  // fast-forward, or a rebase-merge — and several commits land as a row of ordinary
+  // single-parent commits. If the bump is not the last of them, HEAD and HEAD^1 both
+  // already carry the new number and the answer is a confident-looking "no release".
+  // Measured: a fast-forward with the bump one commit back returned released:false,
+  // silently.
+  //
+  // Refusing outright is not the fix. A single-parent commit that did not touch the
+  // version is the overwhelmingly common case — every ordinary commit on main — and
+  // there released:false is exactly right. Refusing on all of them would make the
+  // detector useless and train its callers to ignore it.
+  //
+  // Nor can the window simply be widened here. The bug suggests diffing against the
+  // fork point with the default branch, but on a fast-forward there IS no fork: main
+  // was moved onto the branch tip, and its previous position is recorded nowhere in the
+  // commit graph. And "refuse when the bump is not in HEAD" cannot be implemented as
+  // stated, because whether a bump exists at all is precisely what this script does not
+  // know.
+  //
+  // What is wrong is the silence, and that is fixable: mark the answer as inconclusive
+  // and name the check that does not depend on the window at all. detect-release-drift.js
+  // compares the shipped carrier against the registry, so where in the history the bump
+  // sits cannot affect it (KBT-B586 / KBT-RL210).
+  // The caveat fields appear ONLY when they carry information. Three existing tests pin
+  // the answer shape with a strict deepEqual on { old, new, released }, and that pinning
+  // is worth keeping: it is the contract Step 8.5a reads. A `basis` on every answer would
+  // be noise on the settled ones and would have forced those assertions to change for no
+  // gain.
+  const parents = git(repoRoot, ['rev-list', '--parents', '-n', '1', ref])
+    .stdout.trim().split(/\s+/).length - 1;
+
+  if (parents <= 1 && !result.released) {
+    result.basis = 'single-parent';
+    result.conclusive = false;
+    result.note = 'compared against the first parent, a one-commit window. HEAD is not a '
+      + 'merge commit, so if several commits arrived together (fast-forward or '
+      + 'rebase-merge) a version bump further back cannot be ruled out. For an answer '
+      + 'that does not depend on the window, run detect-release-drift.js.';
+  }
+
+  return result;
 }
 
 function main() {
@@ -115,6 +183,13 @@ function main() {
   } catch (err) {
     console.error(`[release-bump] ${err.message}`);
     process.exit(1);
+  }
+
+  // KBT-B585 — an inconclusive answer must not read as a clean one. The JSON carries the
+  // flag for programmatic callers; stderr carries it for the human reading a transcript,
+  // who is the one most likely to skim `released:false` and move on.
+  if (result.conclusive === false) {
+    console.error(`[release-bump] inconclusive: ${result.note}`);
   }
 
   console.log(JSON.stringify(result));

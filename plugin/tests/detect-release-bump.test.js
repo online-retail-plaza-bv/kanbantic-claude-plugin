@@ -240,3 +240,193 @@ test('the CLI exits non-zero and stays silent on stdout when it cannot tell', ()
     cleanup(root);
   }
 });
+
+//
+// KBT-B585 — the two remaining silent answers.
+//
+// Both were classified as follow-ups by the KBT-B545 review (rounds 4 and 5) rather than
+// as merge blockers. Both were re-measured live before being fixed (KBT-GTCH116) instead
+// of taken on the review write-up's word.
+//
+
+/** A repo whose local default branch has genuinely diverged from its remote. */
+function repoWithDivergedMain(baseVersion, upstreamVersion, localVersion) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b585-bump-'));
+  git(root, 'init', '-q', '-b', 'main');
+  git(root, 'config', 'user.email', 'test@example.com');
+  git(root, 'config', 'user.name', 'Test');
+  git(root, 'config', 'commit.gpgsign', 'false');
+
+  writeVersion(root, baseVersion);
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'base');
+
+  // Upstream ships on its own commit above the shared base.
+  git(root, 'checkout', '-q', '-b', 'upstream');
+  writeVersion(root, upstreamVersion);
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', `upstream ships ${upstreamVersion}`);
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+
+  // Local main commits on the SAME base, so neither side is an ancestor of the other.
+  // That distinction is the whole point: a fixture where local main merely lagged is
+  // already caught by the pre-existing behind-check, so it would pass against the very
+  // bug this pins.
+  git(root, 'checkout', '-q', 'main');
+  writeVersion(root, localVersion);
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'local divergent release');
+  return root;
+}
+
+/** A repo fast-forwarded onto a branch whose bump is not its last commit. */
+function repoFastForwardedPastBump(mainVersion, branchVersion) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b585-bump-'));
+  git(root, 'init', '-q', '-b', 'main');
+  git(root, 'config', 'user.email', 'test@example.com');
+  git(root, 'config', 'user.name', 'Test');
+  git(root, 'config', 'commit.gpgsign', 'false');
+
+  writeVersion(root, mainVersion);
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'base');
+
+  git(root, 'checkout', '-q', '-b', 'feature');
+  writeVersion(root, branchVersion);
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', `bump to ${branchVersion}`);
+  fs.writeFileSync(path.join(root, 'after.txt'), 'after\n');
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '-m', 'docs, after the bump');
+
+  git(root, 'checkout', '-q', 'main');
+  git(root, 'merge', '--ff-only', '-q', 'feature');
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  return root;
+}
+
+test('a diverged local main refuses instead of answering from the wrong line', () => {
+  // KBT-B585 point 1. The freshness check tested only for strictly-behind, via
+  // `merge-base --is-ancestor head tip`. A diverged local main is a known tip and is an
+  // ancestor of nothing, so both arms of the condition stayed false and the detector
+  // answered — from a line upstream never saw.
+  //
+  // Measured on the pre-fix script: local main carrying 2.35.0 against an upstream that
+  // shipped 2.36.0 returned {"old":"2.33.0","new":"2.35.0","released":true}, exit 0.
+  const root = repoWithDivergedMain('2.33.0', '2.36.0', '2.35.0');
+  try {
+    assert.equal(
+      spawnSync('git', ['merge-base', '--is-ancestor', 'main', 'origin/main'], { cwd: root })
+        .status === 0, false, 'fixture sanity: local main must not be an ancestor');
+    assert.equal(
+      spawnSync('git', ['merge-base', '--is-ancestor', 'origin/main', 'main'], { cwd: root })
+        .status === 0, false, 'fixture sanity: upstream must not be an ancestor either');
+
+    assert.throws(() => detectReleaseBump(root, 'main'), /diverged from the default branch/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('the diverged refusal is distinguishable from the behind refusal', () => {
+  // Two different operator actions: a diverged main needs the local commit reconciled,
+  // a stale one needs a pull. One shared message would send half the readers the wrong way.
+  const diverged = repoWithDivergedMain('2.33.0', '2.36.0', '2.35.0');
+  try {
+    assert.throws(() => detectReleaseBump(diverged, 'main'), (err) => {
+      assert.match(err.message, /diverged/);
+      assert.doesNotMatch(err.message, /is behind the default branch/);
+      return true;
+    });
+  } finally {
+    cleanup(diverged);
+  }
+});
+
+test('a fast-forward whose bump is not the last commit says its answer is inconclusive', () => {
+  // KBT-B585 point 2. Measured on the pre-fix script: released:false, exit 0, and no
+  // signal of any kind that the one-commit window could have missed the bump.
+  const root = repoFastForwardedPastBump('2.36.0', '2.37.0');
+  try {
+    const r = detectReleaseBump(root);
+    assert.equal(r.released, false, 'the one-commit window genuinely sees no change');
+    assert.equal(r.basis, 'single-parent');
+    assert.equal(r.conclusive, false,
+      'released:false from a one-commit window on a non-merge commit must not present '
+        + 'itself as a settled answer');
+    assert.match(r.note, /detect-release-drift\.js/,
+      'the inconclusive answer must name the check that does not depend on the window');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('an ordinary commit that shipped nothing is still answered plainly', () => {
+  // The counterweight. Refusing on every ordinary single-parent commit would make the
+  // detector useless, and a guard that fires on the common case is one its callers learn
+  // to ignore. released:false and exit 0 must survive.
+  const root = repoWithMerge('2.36.0', '2.36.0');
+  try {
+    fs.writeFileSync(path.join(root, 'unrelated.txt'), 'unrelated\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'unrelated change');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+
+    const r = detectReleaseBump(root);
+    assert.equal(r.released, false);
+
+    const cli = spawnSync(process.execPath, [scriptPath, root], { encoding: 'utf8' });
+    assert.equal(cli.status, 0, 'an ordinary commit must never fail the caller');
+    assert.equal(JSON.parse(cli.stdout).released, false);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('a --no-ff merge carries no caveat, and the answer shape is unchanged', () => {
+  // The prescribed Step 7 path: the first parent IS pre-merge main, so the window covers
+  // the whole merge and the answer is settled. Flagging it too would dilute the signal —
+  // and the caveat fields are deliberately absent rather than present-and-false, so the
+  // three pre-existing deepEqual assertions on { old, new, released } keep holding. That
+  // shape is the contract Step 8.5a reads; extending it for settled answers would buy
+  // nothing and cost a spec change.
+  const root = repoWithMerge('2.36.0', '2.36.0');
+  try {
+    const r = detectReleaseBump(root);
+    assert.equal(r.conclusive, undefined);
+    assert.equal(r.basis, undefined);
+    assert.equal(r.note, undefined);
+    assert.deepEqual(Object.keys(r).sort(), ['new', 'old', 'released']);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('the CLI refuses a diverged ref with a non-zero exit and silent stdout', () => {
+  // Same contract as the pre-existing "cannot tell" case: stdout stays empty so a caller
+  // parsing JSON has nothing to misread, and the reason goes to stderr.
+  const root = repoWithDivergedMain('2.33.0', '2.36.0', '2.35.0');
+  try {
+    const cli = spawnSync(process.execPath, [scriptPath, root, 'main'], { encoding: 'utf8' });
+    assert.notEqual(cli.status, 0);
+    assert.equal(cli.stdout.trim(), '');
+    assert.match(cli.stderr, /\[release-bump\]/);
+    assert.match(cli.stderr, /diverged/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('the CLI voices an inconclusive answer on stderr, not only in the JSON', () => {
+  // A transcript reader skims `released:false` and moves on. The JSON flag serves
+  // programmatic callers; the stderr line serves the human, who is who this defect fooled.
+  const root = repoFastForwardedPastBump('2.36.0', '2.37.0');
+  try {
+    const cli = spawnSync(process.execPath, [scriptPath, root], { encoding: 'utf8' });
+    assert.equal(cli.status, 0);
+    assert.equal(JSON.parse(cli.stdout).conclusive, false);
+    assert.match(cli.stderr, /inconclusive/);
+  } finally {
+    cleanup(root);
+  }
+});
