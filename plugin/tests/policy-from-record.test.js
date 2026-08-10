@@ -129,9 +129,12 @@ test('KBT-TC3448: execute §3c no longer prescribes parsing the Decision-entry',
     s.includes('## Test-policy (bevroren bij claim_issue'),
     'execute §3c must still reference the Decision-entry as readable motivering'
   );
+  // Deliberately NOT a bare /nooit/i: with the /i flag that matches any stray
+  // "nooit" anywhere in the section and would survive a rewrite that dropped
+  // the actual prohibition. Anchor on the entry being the thing forbidden.
   assert.ok(
-    /NOOIT uit de .?Decision.?-entry|NOOIT|nooit als (reken)?bron/i.test(s),
-    'execute §3c must say in so many words that the entry is never the source of a calculation'
+    /NOOIT uit de `?Decision`?-entry/.test(s),
+    'execute §3c must say in so many words that the Decision-entry is never the source'
   );
   assert.ok(
     /momentopname|snapshot/i.test(s),
@@ -140,12 +143,22 @@ test('KBT-TC3448: execute §3c no longer prescribes parsing the Decision-entry',
 });
 
 test('KBT-TC3448: the Step 7 coverage gate re-reads the record rather than trusting §3c', () => {
-  const content = read('kanbantic-issue-execute', 'SKILL.md');
-  const m = content.match(/2\. \*\*Test-policy coverage\*\*[\s\S]{0,900}/);
-  assert.ok(m, 'Step 7 test-policy coverage condition not found');
+  // Bounded by the NEXT numbered condition rather than a fixed character
+  // window: a fixed window silently ends mid-condition and turns the
+  // assertions below into a coin flip on where it happens to stop.
+  const s = section(
+    'execute Step 7 condition 2',
+    read('kanbantic-issue-execute', 'SKILL.md'),
+    /2\. \*\*Test-policy coverage\*\*[\s\S]*?(?=\n3\. )/,
+    '\n3. '
+  );
   assert.ok(
-    m[0].includes('get_test_policy'),
+    s.includes('get_test_policy'),
     'the Step 7 gate must re-read get_test_policy — it is the gate, and the record can have moved since the claim'
+  );
+  assert.ok(
+    /Decision.?-entry/.test(s),
+    'the gate must also rule out the Decision-entry explicitly; a positive instruction alone leaves the old habit available'
   );
 });
 
@@ -184,9 +197,7 @@ test('KBT-TC3449: review Step 1b builds the policy-context via get_test_policy',
 
 test('KBT-TC3449: review Step 5a flags that its own set_test_policy call moves only the record', () => {
   const content = read('kanbantic-issue-review', 'SKILL.md');
-  const m = content.match(/### 5a: APPROVE[\s\S]*?(?=### 5b:)/);
-  assert.ok(m, 'review Step 5a section not found');
-  const s = m[0];
+  const s = section('review Step 5a', content, /### 5a: APPROVE[\s\S]*?(?=### 5b:)/, '### 5b:');
 
   assert.ok(s.includes('set_test_policy'), 'Step 5a must still prescribe set_test_policy for the E2E-N.v.t. route');
   assert.ok(
@@ -194,9 +205,39 @@ test('KBT-TC3449: review Step 5a flags that its own set_test_policy call moves o
     'Step 5a must cross-reference KBT-B560 — this call is the mechanism by which record and entry diverge'
   );
   assert.ok(
-    /re-read|herlees|opnieuw/i.test(s),
-    'Step 5a must impose a re-read obligation when the policy is changed after the review-context was built'
+    /re-read it with `get_test_policy`/.test(s),
+    'Step 5a must impose a concrete re-read obligation naming the tool, not a vague "opnieuw"'
   );
+});
+
+test('KBT-TC3449: the Step 5a re-read points FORWARD, at a step that still runs', () => {
+  // An instruction that says "redo this in Step 4" from inside Step 5a is not
+  // an instruction — Step 4 is already behind you, and an agent reads it as
+  // "too late" and skips it. That is the same failure class as the bug itself:
+  // a prescribed procedure that does not match reality. The previous wording
+  // of this very sentence had exactly that defect.
+  const content = read('kanbantic-issue-review', 'SKILL.md');
+  const fiveAAt = content.indexOf('### 5a: APPROVE');
+  assert.ok(fiveAAt > 0, 'Step 5a heading not found');
+
+  const s = section('review Step 5a', content, /### 5a: APPROVE[\s\S]*?(?=### 5b:)/, '### 5b:');
+  const sentence = s.split('\n').find(l => l.includes('KBT-B560'));
+  assert.ok(sentence, 'the KBT-B560 cross-reference line was not found in Step 5a');
+
+  // The negative lookahead keeps "Step 1b" out: it is a section reference, not
+  // a numbered step, and treating it as "Step 1" would make this test fail on
+  // correct wording.
+  const referenced = [...sentence.matchAll(/Step (\d+)(?![\d.\w])/g)].map(m => m[1]);
+  assert.ok(referenced.length > 0, 'the re-read instruction must name the step where the work is redone');
+
+  for (const n of referenced) {
+    const at = content.indexOf(`## Step ${n}:`);
+    assert.ok(at > 0, `referenced "Step ${n}" has no matching heading in the review SKILL.md`);
+    assert.ok(
+      at > fiveAAt,
+      `Step 5a points at Step ${n}, which sits BEFORE it in the file (idx ${at} < ${fiveAAt}) — an agent reaching that instruction has already passed it`
+    );
+  }
 });
 
 test('KBT-TC3449: reviewer-prompt.md sources the policy table from the record', () => {
@@ -305,24 +346,26 @@ test('KBT-TC3451 (integration): lint-skills.js exits 0 on the repaired tree', ()
   );
 });
 
-test('KBT-TC3451 (integration, negative control): a bare non-existent tool-name in prose makes lint-skills exit 1', () => {
-  // Without this the run above only proves the script executed. `set_bogus_thing`
-  // has the exact shape the real defect had: a real verb-prefix (`set_`), a
-  // name that is not in the snapshot, written as inline code in prose — and
-  // NOT in the `mcp__kanbantic__` form invariant 3 looks for.
-  const tmp = mirrorSkills((body, rel) =>
-    rel.replace(/\\/g, '/') === 'kanbantic-issue-execute/SKILL.md'
-      ? body.replace('## Step 2: Claim Issue and Create Branch',
-          'Call `set_bogus_thing` before claiming.\n\n## Step 2: Claim Issue and Create Branch')
-      : body);
+// Inject a line just before a stable anchor in one mirrored file.
+const inject = (target, text) => (body, rel) =>
+  rel.replace(/\\/g, '/') === target
+    ? body.replace('## Step 2: Claim Issue and Create Branch', `${text}\n\n## Step 2: Claim Issue and Create Branch`)
+    : body;
+
+test('KBT-TC3451 (integration, negative control): a near-miss tool-name in prose makes lint-skills exit 1', () => {
+  // Without this the run above only proves the script executed. `list_test_policy`
+  // has the exact shape the real defect had: verb `list` and noun `test_policy`
+  // both borrowed from real tools, the combination borrowed from none, written
+  // as inline code — and NOT in the `mcp__kanbantic__` form invariant 3 sees.
+  const tmp = mirrorSkills(inject('kanbantic-issue-execute/SKILL.md', 'Call `list_test_policy` before claiming.'));
   try {
     const r = runLint({ SKILLS_DIR: tmp, SNAPSHOT });
     assert.equal(
       r.status, 1,
-      `lint-skills.js must exit 1 for a bare unresolvable tool-name — got ${r.status}\nSTDOUT: ${r.stdout}\nSTDERR: ${r.stderr}`
+      `lint-skills.js must exit 1 for a near-miss tool-name — got ${r.status}\nSTDOUT: ${r.stdout}\nSTDERR: ${r.stderr}`
     );
     assert.ok(
-      /invariant 6/.test(r.stdout) && /set_bogus_thing/.test(r.stdout),
+      /invariant 6/.test(r.stdout) && /list_test_policy/.test(r.stdout),
       `the failure must be attributed to invariant 6 and name the offending token\nSTDOUT: ${r.stdout}`
     );
   } finally {
@@ -331,21 +374,17 @@ test('KBT-TC3451 (integration, negative control): a bare non-existent tool-name 
 });
 
 test('KBT-TC3451 (integration, negative control): the PascalCase call-form is caught too', () => {
-  // `SetApplicability(...)` was one of the three real offenders and is invisible
-  // to a snake_case-only rule.
+  // `UpdateTestPolicy(...)` is invisible to a snake_case-only rule, and the
+  // file it goes into proves the tree-walk really covers the sibling prompt
+  // files — not just the four lane SKILL.md that invariants 1/2/4/5 load.
   const tmp = mirrorSkills((body, rel) =>
     rel.replace(/\\/g, '/') === 'kanbantic-issue-review/reviewer-prompt.md'
-      ? `${body}\n\nEscalate via \`SetApplicability(overrideReason)\`.\n`
+      ? `${body}\n\nEscalate via \`UpdateTestPolicy(overrideReason)\`.\n`
       : body);
   try {
     const r = runLint({ SKILLS_DIR: tmp, SNAPSHOT });
     assert.equal(r.status, 1, `PascalCase call-form must be caught — got ${r.status}\nSTDOUT: ${r.stdout}`);
-    assert.ok(
-      /SetApplicability/.test(r.stdout),
-      `the report must name SetApplicability\nSTDOUT: ${r.stdout}`
-    );
-    // Proves the tree-walk really covers the sibling prompt files, not just the
-    // four lane SKILL.md that invariants 1-5 load.
+    assert.ok(/UpdateTestPolicy/.test(r.stdout), `the report must name UpdateTestPolicy\nSTDOUT: ${r.stdout}`);
     assert.ok(
       /reviewer-prompt\.md/.test(r.stdout),
       `invariant 6 must cover non-SKILL.md skill files too\nSTDOUT: ${r.stdout}`
@@ -355,14 +394,32 @@ test('KBT-TC3451 (integration, negative control): the PascalCase call-form is ca
   }
 });
 
+test('KBT-TC3451 (integration, negative control): a prefixed ghost tool in a non-lane file is caught by invariant 3', () => {
+  // The prefixed form is invisible to invariant 6 (the `__` separators swallow
+  // the word boundary), and invariant 3 used to load only the four lane
+  // SKILL.md — so `mcp__kanbantic__<ghost>` in reviewer-prompt.md or
+  // lane-shared/*.md was caught by nothing at all. Both files, one run.
+  const tmp = mirrorSkills((body, rel) => {
+    const p = rel.replace(/\\/g, '/');
+    if (p === 'kanbantic-issue-review/reviewer-prompt.md') return `${body}\n\nCall \`mcp__kanbantic__bogus_ghost_tool\`.\n`;
+    if (p === 'lane-shared/ui-contract.md') return `${body}\n\nSee \`mcp__kanbantic__another_ghost\`.\n`;
+    return body;
+  });
+  try {
+    const r = runLint({ SKILLS_DIR: tmp, SNAPSHOT });
+    assert.equal(r.status, 1, `a prefixed ghost tool must be caught — got ${r.status}\nSTDOUT: ${r.stdout}`);
+    assert.ok(/bogus_ghost_tool/.test(r.stdout), `reviewer-prompt.md ghost must be reported\nSTDOUT: ${r.stdout}`);
+    assert.ok(/another_ghost/.test(r.stdout), `lane-shared ghost must be reported\nSTDOUT: ${r.stdout}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('KBT-TC3451 (integration): the lint-skills-allow-tool marker exempts a deliberate mention', () => {
   // The escape hatch has to work, or the first legitimate negative example
   // turns the guard off for everyone — the failure mode the issue warned about.
-  const tmp = mirrorSkills((body, rel) =>
-    rel.replace(/\\/g, '/') === 'kanbantic-issue-execute/SKILL.md'
-      ? body.replace('## Step 2: Claim Issue and Create Branch',
-          'Never call `set_bogus_thing`. <!-- lint-skills-allow-tool: deliberate negative example -->\n\n## Step 2: Claim Issue and Create Branch')
-      : body);
+  const tmp = mirrorSkills(inject('kanbantic-issue-execute/SKILL.md',
+    'Never call `list_test_policy`. <!-- lint-skills-allow-tool: deliberate negative example -->'));
   try {
     const r = runLint({ SKILLS_DIR: tmp, SNAPSHOT });
     assert.equal(
@@ -374,24 +431,59 @@ test('KBT-TC3451 (integration): the lint-skills-allow-tool marker exempts a deli
   }
 });
 
-test('KBT-TC3451 (integration): invariant 6 does not fire on legitimate snake_case prose', () => {
-  // The false-positive rate is the whole ballgame: a lint that cries wolf gets
-  // switched off and is then worse than nothing. These four are the shapes that
-  // occur constantly in the real skill files.
-  const tmp = mirrorSkills((body, rel) =>
-    rel.replace(/\\/g, '/') === 'kanbantic-issue-execute/SKILL.md'
-      ? body.replace('## Step 2: Claim Issue and Create Branch',
-          'Use `feature_branch` on `some_helper`, read `notApplicableReason`, run `npm run test:unit`.\n\n## Step 2: Claim Issue and Create Branch')
-      : body);
+// The false-positive rate is the whole ballgame: a lint that cries wolf gets
+// switched off and is then worse than nothing. Every token below shares its
+// VERB with a real tool — under a verb-only rule all 24 fire. They are here
+// because a verb-only draft of invariant 6 did exactly that.
+const PROSE_THAT_MUST_NOT_FIRE = [
+  // ordinary field- and column-names
+  '`issue_id`', '`version_id`', '`record_id`', '`start_date`', '`end_date`',
+  '`report_url`', '`link_href`', '`read_only`',
+  // ordinary compound words
+  '`end_to_end`', '`open_source`', '`get_started`', '`send_keys`', '`mark_done`',
+  // schema / VCS / CI vocabulary
+  '`create_table`', '`add_column`', '`delete_branch_on_merge`', '`review_comment`',
+  // C# call-forms — this is a .NET + Angular monorepo
+  '`CreateAsync(entity)`', '`UpdateAsync(entity)`', '`ReadAsync(stream)`',
+  '`ValidateAsync(input)`', '`AddScoped(services)`', '`GetRequiredService(provider)`',
+];
+
+test('KBT-TC3451 (integration): invariant 6 stays silent on 23 ordinary prose tokens that share a verb with a real tool', () => {
+  const tmp = mirrorSkills(inject('kanbantic-issue-execute/SKILL.md',
+    `Reference: ${PROSE_THAT_MUST_NOT_FIRE.join(', ')}.`));
   try {
     const r = runLint({ SKILLS_DIR: tmp, SNAPSHOT });
     assert.equal(
       r.status, 0,
-      `non-tool snake_case must not trip invariant 6 — got ${r.status}\nSTDOUT: ${r.stdout}`
+      `ordinary prose must not trip invariant 6 — got ${r.status}\nSTDOUT: ${r.stdout}`
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('KBT-TC3451: the verb-only rule is provably insufficient — all 23 no-noise tokens would fire under it', () => {
+  // Guards the DESIGN, not just the behaviour. If someone "simplifies" invariant
+  // 6 back to a verb-prefix test, this states in numbers what that costs. Reads
+  // the snapshot the lint reads, so it cannot drift away from it.
+  const snapshot = JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8'));
+  const known = new Set(snapshot.tools);
+  const verbs = new Set(snapshot.tools.map(t => t.split('_')[0]));
+  const nouns = new Set(snapshot.tools.map(t => t.slice(t.indexOf('_') + 1)));
+  const toSnake = s => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+
+  const tokens = PROSE_THAT_MUST_NOT_FIRE.map(t => toSnake(t.replace(/`/g, '').replace(/\(.*$/, '')));
+  const verbOnly = tokens.filter(t => !known.has(t) && verbs.has(t.split('_')[0]));
+  const twoSided = tokens.filter(t => !known.has(t) && verbs.has(t.split('_')[0]) && nouns.has(t.slice(t.indexOf('_') + 1)));
+
+  assert.equal(
+    verbOnly.length, tokens.length,
+    `premise check: all ${tokens.length} tokens must share a verb with a real tool, else this test proves nothing — ${verbOnly.length} did`
+  );
+  assert.equal(
+    twoSided.length, 0,
+    `the two-sided rule must clear every one of them — still flagged: ${twoSided.join(', ')}`
+  );
 });
 
 // ─── KBT-TC3452 (E2E) — the read-path sees what the entry cannot ─────────────
@@ -444,10 +536,29 @@ function makePolicyBackend() {
       return { success: true, issueCode: issueId };
     },
     get(args) {
-      const byLevel = records.get(args && args.issueId) || defaults();
+      // An issue with no record yields `policies: []` — the shape the live tool
+      // returns, verified against the real server. The earlier draft of this
+      // stub substituted three Required/min-1 defaults here, which meant the
+      // one branch BOTH skills newly depend on ("if get_test_policy returns no
+      // policies") could not be produced at all.
+      const byLevel = records.get(args && args.issueId);
+      if (!byLevel) return { success: true, policies: [] };
       return { success: true, policies: ['Unit', 'Integration', 'E2E'].map(l => byLevel[l]) };
     },
   };
+}
+
+// The response fields the SKILL.md files promise, read back OUT of those files.
+// This is what makes the E2E layer bind: if a skill starts documenting a field
+// the tool does not return (or the tool's shape moves), the assertion that every
+// documented field is present in the live-shaped response goes red — which is
+// this bug's failure class (a prescribed procedure that does not match reality)
+// one level up from the prose checks.
+function documentedPolicyFields() {
+  const s = read('kanbantic-issue-execute', 'SKILL.md');
+  const m = s.match(/### 3c: Load frozen test-policy[\s\S]*?(?=### 3b:)/);
+  assert.ok(m, 'execute §3c not found while deriving the documented field list');
+  return POLICY_RESPONSE_FIELDS.filter(f => m[0].includes(f));
 }
 
 function startStub(backend) {
@@ -533,18 +644,6 @@ test('KBT-TC3452 (E2E): a post-claim policy change is visible through get_test_p
   const ISSUE = 'KBT-B560';
   const NA_REASON = 'Deze Feature heeft geen UI- en geen publiek API-oppervlak, dus er is niets om end-to-end te doorlopen.';
 
-  // The prepare-time Decision-entry, frozen verbatim at the moment prepare wrote
-  // it. Nothing in the flow below ever rewrites it — that is the point.
-  const DECISION_ENTRY = [
-    '## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)',
-    '',
-    '| Niveau | Applicabiliteit | Minimum |',
-    '|---|---|---|',
-    '| Unit | Vereist | 1 |',
-    '| Integration | Vereist | 1 |',
-    '| E2E | Vereist | 1 |',
-  ].join('\n');
-
   try {
     await proxy.rpc('initialize', INIT_PARAMS, 1);
 
@@ -573,15 +672,23 @@ test('KBT-TC3452 (E2E): a post-claim policy change is visible through get_test_p
     assert.equal(byLevel.E2E.isFrozen, true, 'the record stays frozen after the override — the override is audited, not an unfreeze');
     assert.equal(byLevel.Unit.applicability, 'Required', 'untouched levels keep their declared value');
 
-    // ── the entry does not, and never will ─────────────────────────────────
-    assert.ok(
-      /\| E2E \| Vereist \| 1 \|/.test(DECISION_ENTRY),
-      'the frozen Decision-entry still says E2E/Vereist — an execute or review step parsing it would demand E2E coverage the policy no longer requires'
+    // ── every field the SKILL.md promises actually arrives ──────────────────
+    // Cross-file, so it can genuinely fail: the expected names are read out of
+    // execute §3c, the actual ones come off the wire. Drift on either side is
+    // red. (The earlier version asserted that a string literal defined 30 lines
+    // up contained its own characters — true by construction, worthless.)
+    const documented = documentedPolicyFields();
+    assert.deepEqual(
+      documented.slice().sort(), POLICY_RESPONSE_FIELDS.slice().sort(),
+      'execute §3c must document every field this test knows the tool returns'
     );
-    assert.ok(
-      !DECISION_ENTRY.includes(NA_REASON),
-      'nothing in the flow rewrote the entry: the divergence is structural, not a timing accident'
-    );
+    for (const field of documented) {
+      const carrier = field === 'notApplicableReason' ? byLevel.E2E : byLevel.Unit;
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(carrier, field),
+        `§3c documents \`${field}\`, but the response for ${carrier.level} has no such field — the prescribed mapping does not match reality`
+      );
+    }
 
     // ── the proxy is a conduit, not an author ───────────────────────────────
     const writes = stub.received.filter(r => r.name === 'set_test_policy');
@@ -589,6 +696,36 @@ test('KBT-TC3452 (E2E): a post-claim policy change is visible through get_test_p
     const reads = stub.received.filter(r => r.name === 'get_test_policy');
     assert.equal(reads.length, 1, 'the read-back must be forwarded exactly once');
     assert.equal(reads[0].args.issueId, ISSUE, 'issueId must arrive intact');
+  } finally {
+    await proxy.shutdown();
+    stub.server.close();
+  }
+});
+
+test('KBT-TC3452 (E2E): the empty-policies response survives the proxy as an empty list', async () => {
+  // Both skills gained a branch that fires only on this response — execute §3c
+  // ("If get_test_policy returns no policies at all") and review Step 1b, where
+  // it is a Critical review finding. If the proxy substituted defaults on the
+  // way through, that branch would be unreachable in practice and the Critical
+  // finding would never be raised. Assert the skills document the branch AND
+  // that the wire preserves it.
+  const backend = makePolicyBackend();
+  const stub = await startStub(backend);
+  const proxy = spawnProxy(stub.port);
+
+  try {
+    await proxy.rpc('initialize', INIT_PARAMS, 1);
+    const r = parseToolResult(await proxy.rpc('tools/call', { name: 'get_test_policy', arguments: { issueId: 'KBT-NEVER-SET' } }, 10));
+
+    assert.equal(r.success, true);
+    assert.deepEqual(r.policies, [], 'an issue with no record must come back as an empty list, not as fabricated defaults');
+
+    for (const [skill, file] of [['kanbantic-issue-execute', 'SKILL.md'], ['kanbantic-issue-review', 'SKILL.md']]) {
+      assert.ok(
+        /returns no policies/.test(read(skill, file)),
+        `${skill} must document the empty-policies branch — it is reachable, and it is where the Vereist/min=1 fallback lives`
+      );
+    }
   } finally {
     await proxy.shutdown();
     stub.server.close();
