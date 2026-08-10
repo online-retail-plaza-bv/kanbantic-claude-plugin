@@ -144,3 +144,59 @@ test('the step warns against trusting preview_next_version over the repo', () =>
       + 'produced the v2.16.0 collision in KBT-B545.'
   );
 });
+
+//
+// KBT-B586 — the step must be reachable by more than the merge it performs itself.
+//
+// KBT-B545 put the registration behind Step 7's merge. That merge is one route
+// among several, and in this workspace it is the route that is deliberately NOT
+// taken: KBT-TRUL030 has a subagent deliver up to `Review` and a supervising agent
+// merge after checking. On 2026-08-10 all eight merged PRs went that way, so the
+// step covered none of them — including the release of v2.37.0, which shipped the
+// step itself and was registered by hand.
+//
+// A guard that only fires on the route nobody uses is not a guard.
+//
+
+test('the registration is reachable by a route other than the skill\'s own merge', () => {
+  const body = section();
+  assert.ok(
+    body.includes('detect-release-drift.js'),
+    'the step must offer an entry that does not depend on Step 7 having merged. '
+      + 'detect-release-bump.js answers an event-shaped question (HEAD vs its first '
+      + 'parent) and refuses any ref that is not the tip of the default branch, so '
+      + 'it is answerable only by whoever stands on the merge commit. The drift '
+      + 'detector compares repo against registry and needs no event — see KBT-RL210.'
+  );
+  const fenced = (body.match(/```[\s\S]*?```/g) || []).join('\n');
+  assert.ok(
+    fenced.includes('detect-release-drift.js'),
+    'a runnable block must actually invoke detect-release-drift.js. KBT-B545 shipped '
+      + 'its first trigger as prose and it was inert for exactly that reason.'
+  );
+});
+
+test('the registration declares itself idempotent', () => {
+  // Two routes into one procedure means it will sometimes run twice on the same
+  // release — the skill merges and registers, and the drift check later finds
+  // nothing to do. That has to be stated as safe, or the second caller hesitates.
+  const body = section();
+  assert.ok(
+    /idempotent/i.test(body),
+    'the step must say that running it again on an already-registered release is a '
+      + 'no-op, because it now has more than one caller.'
+  );
+});
+
+test('the step says what the route-independent entry does NOT cover', () => {
+  // Detecting drift catches every missed route but reports after the fact. Silence
+  // about that limit is how a partial guard gets mistaken for a complete one —
+  // which is the mistake KBT-B545 made about its own coverage.
+  const body = section();
+  assert.ok(
+    body.includes('KBT-BD208'),
+    "the step must point at the Boundary spec recording the route's limits "
+      + '(reports after the fact, needs a session, no CI coverage, carrier-resolvable '
+      + 'repos only, no historical backfill).'
+  );
+});
