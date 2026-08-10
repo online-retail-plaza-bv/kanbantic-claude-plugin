@@ -686,7 +686,7 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-bump.js" . origin/main
 
 The detector also refuses a **stale** default branch, so a checkout without a pull cannot report an old release as the new one. Fetch first.
 
-A **non-zero exit** means the script could not tell (not a repo, no parent, unreadable manifest, or a ref that is not the tip of the default branch). That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
+A **non-zero exit** means the script could not tell: not a repo, no parent, an unreadable manifest, a ref that is not the tip of the default branch, or a default branch that is **stale** relative to its remote. That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
 
 ### 8.5b: Close out the shipped Version
 

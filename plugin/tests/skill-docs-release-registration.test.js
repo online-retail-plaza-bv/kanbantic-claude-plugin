@@ -103,10 +103,15 @@ test('the release-registration step triggers on a changed version, not a touched
   // comparing by hand — and after Step 7 both resolve to HEAD, so it would report "no
   // release" on every real release. Passing origin/main to the detector as the ref to
   // inspect is the opposite: that is the worktree-safe invocation.
-  const handRolled = fenced.filter((block) => !block.includes('detect-release-bump.js'));
+  // Per line, not per block: a block that invokes the detector *and* hand-rolls a
+  // comparison alongside it would slip through a block-level exclusion.
+  const handRolled = fenced
+    .join('\n')
+    .split('\n')
+    .filter((line) => !line.includes('detect-release-bump.js'));
   for (const inert of ['merge-base', 'origin/main']) {
     assert.ok(
-      !handRolled.some((block) => block.includes(inert)),
+      !handRolled.some((line) => line.includes(inert)),
       `no runnable block in the step may compare against ${inert} by hand: Step 8.5 runs `
         + `after Step 7 checked out main, so both resolve to HEAD and the trigger would `
         + `report "no release" on every real release. Go through detect-release-bump.js.`

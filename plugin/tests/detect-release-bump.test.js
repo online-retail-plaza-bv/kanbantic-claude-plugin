@@ -181,16 +181,19 @@ test('a stale local main refuses instead of reporting an old release as the new 
     writeVersion(root, '2.35.0');
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'ship 2.35.0');
-    const stale = git(root, 'rev-parse', 'HEAD');
 
+    // Branch `main` STAYS on the stale commit — that is the whole point. Asking about a
+    // bare stale sha would also be refused by a check that only tests tip-membership,
+    // so this fixture would pass against the very bug it exists to pin, discriminating
+    // on the error message rather than on behaviour.
+    git(root, 'checkout', '-q', '-b', 'upstream');
     writeVersion(root, '2.36.0');
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'ship 2.36.0');
-
-    // A remote-tracking ref that is ahead of the stale commit we are asking about.
     git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(root, 'checkout', '-q', 'main');
 
-    assert.throws(() => detectReleaseBump(root, stale), /is behind the default branch/);
+    assert.throws(() => detectReleaseBump(root, 'main'), /is behind the default branch/);
   } finally {
     cleanup(root);
   }
