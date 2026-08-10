@@ -124,7 +124,21 @@ test('the drift rule answers from two version numbers alone — no ref, no commi
 
   // The signature itself is the point of KBT-RL210: no repoRoot, no ref, nothing
   // git-shaped. A rule that cannot take a ref cannot be route-dependent.
-  assert.equal(detectReleaseDrift.length, 1);
+  //
+  // Asserted on the parameter list rather than on `.length`, which is 0 here because
+  // the sole parameter is defaulted (`= {}`) and defaults do not count toward arity —
+  // a detail that makes `.length` useless for expressing this intent.
+  const params = String(detectReleaseDrift).slice(
+    String(detectReleaseDrift).indexOf('('),
+    String(detectReleaseDrift).indexOf(')') + 1);
+  assert.match(params, /repoVersion/);
+  assert.match(params, /baselineNumber/);
+  for (const gitShaped of ['repoRoot', 'ref', 'sha', 'commit', 'branch']) {
+    assert.doesNotMatch(params, new RegExp(gitShaped),
+      `the rule must not accept ${gitShaped}: taking anything git-shaped is how a `
+        + 'state comparison decays back into an event comparison, which is the '
+        + 'defect KBT-B586 is about.');
+  }
 });
 
 test('a registry that already knows the shipped number is silent', () => {
