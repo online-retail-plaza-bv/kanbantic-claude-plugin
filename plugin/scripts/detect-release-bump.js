@@ -69,18 +69,30 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
   // bump is usually several commits back, and on a PR merged through GitHub the local
   // HEAD never moved to main at all. Both answer "no release" while a release shipped —
   // the same silent-skip this script exists to close. Refuse instead.
+  //
+  // Being *a* known tip is not enough, because a stale local `main` is still a tip. A
+  // checkout that skipped the pull sits several releases back and reports whichever
+  // release happened at that old commit — confidently, and wrong. So also refuse when a
+  // known tip is strictly ahead. A local merge that has not been pushed yet stays fine:
+  // there `origin/main` is an ancestor of HEAD, not ahead of it.
   const head = git(repoRoot, ['rev-parse', '--verify', ref]).stdout.trim();
   const tips = ['main', 'origin/main', 'master', 'origin/master']
     .map((r) => git(repoRoot, ['rev-parse', '--verify', r]))
     .filter((r) => r.status === 0)
     .map((r) => r.stdout.trim());
 
-  if (tips.length > 0 && !tips.includes(head)) {
+  const ahead = tips.filter((t) => t !== head
+    && git(repoRoot, ['merge-base', '--is-ancestor', head, t]).status === 0);
+
+  if (tips.length > 0 && (!tips.includes(head) || ahead.length > 0)) {
+    const why = ahead.length > 0
+      ? `is behind the default branch (${ahead[0].slice(0, 8)} is ahead of it)`
+      : 'is not the tip of the default branch';
     throw new Error(
-      `${ref} (${head.slice(0, 8)}) is not the tip of the default branch. Step 8.5 runs `
-      + `after Step 7 merged and checked out main, so this ref was never the merge `
-      + `commit. Run "git checkout main && git pull" (or pull the merged PR) and try `
-      + `again. Refusing to report "no release" from a ref that cannot answer.`);
+      `${ref} (${head.slice(0, 8)}) ${why}. Step 8.5 runs on the merge commit, so this `
+      + `ref cannot say what just shipped. Run "git fetch origin" and re-run against `
+      + `origin/main (worktree-safe), or "git checkout main && git pull". Refusing to `
+      + `answer from a ref that cannot.`);
   }
 
   const before = versionAt(repoRoot, `${ref}^1`);

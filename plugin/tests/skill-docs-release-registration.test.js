@@ -99,12 +99,17 @@ test('the release-registration step triggers on a changed version, not a touched
       + 'the script in prose while the block does something else is how the first '
       + 'attempt shipped an inert trigger.'
   );
+  // A block that names merge-base or origin/main *without* going through the detector is
+  // comparing by hand — and after Step 7 both resolve to HEAD, so it would report "no
+  // release" on every real release. Passing origin/main to the detector as the ref to
+  // inspect is the opposite: that is the worktree-safe invocation.
+  const handRolled = fenced.filter((block) => !block.includes('detect-release-bump.js'));
   for (const inert of ['merge-base', 'origin/main']) {
     assert.ok(
-      !fenced.some((block) => block.includes(inert)),
-      `no runnable block in the step may compare against ${inert}: Step 8.5 runs after `
-        + `Step 7 checked out main, so both resolve to HEAD and the trigger would `
-        + `report "no release" on every real release.`
+      !handRolled.some((block) => block.includes(inert)),
+      `no runnable block in the step may compare against ${inert} by hand: Step 8.5 runs `
+        + `after Step 7 checked out main, so both resolve to HEAD and the trigger would `
+        + `report "no release" on every real release. Go through detect-release-bump.js.`
     );
   }
   assert.ok(

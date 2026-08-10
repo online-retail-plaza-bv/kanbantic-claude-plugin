@@ -163,6 +163,52 @@ test('a branch tip whose bump is not the last commit refuses to answer', () => {
   }
 });
 
+test('a stale local main refuses instead of reporting an old release as the new one', () => {
+  // Being *a* known tip is not enough. A checkout that skipped the pull sits several
+  // releases back; asking it what just shipped gets a confident, wrong answer — which is
+  // worse than the silent skip this script was written to close.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b545-bump-'));
+  try {
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'user.email', 'test@example.com');
+    git(root, 'config', 'user.name', 'Test');
+    git(root, 'config', 'commit.gpgsign', 'false');
+
+    writeVersion(root, '2.34.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'base');
+
+    writeVersion(root, '2.35.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'ship 2.35.0');
+    const stale = git(root, 'rev-parse', 'HEAD');
+
+    writeVersion(root, '2.36.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'ship 2.36.0');
+
+    // A remote-tracking ref that is ahead of the stale commit we are asking about.
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+
+    assert.throws(() => detectReleaseBump(root, stale), /is behind the default branch/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('a local merge that has not been pushed yet is still answerable', () => {
+  // The real Step 8.5 path: Step 7 merged into main locally. origin/main is an ancestor
+  // of HEAD, not ahead of it, so the freshness check must not fire here.
+  const root = repoWithMerge('2.36.0', '2.37.0');
+  try {
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD^1');
+    const r = detectReleaseBump(root);
+    assert.deepEqual(r, { old: '2.36.0', new: '2.37.0', released: true });
+  } finally {
+    cleanup(root);
+  }
+});
+
 test('a root commit with no parent refuses to answer instead of saying "no release"', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b545-bump-'));
   try {
