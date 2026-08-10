@@ -135,6 +135,34 @@ test('a plain (non-merge) commit that bumped the version is detected', () => {
   }
 });
 
+test('a branch tip whose bump is not the last commit refuses to answer', () => {
+  // The PR-merge flow: the version was bumped several commits back and HEAD never moved
+  // to main. "Did the last commit change the version" answers no while a release shipped
+  // — the same silent skip this script exists to close.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b545-bump-'));
+  try {
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'user.email', 'test@example.com');
+    git(root, 'config', 'user.name', 'Test');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    writeVersion(root, '2.36.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'base');
+
+    git(root, 'checkout', '-q', '-b', 'feature');
+    writeVersion(root, '2.37.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'bump');
+    fs.writeFileSync(path.join(root, 'later.txt'), 'later\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'review nit');
+
+    assert.throws(() => detectReleaseBump(root), /not the tip of the default branch/);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test('a root commit with no parent refuses to answer instead of saying "no release"', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b545-bump-'));
   try {

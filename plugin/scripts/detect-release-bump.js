@@ -64,6 +64,25 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
       `${ref} has no first parent — cannot tell what changed. Refusing to report "no release".`);
   }
 
+  // Step 8.5 runs on the merge commit sitting on the default branch. Anywhere else,
+  // "did the last commit change the version" is the wrong question: on a branch tip the
+  // bump is usually several commits back, and on a PR merged through GitHub the local
+  // HEAD never moved to main at all. Both answer "no release" while a release shipped —
+  // the same silent-skip this script exists to close. Refuse instead.
+  const head = git(repoRoot, ['rev-parse', '--verify', ref]).stdout.trim();
+  const tips = ['main', 'origin/main', 'master', 'origin/master']
+    .map((r) => git(repoRoot, ['rev-parse', '--verify', r]))
+    .filter((r) => r.status === 0)
+    .map((r) => r.stdout.trim());
+
+  if (tips.length > 0 && !tips.includes(head)) {
+    throw new Error(
+      `${ref} (${head.slice(0, 8)}) is not the tip of the default branch. Step 8.5 runs `
+      + `after Step 7 merged and checked out main, so this ref was never the merge `
+      + `commit. Run "git checkout main && git pull" (or pull the merged PR) and try `
+      + `again. Refusing to report "no release" from a ref that cannot answer.`);
+  }
+
   const before = versionAt(repoRoot, `${ref}^1`);
   const after = versionAt(repoRoot, ref);
 

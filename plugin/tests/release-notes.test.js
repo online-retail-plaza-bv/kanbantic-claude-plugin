@@ -76,6 +76,18 @@ test('an empty release-notes file fails the guard', () => {
   }
 });
 
+test('an unreadable manifest reports why, not a stack trace', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b545-notes-'));
+  try {
+    const r = runScript(root);
+    assert.notEqual(r.status, 0, 'expected a non-zero exit when the manifest is absent');
+    assert.match(r.stderr, /\[release-notes\] could not read a version/);
+    assert.doesNotMatch(r.stderr, /at Object\.|node:fs/, 'expected no stack trace');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('release notes with content pass the guard', () => {
   const root = fixture('9.9.9', '# Release Notes — v9.9.9\n\nSomething shipped.\n');
   try {

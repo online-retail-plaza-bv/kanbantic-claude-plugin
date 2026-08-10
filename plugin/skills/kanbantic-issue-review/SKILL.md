@@ -677,7 +677,14 @@ It compares HEAD against its **first parent**. That matters here: by the time th
 
 `released: false` ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
 
-A **non-zero exit** means the script could not tell (not a repo, no parent, unreadable manifest). That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
+**On the PR path of Step 7** (branch protection, or a PR merged on GitHub) your local HEAD is still the branch tip and never became the merge commit. Move to the merged state first, or the detector will refuse:
+
+```bash
+git checkout main
+git pull
+```
+
+A **non-zero exit** means the script could not tell (not a repo, no parent, unreadable manifest, or a ref that is not the tip of the default branch). That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
 
 ### 8.5b: Close out the shipped Version
 

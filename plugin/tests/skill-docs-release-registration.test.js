@@ -89,16 +89,24 @@ test('the release-registration step triggers on a changed version, not a touched
       + 'comparison against git merge-base that can never fire after Step 7 has '
       + 'already merged and checked out main.'
   );
-  // Forbid *running* merge-base, not mentioning it. The prose explains at length why
-  // merge-base is the wrong comparison, and that explanation is the thing keeping a
-  // later editor from reintroducing it — so only the runnable blocks are checked.
+  // Only the runnable blocks are checked. The prose explains at length why merge-base is
+  // the wrong comparison, and that explanation is the thing keeping a later editor from
+  // reintroducing it — so mentioning it must stay allowed while running it must not.
   const fenced = body.match(/```[\s\S]*?```/g) || [];
   assert.ok(
-    !fenced.some((block) => block.includes('merge-base')),
-    'no runnable block in the step may compare against git merge-base: Step 8.5 runs '
-      + 'after Step 7 checked out main, so merge-base(origin/main, HEAD) == HEAD and '
-      + 'the trigger would report "no release" on every real release.'
+    fenced.some((block) => block.includes('detect-release-bump.js')),
+    'a runnable block in the step must actually invoke detect-release-bump.js — naming '
+      + 'the script in prose while the block does something else is how the first '
+      + 'attempt shipped an inert trigger.'
   );
+  for (const inert of ['merge-base', 'origin/main']) {
+    assert.ok(
+      !fenced.some((block) => block.includes(inert)),
+      `no runnable block in the step may compare against ${inert}: Step 8.5 runs after `
+        + `Step 7 checked out main, so both resolve to HEAD and the trigger would `
+        + `report "no release" on every real release.`
+    );
+  }
   assert.ok(
     body.includes('first parent'),
     'the step must say why the comparison is against the first parent, so a later '
