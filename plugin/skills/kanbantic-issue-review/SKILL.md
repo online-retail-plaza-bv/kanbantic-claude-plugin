@@ -648,6 +648,61 @@ After this transition, surface the deploy-instructions to the caller:
 
 If the deploy fails: **there is no legal `InDeployment → Review` transition** — the Domain layer allows only `InDeployment → Done` (KBT-RL053, verified against `get_system_schema`; `InDeployment → Cancelled` is likewise blocked). Do **NOT** attempt an illegal transition. Instead: `report_status` + an `add_discussion_entry` documenting the failed deploy, leave the issue on `InDeployment`, and escalate to the PO for a hotfix-forward or a manual recovery decision. A proper failed-deploy return-path is tracked in **[OPEN: KBT-F589 / E104]**.
 
+## Step 8.5: Versie-registratie — a shipped version must be recorded (KBT-B545)
+
+<HARD-GATE>
+If the merge in Step 7 also **bumped the version files of the repository** — for the Kanbantic Claude Code Plugin that is `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and `package.json` in lockstep — then that merge **is a release**, and the release must be registered in Kanbantic before this skill returns. Do not defer it to "whoever picks up the next issue".
+</HARD-GATE>
+
+**Why this step exists.** KBT-B545: the plugin repo cut a release per merged issue while Kanbantic only ever got a new Version when the claim-gate demanded a bucket for new work. One bucket served dozens of issues, so nineteen shipped minors were never recorded. `preview_next_version` reckons from the highest **registered** Version, so it went on proposing numbers that had been out for weeks. Nothing was broken — a step simply did not exist. This is that step.
+
+### 8.5a: Determine whether this merge shipped a release
+
+```bash
+git diff --name-only <merge-base>..HEAD -- \
+  plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json package.json
+```
+
+No version files touched ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
+
+### 8.5b: Close out the shipped Version
+
+Read the number the repo now carries (never guess it, and never take it from `preview_next_version` — that is the tool this whole step exists to keep honest):
+
+```bash
+node -p "require('./plugin/.claude-plugin/plugin.json').version"
+```
+
+Find the matching Version for the issue's Application and mark it shipped:
+
+```
+MCP: mcp__kanbantic__list_versions(workspaceId)   // filter to issue.applicationId
+MCP: mcp__kanbantic__freeze_version(versionId)         // scope is final at release
+MCP: mcp__kanbantic__mark_version_released(versionId)
+```
+
+**No Version exists for the number the repo just shipped** ⇒ create it first, then freeze + release it. `create_version` is **app-scoped**: pass the issue's `applicationId` (PR #242); new Versions start in `Planned`. Note that `create_version` rejects a `description` on creation (KBT-B557) — create with the name only, then `update_version` for the body.
+
+### 8.5c: Open the next Planned Version against the repo, not against the preview
+
+The claim-gate (KBT-RL145) needs a `Planned` Version for the Application, so the next one is created here rather than by the next agent under time pressure. `preview_next_version` is a *suggestion*: verify its `baselineNumber` equals the number the repo actually carries before you accept its `proposed`.
+
+```
+MCP: mcp__kanbantic__preview_next_version(applicationId: <issue.applicationId>)
+```
+
+`baselineNumber` **below** the repo's version ⇒ the registry has drifted. Do not follow the proposal. Take the repo's number as the truth, bump from there, and record the discrepancy as a `Decision` discussion-entry so the drift is visible instead of silently absorbed.
+
+Record the outcome either way:
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(
+  issueId,
+  content: "## Versie-registratie\n\n- Uitgebracht: `<version>` (tag `<tag>`, merge `<sha>`)\n- Version `<name>` → Frozen → Released\n- Volgende Planned Version: `<name>` (geverifieerd tegen `plugin/.claude-plugin/plugin.json`)",
+  entryType: "Decision"
+)
+```
+
 ## Step 9: Knowledge-Extractie (optional)
 
 After the issue is Done, prompt the reviewer for knowledge to capture. This step is **optional** — if the reviewer has nothing to add, skip the MCP calls.
