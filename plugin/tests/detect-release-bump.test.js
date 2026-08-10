@@ -279,8 +279,22 @@ function repoWithDivergedMain(baseVersion, upstreamVersion, localVersion) {
   return root;
 }
 
-/** A repo fast-forwarded onto a branch whose bump is not its last commit. */
-function repoFastForwardedPastBump(mainVersion, branchVersion) {
+/**
+ * A repo fast-forwarded onto a branch whose bump is not its last commit.
+ *
+ * `advanceRemote` decides which of two real states is built, and the distinction matters
+ * (review finding B1):
+ *
+ *   true  — post-push. origin/main has moved with main, so the pre-merge position is gone
+ *           from the graph and the window cannot be recovered.
+ *   false — pre-push, which is the state Step 8.5a actually runs in: the local merge has
+ *           happened but origin/main still points at the pre-merge commit.
+ *
+ * The original fixture only built the post-push state, which made the pre-merge position
+ * look irretrievable in general and led me to write that a fork point does not exist. It
+ * does, in the state that matters. See the pre-push test below.
+ */
+function repoFastForwardedPastBump(mainVersion, branchVersion, advanceRemote = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b585-bump-'));
   git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.email', 'test@example.com');
@@ -299,11 +313,56 @@ function repoFastForwardedPastBump(mainVersion, branchVersion) {
   git(root, 'add', '-A');
   git(root, 'commit', '-q', '-m', 'docs, after the bump');
 
+  // Pre-merge main, i.e. what origin/main still points at before the push.
+  const preMerge = git(root, 'rev-parse', 'main');
+
   git(root, 'checkout', '-q', 'main');
   git(root, 'merge', '--ff-only', '-q', 'feature');
-  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git(root, 'update-ref', 'refs/remotes/origin/main', advanceRemote ? 'HEAD' : preMerge);
   return root;
 }
+
+test('pre-push, the fork point still recovers the window — the info is NOT gone', () => {
+  // Review finding B1, pinned as a fact so the "there is no fork" claim cannot come back.
+  //
+  // Step 8.5a runs directly after the local merge, before the push. In that state
+  // origin/main still holds the pre-merge position, so merge-base(HEAD, origin/main) is
+  // exactly the commit whose carrier we want to compare against — and it carries the OLD
+  // version even though HEAD^1 already carries the new one.
+  //
+  // Note this is guaranteed rather than lucky: the freshness check only lets the detector
+  // answer when origin/main is an ancestor of HEAD, and on a fast-forward that ancestor IS
+  // the pre-merge position.
+  //
+  // Widening the window to use this would make the answer correct rather than merely honest.
+  // Deliberately NOT done here — tracked as its own issue — but the possibility is asserted
+  // so nobody re-writes it off as impossible.
+  const root = repoFastForwardedPastBump('2.36.0', '2.37.0', /* advanceRemote */ false);
+  try {
+    const base = git(root, 'merge-base', 'HEAD', 'origin/main');
+    const atBase = JSON.parse(
+      spawnSync('git', ['show', `${base}:${CARRIER.join('/')}`], { cwd: root, encoding: 'utf8' })
+        .stdout);
+    const atHead = JSON.parse(
+      spawnSync('git', ['show', `HEAD:${CARRIER.join('/')}`], { cwd: root, encoding: 'utf8' })
+        .stdout);
+
+    assert.equal(atBase.version, '2.36.0',
+      'the fork point carries the pre-release version — the window is recoverable pre-push');
+    assert.equal(atHead.version, '2.37.0');
+    assert.notEqual(atBase.version, atHead.version,
+      'so a fork-point comparison would report released:true here, where the first-parent '
+        + 'comparison reports false');
+
+    // And the detector still answers in this state rather than refusing: origin/main is an
+    // ancestor of HEAD, which the freshness check explicitly permits.
+    const r = detectReleaseBump(root);
+    assert.equal(r.released, false, 'first-parent window: unchanged carrier');
+    assert.equal(r.conclusive, false, 'and it says so, which is what this issue fixes');
+  } finally {
+    cleanup(root);
+  }
+});
 
 test('a diverged local main refuses instead of answering from the wrong line', () => {
   // KBT-B585 point 1. The freshness check tested only for strictly-behind, via
@@ -340,6 +399,53 @@ test('the diverged refusal is distinguishable from the behind refusal', () => {
     });
   } finally {
     cleanup(diverged);
+  }
+});
+
+test('an ordinary feature branch is told it is not the tip, not that it diverged', () => {
+  // Review finding B2 — a regression I introduced on the commonest path.
+  //
+  // A feature branch with main moved on ahead of it satisfies BOTH conditions: it is not a
+  // tip, and it is formally diverged from main. Testing `diverged` first told an operator on
+  // a perfectly ordinary feature branch that his repository had diverged and he should run
+  // `git fetch origin`. Nothing was wrong with his repository — he was simply not on main.
+  // The refusal stayed correct; the advice misdirected.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b585-bump-'));
+  try {
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'user.email', 'test@example.com');
+    git(root, 'config', 'user.name', 'Test');
+    git(root, 'config', 'commit.gpgsign', 'false');
+
+    writeVersion(root, '2.36.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'base');
+
+    // The feature branch the agent is actually standing on.
+    git(root, 'checkout', '-q', '-b', 'feature/some-work');
+    writeVersion(root, '2.37.0');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'bump on the branch');
+
+    // Meanwhile main moves on, so HEAD and main have genuinely diverged.
+    const branchTip = git(root, 'rev-parse', 'HEAD');
+    git(root, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(root, 'other.txt'), 'someone else\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'unrelated work on main');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(root, 'checkout', '-q', branchTip);
+
+    assert.throws(() => detectReleaseBump(root), (err) => {
+      assert.match(err.message, /is not the tip of the default branch/,
+        'being on a feature branch is the diagnosis; the branch-shape comparison is not');
+      assert.doesNotMatch(err.message, /diverged/,
+        'telling a feature-branch operator that his repo diverged sends him to fix '
+          + 'something that is not broken');
+      return true;
+    });
+  } finally {
+    cleanup(root);
   }
 });
 

@@ -102,14 +102,23 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
   const diverged = others.filter((t) => !isAncestor(head, t) && !isAncestor(t, head));
 
   if (tips.length > 0 && (!tips.includes(head) || ahead.length > 0 || diverged.length > 0)) {
+    // Order matters, and getting it wrong misdirects the operator on the commonest path.
+    //
+    // A plain feature branch with main moved on ahead of it satisfies BOTH "not a tip" and
+    // "diverged" — a feature branch is, formally, diverged from main. Testing `diverged`
+    // first therefore told an operator standing on a perfectly ordinary feature branch that
+    // his repository had diverged and he should run `git fetch origin`. Nothing was wrong
+    // with his repository; he was simply not on main. The refusal was right, the advice was
+    // not. So establish "are you even on the default branch" before diagnosing the shape of
+    // the disagreement between two branches that both claim to be it.
     let why;
-    if (diverged.length > 0) {
-      why = `has diverged from the default branch (${diverged[0].slice(0, 8)} holds `
-        + `commits this ref does not, and vice versa)`;
+    if (!tips.includes(head)) {
+      why = 'is not the tip of the default branch';
     } else if (ahead.length > 0) {
       why = `is behind the default branch (${ahead[0].slice(0, 8)} is ahead of it)`;
     } else {
-      why = 'is not the tip of the default branch';
+      why = `has diverged from the default branch (${diverged[0].slice(0, 8)} holds `
+        + `commits this ref does not, and vice versa)`;
     }
     throw new Error(
       `${ref} (${head.slice(0, 8)}) ${why}. Step 8.5 runs on the merge commit, so this `
@@ -142,17 +151,25 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
   // there released:false is exactly right. Refusing on all of them would make the
   // detector useless and train its callers to ignore it.
   //
-  // Nor can the window simply be widened here. The bug suggests diffing against the
-  // fork point with the default branch, but on a fast-forward there IS no fork: main
-  // was moved onto the branch tip, and its previous position is recorded nowhere in the
-  // commit graph. And "refuse when the bump is not in HEAD" cannot be implemented as
-  // stated, because whether a bump exists at all is precisely what this script does not
-  // know.
+  // Of the bug's two suggested directions, one is genuinely unworkable: "refuse when the
+  // bump is not in HEAD" reduces to "refuse on every ordinary commit", because whether a
+  // bump exists at all is precisely what this script does not know.
   //
-  // What is wrong is the silence, and that is fixable: mark the answer as inconclusive
-  // and name the check that does not depend on the window at all. detect-release-drift.js
-  // compares the shipped carrier against the registry, so where in the history the bump
-  // sits cannot affect it (KBT-B586 / KBT-RL210).
+  // The other — diff against the fork point with the default branch — IS workable, and an
+  // earlier version of this comment wrongly called it impossible. Before the push,
+  // `refs/remotes/origin/main` still holds the pre-merge position, so
+  // `merge-base(HEAD, origin/main)` recovers the window; and since the freshness check
+  // above already requires origin/main to be an ancestor of HEAD whenever we answer at
+  // all, that merge-base IS the pre-merge position. Step 8.5a runs directly after the
+  // local merge, which is exactly that pre-push state. Only after the push does the
+  // information disappear.
+  //
+  // Widening the window that way would make the answer *correct* rather than merely
+  // honest, and it is tracked as its own issue rather than smuggled into this one. What is
+  // fixed here is the silence: mark the answer inconclusive and name the check that does
+  // not depend on the window at all. The state-shaped drift check
+  // (`detect-release-drift.js`, KBT-B586 / KBT-RL210) compares the shipped carrier against
+  // the registry, so where in the history the bump sits cannot affect it.
   // The caveat fields appear ONLY when they carry information. Three existing tests pin
   // the answer shape with a strict deepEqual on { old, new, released }, and that pinning
   // is worth keeping: it is the contract Step 8.5a reads. A `basis` on every answer would
@@ -166,8 +183,10 @@ function detectReleaseBump(repoRoot, ref = 'HEAD') {
     result.conclusive = false;
     result.note = 'compared against the first parent, a one-commit window. HEAD is not a '
       + 'merge commit, so if several commits arrived together (fast-forward or '
-      + 'rebase-merge) a version bump further back cannot be ruled out. For an answer '
-      + 'that does not depend on the window, run detect-release-drift.js.';
+      + 'rebase-merge) a version bump further back cannot be ruled out. For an answer that '
+      + 'does not depend on the window, run the state-shaped drift check '
+      + '(detect-release-drift.js, KBT-B586): it compares the shipped carrier against the '
+      + 'registry instead of against a commit.';
   }
 
   return result;
