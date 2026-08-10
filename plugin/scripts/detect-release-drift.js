@@ -24,9 +24,16 @@
 // a property that has to be policed here; it follows from the shape (KBT-RL210).
 //
 // What it deliberately does NOT do — see KBT-BD208 for the full list: it reports
-// after the fact rather than preventing, it needs something to run it, it has no CI
-// coverage (this repo's CI holds no Kanbantic credentials), it only covers repos with
-// a resolvable carrier, and it never backfills history.
+// after the fact rather than preventing, it needs something to run it, it is not wired
+// into CI, it only covers repos with a resolvable carrier that have opted in, it cannot
+// see a Version's lifecycle status, and it never backfills history.
+//
+// On "not wired into CI": that is a cost decision, NOT a capability gap. Agent API keys
+// work fine against POST /api/app/Version/{id}/freeze and .../mark-released, and the
+// monorepo's own CI already calls the Kanbantic API with a Bearer token. Wiring this into
+// the plugin repo's CI needs one secret provisioned there — an ops action, not an
+// impossibility. KBT-BD208 §3 carries the full reckoning; do not cite this comment as
+// evidence that the CI route is closed.
 //
 // The baseline comes from `preview_next_version`, whose `baselineNumber` is the
 // highest *registered* Version for the Application — Planned included. Verified live:
@@ -173,15 +180,39 @@ function detectReleaseDrift({ repoVersion, baselineNumber } = {}) {
   }
 
   if (cmp === 0) {
+    // KBT-B586 review — this is NOT an all-clear, and saying so was the first version's
+    // worst mistake.
+    //
+    // `baselineNumber` is the highest *registered* Version regardless of lifecycle status,
+    // and a Version row normally exists BEFORE its release ships: Step 8.5c opens the next
+    // Planned bucket as part of the previous release. So the number matching proves the row
+    // exists — not that it was ever frozen and marked Released.
+    //
+    // The failure that follows is exactly the one this issue was opened about. A release-cut
+    // PR bumps the carrier to 2.38.0, a supervising agent squash-merges it, 8.5b never runs,
+    // and v2.38.0 stays Planned forever. Repo 2.38.0 vs baseline v2.38.0 compares equal, and
+    // a check that called that "nothing to do" would go quiet on precisely the miss it exists
+    // to catch. Applied to the v2.37.0 incident: that bucket already existed as the KBT-B545
+    // bucket, so it would have been silent there too — catching only the *next* miss, one
+    // release late.
+    //
+    // No MCP tool exposes a Version's lifecycle status (list_versions returns name, slug,
+    // description, isActive, issueCount — verified), so this cannot be resolved by asking.
+    // What makes it cheap to handle anyway is that 8.5b is idempotent: freezing and releasing
+    // an already-released Version changes nothing. So recommend running it rather than
+    // claiming there is nothing to do. Recorded in KBT-BD208 §7.
     return {
       answerable: true,
       drifted: false,
       repoVersion,
       baselineNumber,
       relation: 'in-step',
-      action: null,
-      reason: `the registry knows ${baselineNumber}, which is what the repository `
-        + `carries. Nothing to register.`,
+      action: 'verify-released',
+      mayBeUnreleased: true,
+      reason: `the registry holds ${baselineNumber}, the number the repository carries. That `
+        + `proves the Version record exists, NOT that it was frozen and marked Released — a `
+        + `Planned bucket normally exists before its release ships, and no tool exposes a `
+        + `Version's lifecycle status. Run the close-out (Step 8.5b) anyway; it is idempotent.`,
     };
   }
 
@@ -276,22 +307,58 @@ async function main() {
   const repoRoot = path.resolve(positional[0] || process.cwd());
   const quiet = argv.includes('--quiet');
 
+  // Without --quiet the CLI always prints its answer: run by hand, the whole point is to see
+  // what it concluded, including "not applicable".
+  //
+  // With --quiet (how the SessionStart hook runs it) it prints only what someone needs to act
+  // on: a real drift, or a check that was asked and could not answer. A non-event — no carrier
+  // here, no Application configured — prints nothing. KBT-B586 review blocker A2: the first
+  // version treated every `answerable: false` as worth reporting, which made both repositories
+  // announce themselves at every single session start.
+  const isNonEvent = (obj) => obj.applicable === false || obj.optedIn === false;
   const say = (obj) => {
-    if (!quiet || obj.drifted === true || obj.answerable === false) {
-      process.stdout.write(`${JSON.stringify(obj)}\n`);
-    }
+    if (quiet && (isNonEvent(obj) || obj.drifted === false)) return;
+    process.stdout.write(`${JSON.stringify(obj)}\n`);
   };
 
+  // KBT-B586 review — "does not apply here" and "could not tell" are different answers, and
+  // conflating them made the hook print a line on every SessionStart in every repository.
+  //
+  // Three states, not two:
+  //   applicable: false  — this repo has no carrier this script understands (the monorepo
+  //                        versions by git tag; CARRIER is plugin-specific). Nothing to check.
+  //   optedIn:    false  — a carrier exists but no Application is configured, so there is no
+  //                        registry to compare against. Nothing was asked of us.
+  //   answerable: false  — configured and asked, but the answer could not be obtained.
+  //
+  // The first two are non-events and must be completely silent; only the third is worth a
+  // line. A hook that speaks up when nothing was asked of it gets switched off, and then it
+  // is not there for the case that matters.
   if (git(repoRoot, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
     say({
+      applicable: false, optedIn: false,
       answerable: false, drifted: null, repoVersion: null, baselineNumber: null,
-      relation: 'unknown', action: null,
+      relation: 'not-applicable', action: null,
       reason: `not a git repository: ${repoRoot}`,
     });
     return;
   }
 
   const repoVersion = readShippedVersion(repoRoot);
+
+  if (repoVersion === null) {
+    // No carrier this script understands. The monorepo is the standard case: it versions by
+    // git tag, deliberately decoupled from Kanbantic Versions, and KBT-BD208 §4 already
+    // declares it out of scope. Honour that here instead of contradicting it at runtime.
+    say({
+      applicable: false, optedIn: false,
+      answerable: false, drifted: null, repoVersion: null, baselineNumber: null,
+      relation: 'not-applicable', action: null,
+      reason: `no ${CARRIER} on the default branch of ${repoRoot}, so this repository does `
+        + `not carry a version number this check understands. Not applicable (KBT-BD208 §4).`,
+    });
+    return;
+  }
 
   const baselineFlag = argv.indexOf('--baseline');
   let baselineNumber = null;
@@ -303,17 +370,20 @@ async function main() {
     const applicationId = resolveApplicationId(repoRoot, argv);
     if (!applicationId) {
       say({
+        applicable: true, optedIn: false,
         answerable: false, drifted: null, repoVersion, baselineNumber: null,
-        relation: 'unknown', action: null,
-        reason: 'no Application configured for this clone, so there is no registry to '
-          + 'compare against. Set it with: git config kanbantic.applicationId <guid>. '
-          + 'Until then this check cannot tell (see KBT-BD208).',
+        relation: 'not-opted-in', action: null,
+        reason: 'no Application is configured for this clone, so there is no registry to '
+          + 'compare against. Opt in with: git config kanbantic.applicationId <guid>. '
+          + 'Until then this check stays silent (KBT-BD208 §4).',
       });
       return;
     }
     ({ baselineNumber, error: fetchError } = await fetchBaseline(applicationId));
     if (fetchError) {
+      // Configured, asked, and it did not work. This one IS worth a line.
       say({
+        applicable: true, optedIn: true,
         answerable: false, drifted: null, repoVersion, baselineNumber: null,
         relation: 'unknown', action: null,
         reason: `could not read the registry (${fetchError}), so drift cannot be `
@@ -323,7 +393,7 @@ async function main() {
     }
   }
 
-  say(detectReleaseDrift({ repoVersion, baselineNumber }));
+  say({ applicable: true, optedIn: true, ...detectReleaseDrift({ repoVersion, baselineNumber }) });
 }
 
 if (require.main === module) {

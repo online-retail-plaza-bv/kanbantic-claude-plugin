@@ -677,11 +677,25 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-drift.js" .
 # → {"answerable":true,"drifted":true,"repoVersion":"2.37.0","baselineNumber":"v2.36.0","relation":"registry-behind","action":"close-out"}
 ```
 
-`drifted: false` ⇒ nothing to register; skip to Step 9 silently. `answerable: false` ⇒ it could **not tell** (no readable carrier, no Application configured for the clone, unreachable registry). That is never the same as "no release": resolve it rather than reading it as an all-clear. The same check runs automatically as a `SessionStart` hook, so a release missed here surfaces at the next session in that repo.
+Read the answer as follows:
+
+| Field | Meaning |
+|---|---|
+| `drifted: true` | a shipped release is unregistered — do 8.5b, then 8.5c |
+| `drifted: false` + `mayBeUnreleased: true` | the number matches, which proves the Version **record exists** — not that it was released. **Still do 8.5b.** |
+| `drifted: false` without that flag | the registry is ahead (an open `Planned` bucket) — nothing to do |
+| `answerable: false` | it could **not tell**; resolve that, never read it as an all-clear |
+| `applicable: false` / `optedIn: false` | this repo has no carrier this check understands, or has not opted in — not applicable |
+
+<HARD-GATE>
+**An equal version number is not proof the release was registered.** `baselineNumber` is the highest *registered* Version whatever its lifecycle status, and a Version row normally exists **before** its release ships — 8.5c opens the next `Planned` bucket as part of the previous release. So a matching number is consistent with a bucket that was never frozen and never marked `Released`, which is precisely the miss KBT-B586 is about: a release-cut PR bumps the carrier, someone else merges it, 8.5b never runs, and the number matches anyway. No MCP tool exposes a Version's lifecycle status, so this cannot be settled by asking. Run 8.5b whenever the detector reports `mayBeUnreleased`. It is idempotent, so the cost of doing it needlessly is nil and the cost of skipping it is a release that stays unregistered.
+</HARD-GATE>
+
+The same check runs automatically as a `SessionStart` hook, so a release missed here surfaces at the next session in that repo — but only in a clone that carries a recognised version file and has opted in via `git config kanbantic.applicationId <guid>`. Without that it is silent by design.
 
 **The procedure is idempotent.** Registering a release that is already registered is a no-op: 8.5b finds the Version already `Released` and changes nothing, and 8.5c finds a `Planned` bucket already open. Because there are two entries, it *will* sometimes run twice on the same release — run it anyway rather than trying to work out whether the supervising agent got there first.
 
-**What entry B does not cover** is written out in **KBT-BD208** and is worth knowing before relying on it: it reports *after the fact* rather than preventing, it needs a session to run, it has no CI coverage (this repo's CI holds no Kanbantic credentials and the anonymous `/api/app/cicd/*` endpoints have no version-registration surface), it only covers repos with a resolvable carrier **and** a configured `kanbantic.applicationId`, and it never backfills history.
+**What entry B does not cover** is written out in **KBT-BD208** and is worth knowing before relying on it: it reports *after the fact* rather than preventing, it needs a session to run, it is **not wired into CI** (a cost decision — one provisioned secret — and explicitly *not* a capability gap; see KBT-BD208 §3 before repeating any claim about it), it only covers repos with a resolvable carrier **and** a configured `kanbantic.applicationId`, it **cannot see a Version's lifecycle status** (§7, the reason for the HARD-GATE above), and it never backfills history.
 
 ### 8.5a: Determine whether this merge shipped a release
 

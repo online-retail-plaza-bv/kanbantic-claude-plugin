@@ -143,7 +143,19 @@ function driftHookCommand() {
   return h.expanded;
 }
 
-test('the declared hook reports an unregistered release', () => {
+test('the declared hook is SILENT in a clone that has not opted in', () => {
+  // KBT-B586 review blocker A2. This test previously asserted the opposite — that the hook
+  // must speak up here — and so it pinned the defect in place.
+  //
+  // Measured on the real repositories with exactly the command from hooks.json: both the
+  // plugin clone and the monorepo printed
+  //   [release-drift] kan de release-registratie niet controleren: no Application configured…
+  // because `git config --get kanbantic.applicationId` fails in both and nothing in this
+  // change sets it. That is not an edge case, it is the default state of every clone after
+  // merge: every user would get this line in their startup context, in every session, in
+  // every repository.
+  //
+  // Not opted in means nothing was asked of the check. Nothing asked, nothing said.
   const root = shippedRepo('2.37.0');
   try {
     const r = runDeclaredHook(driftHookCommand(), {
@@ -151,10 +163,37 @@ test('the declared hook reports an unregistered release', () => {
       env: { KANBANTIC_RELEASE_DRIFT_APPLICATION: '', KANBANTIC_SKIP_RELEASE_DRIFT: '' },
     });
     assert.equal(r.status, 0, 'a SessionStart hook must never fail a session');
-    // No Application is configured on this synthetic clone, so the honest answer is
-    // "cannot tell" — and it must say so rather than pass in silence.
-    assert.match(`${r.stdout}${r.stderr}`, /release-drift/,
-      'the hook must say something when it cannot verify the registration');
+    assert.equal(r.stdout.trim(), '',
+      'a clone with no configured Application must produce no startup output whatsoever');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('the declared hook is SILENT in a repo with no carrier at all', () => {
+  // The monorepo's case: it versions by git tag, and CARRIER is plugin-specific. KBT-BD208 §4
+  // declares it out of scope, and the runtime must agree with that rather than contradict it.
+  // Note this stays silent even WITH an Application configured — there is simply nothing here
+  // that this check understands.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-b586-hook-nocarrier-'));
+  try {
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'user.email', 'test@example.com');
+    git(root, 'config', 'user.name', 'Test');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(root, 'README.md'), 'a repo that versions by tag\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'base');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(root, 'config', 'kanbantic.applicationId', '00000000-0000-0000-0000-000000000000');
+
+    const r = runDeclaredHook(driftHookCommand(), {
+      cwd: root,
+      env: { KANBANTIC_SKIP_RELEASE_DRIFT: '' },
+    });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.trim(), '',
+      'a repository this check does not apply to must never announce itself');
   } finally {
     cleanup(root);
   }
@@ -228,15 +267,46 @@ test('an empty registry reads as such, not as "undefined"', () => {
   assert.doesNotMatch(notice, /null|undefined/);
 });
 
-test('an unanswerable check is voiced, never swallowed', () => {
+test('an unanswerable check IS voiced once the clone opted in', () => {
+  // Configured, asked, failed. Here silence would be indistinguishable from a clean repo —
+  // the exact confusion KBT-B545 / B548 / B586 all turn on.
   const notice = formatDriftNotice({
+    applicable: true, optedIn: true,
     answerable: false, drifted: null, relation: 'unknown',
-    repoVersion: null, baselineNumber: null, action: null,
-    reason: 'no Application configured for this clone',
+    repoVersion: '2.37.0', baselineNumber: null, action: null,
+    reason: 'could not read the registry (connect ECONNREFUSED)',
   });
-  assert.match(String(notice), /no Application configured/,
-    'a broken check that prints nothing is indistinguishable from a clean repo — the '
-      + 'exact confusion KBT-B545/B548/B586 all turn on');
+  assert.match(String(notice), /could not read the registry/);
+});
+
+test('non-events are swallowed — the renderer, independently of the CLI', () => {
+  // Belt and braces with the CLI's own --quiet filtering: whichever of the two a future edit
+  // loosens, the other still holds the line. Both are cheap; a regression here lands in every
+  // user's startup context.
+  for (const nonEvent of [
+    {
+      applicable: false, optedIn: false, answerable: false, drifted: null,
+      relation: 'not-applicable', reason: 'no plugin/.claude-plugin/plugin.json here',
+    },
+    {
+      applicable: true, optedIn: false, answerable: false, drifted: null,
+      relation: 'not-opted-in', reason: 'no Application is configured for this clone',
+    },
+  ]) {
+    assert.equal(formatDriftNotice(nonEvent), null,
+      `${nonEvent.relation} is a non-event and must render nothing`);
+  }
+});
+
+test('an in-step registry stays silent at session start', () => {
+  // It carries mayBeUnreleased (blocker A1) because an equal number cannot prove the Version
+  // was released. But that caveat belongs to the review-lane close-out, not to every session
+  // start — surfacing it here would fire on every healthy session and get the hook disabled.
+  assert.equal(formatDriftNotice({
+    applicable: true, optedIn: true, answerable: true, drifted: false,
+    relation: 'in-step', mayBeUnreleased: true,
+    repoVersion: '2.38.0', baselineNumber: 'v2.38.0', action: 'verify-released',
+  }), null);
 });
 
 test('a missing or malformed result produces no output rather than a half-built line', () => {

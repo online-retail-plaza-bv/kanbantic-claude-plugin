@@ -141,12 +141,35 @@ test('the drift rule answers from two version numbers alone — no ref, no commi
   }
 });
 
-test('a registry that already knows the shipped number is silent', () => {
+test('an in-step registry is not treated as proof the Version was released', () => {
+  // KBT-B586 review blocker A1 — the decisive case, and the one the first version got wrong.
+  //
+  // `baselineNumber` is the highest *registered* Version whatever its lifecycle status, and
+  // the row normally exists BEFORE its release ships: Step 8.5c opens the next Planned bucket
+  // as part of the previous release. So equality proves the record exists, not that anyone
+  // froze it and marked it Released.
+  //
+  // The miss that follows is the very incident that opened this issue: a release-cut PR bumps
+  // to 2.38.0, a supervising agent squash-merges, 8.5b never runs, v2.38.0 stays Planned — and
+  // repo 2.38.0 vs baseline v2.38.0 compares equal. Calling that "nothing to do" would go
+  // quiet on exactly the failure this check exists for, and would only catch the NEXT one, a
+  // release late.
   const { detectReleaseDrift } = require(driftScript);
-  const r = detectReleaseDrift({ repoVersion: '2.37.0', baselineNumber: 'v2.37.0' });
+  const r = detectReleaseDrift({ repoVersion: '2.38.0', baselineNumber: 'v2.38.0' });
+
   assert.equal(r.answerable, true);
-  assert.equal(r.drifted, false);
   assert.equal(r.relation, 'in-step');
+  // Still not "drift" — the registry is not behind, so there is nothing to create.
+  assert.equal(r.drifted, false);
+  // But it must not present itself as settled.
+  assert.equal(r.mayBeUnreleased, true,
+    'an equal number cannot distinguish "Released" from "still Planned", because no MCP tool '
+      + 'exposes a Version lifecycle status. It must say so.');
+  assert.match(String(r.action), /\S/,
+    'there must still be a recommended action — running the idempotent close-out — rather '
+      + 'than a null that reads as "done".');
+  assert.match(r.reason, /idempotent/,
+    'the reason must say the close-out is safe to re-run, or the reader will skip it.');
 });
 
 test('an open Planned bucket ahead of the repo is normal, not drift', () => {
@@ -290,17 +313,21 @@ test('a fast-forward merge whose bump is not the last commit is still reported',
   }
 });
 
-test('the CLI degrades readably instead of falsely reporting "no drift"', () => {
-  // No registry reachable and no baseline supplied: the check must not conclude
-  // that all is well. It exits 0 (a session-start hook may never break a session)
-  // but says it could not tell, and does not claim drifted:false.
+test('an opted-in clone with an unreachable registry says so, even under --quiet', () => {
+  // The one "could not tell" that IS worth reporting: configured, asked, and it failed. This
+  // must survive --quiet, because here silence would be indistinguishable from a clean repo.
+  //
+  // An Application is configured explicitly so the run reaches the registry call instead of
+  // stopping at not-opted-in — the distinction blocker A2 turns on.
   const root = newRepo();
   try {
     writeVersion(root, '2.37.0');
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'base');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(root, 'config', 'kanbantic.applicationId', '00000000-0000-0000-0000-000000000000');
 
-    const r = spawnSync(process.execPath, [driftScript, root], {
+    const r = spawnSync(process.execPath, [driftScript, root, '--quiet'], {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -309,9 +336,11 @@ test('the CLI degrades readably instead of falsely reporting "no drift"', () => 
       },
     });
     assert.equal(r.status, 0, 'the CLI must never fail a session over an unreachable registry');
-    const said = `${r.stdout}${r.stderr}`;
-    assert.match(said, /\S/, 'it must say something rather than pass in silence');
-    assert.doesNotMatch(said, /"drifted"\s*:\s*false/,
+    const out = JSON.parse(r.stdout.trim());
+    assert.equal(out.applicable, true);
+    assert.equal(out.optedIn, true);
+    assert.equal(out.answerable, false);
+    assert.notEqual(out.drifted, false,
       'an unanswerable check must not emit drifted:false — that is the silent '
         + '"no release" this whole family of guards exists to prevent');
   } finally {
@@ -319,14 +348,68 @@ test('the CLI degrades readably instead of falsely reporting "no drift"', () => 
   }
 });
 
-test('a repo with no readable carrier cannot tell, and says so', () => {
+test('a repo with no carrier reports "not applicable", and stays out of the way', () => {
+  // KBT-B586 review — this test used to assert only `doesNotMatch(/"drifted":false/)`. That
+  // is a purely negative assertion: with the module absent the output was empty, so it held
+  // vacuously and could never fail for the reason it claimed. Replaced with positive
+  // assertions about the state that must be reported.
+  //
+  // This is also the monorepo's case — it versions by git tag, and CARRIER is plugin-specific.
+  // KBT-BD208 §4 declares it out of scope, so the runtime has to agree with that instead of
+  // announcing itself there (review blocker A2).
   const root = newRepo();
   try {
     fs.writeFileSync(path.join(root, 'README.md'), 'no carrier here\n');
     git(root, 'add', '-A');
     git(root, 'commit', '-q', '-m', 'base');
+
     const r = runDrift(root, '--baseline', 'v2.36.0');
-    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /"drifted"\s*:\s*false/);
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout.trim());
+    assert.equal(out.applicable, false, 'a repo without the carrier is not applicable');
+    assert.equal(out.relation, 'not-applicable');
+    assert.notEqual(out.drifted, false, 'and it must never claim there is no drift');
+    assert.match(out.reason, /not applicable/i);
+
+    // Under --quiet, which is how the hook runs it, a non-event prints nothing at all.
+    const q = runDrift(root, '--baseline', 'v2.36.0', '--quiet');
+    assert.equal(q.status, 0);
+    assert.equal(q.stdout.trim(), '',
+      'a non-event must be completely silent under --quiet, or every session in every '
+        + 'repository opens with a line about a check nobody asked for');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('a carrier without a configured Application is "not opted in", and silent', () => {
+  // The other half of blocker A2. Measured on the real repos: `git config --get
+  // kanbantic.applicationId` fails in both the plugin clone and the monorepo, and nothing in
+  // this change sets it — so this is the DEFAULT state for every user after merge, not an
+  // edge case.
+  const root = newRepo();
+  try {
+    const dir = path.join(root, ...CARRIER.slice(0, -1));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(root, ...CARRIER),
+      JSON.stringify({ name: 'kanbantic', version: '2.37.0' }, null, 2));
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'ship');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+
+    const env = { KANBANTIC_RELEASE_DRIFT_APPLICATION: '' };
+    const verbose = spawnSync(process.execPath, [driftScript, root],
+      { encoding: 'utf8', env: { ...process.env, ...env } });
+    const out = JSON.parse(verbose.stdout.trim());
+    assert.equal(out.applicable, true, 'the carrier IS there, so the repo is applicable');
+    assert.equal(out.optedIn, false, 'but no Application is configured');
+    assert.equal(out.relation, 'not-opted-in');
+    assert.notEqual(out.drifted, false);
+
+    const quiet = spawnSync(process.execPath, [driftScript, root, '--quiet'],
+      { encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.equal(quiet.stdout.trim(), '',
+      'not-opted-in is a non-event: nothing was asked of the check, so it says nothing');
   } finally {
     cleanup(root);
   }
