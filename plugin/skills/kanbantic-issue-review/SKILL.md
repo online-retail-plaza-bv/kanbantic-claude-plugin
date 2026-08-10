@@ -651,10 +651,37 @@ If the deploy fails: **there is no legal `InDeployment → Review` transition** 
 ## Step 8.5: Versie-registratie — a shipped version must be recorded (KBT-B545)
 
 <HARD-GATE>
-If the merge in Step 7 **changed the repository's version number**, then that merge **is a release**, and the release must be registered in Kanbantic before this skill returns. Do not defer it to "whoever picks up the next issue".
+If **the repository has shipped a version number that Kanbantic does not know about**, that release must be registered before this skill returns — whether or not the merge that shipped it was performed by this skill. Do not defer it to "whoever picks up the next issue".
 </HARD-GATE>
 
 **Why this step exists.** KBT-B545: the plugin repo cut a release per merged issue while Kanbantic only ever got a new Version when the claim-gate demanded a bucket for new work. One bucket served dozens of issues, so nineteen shipped minors were never recorded. `preview_next_version` reckons from the highest **registered** Version, so it went on proposing numbers that had been out for weeks. Nothing was broken — a step simply did not exist. This is that step.
+
+**Why the gate above is not phrased around "the merge in Step 7" (KBT-B586).** It was, and that made the step cover nothing. On 2026-08-10 eight PRs were merged and not one went through here: every time a subagent delivered up to `Review` and a supervising agent merged after checking — the division of labour **KBT-TRUL030** prescribes. The release of v2.37.0, which shipped this very step, had to be registered by hand. A guard whose only trigger is the one route deliberately not taken is not a guard.
+
+### 8.5-entries: two ways in, and the procedure is idempotent
+
+The registration below (8.5b + 8.5c) has **two** entry points. Both lead to the same procedure:
+
+| Entry | When | Detector |
+|---|---|---|
+| **A — you merged it** | Step 7 completed a merge in this run | `detect-release-bump.js` (8.5a) |
+| **B — someone else merged it** | any session, any time, regardless of who merged or with which strategy | `detect-release-drift.js` |
+
+Entry A is the fast path: the agent that just merged already knows. Entry B is the one that makes the coverage real. The two ask **differently shaped questions**, and that difference is the whole fix (**KBT-RL210**):
+
+- `detect-release-bump.js` asks an *event*-shaped question — "did this commit change the version?" — and refuses any ref that is not the tip of the default branch. Answerable only by whoever stands on the merge commit as it is created.
+- `detect-release-drift.js` asks a *state*-shaped question — "does the registry lag the repo?" — by comparing the shipped carrier against `baselineNumber`. No commit, no ref, no merge, so no merge route can bypass it.
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-drift.js" .
+# → {"answerable":true,"drifted":true,"repoVersion":"2.37.0","baselineNumber":"v2.36.0","relation":"registry-behind","action":"close-out"}
+```
+
+`drifted: false` ⇒ nothing to register; skip to Step 9 silently. `answerable: false` ⇒ it could **not tell** (no readable carrier, no Application configured for the clone, unreachable registry). That is never the same as "no release": resolve it rather than reading it as an all-clear. The same check runs automatically as a `SessionStart` hook, so a release missed here surfaces at the next session in that repo.
+
+**The procedure is idempotent.** Registering a release that is already registered is a no-op: 8.5b finds the Version already `Released` and changes nothing, and 8.5c finds a `Planned` bucket already open. Because there are two entries, it *will* sometimes run twice on the same release — run it anyway rather than trying to work out whether the supervising agent got there first.
+
+**What entry B does not cover** is written out in **KBT-BD208** and is worth knowing before relying on it: it reports *after the fact* rather than preventing, it needs a session to run, it has no CI coverage (this repo's CI holds no Kanbantic credentials and the anonymous `/api/app/cicd/*` endpoints have no version-registration surface), it only covers repos with a resolvable carrier **and** a configured `kanbantic.applicationId`, and it never backfills history.
 
 ### 8.5a: Determine whether this merge shipped a release
 
