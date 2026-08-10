@@ -376,7 +376,7 @@ Before `claim_issue` (Step 2), verify the issue's Application has a **Planned** 
 4. **A Planned Version exists** → continue to Step 2. `claim_issue` auto-assigns the issue to that Planned Version — no separate `update_issue(VersionId)` is needed.
 </HARD-GATE>
 
-**Tool note (LIVE registry, KBT-RL145):** the original scope named `assess_version_readiness`; that tool does **not** exist. The live check uses `list_versions` (for the Planned-check) + `preview_next_version` (for the suggested bump). Do **not** reference `assess_version_readiness`, `archive_version`, or `add/remove_affects_version`.
+**Tool note (LIVE registry, KBT-RL145):** the original scope named `assess_version_readiness`; that tool does **not** exist. The live check uses `list_versions` (for the Planned-check) + `preview_next_version` (for the suggested bump). Do **not** reference `assess_version_readiness`, `archive_version`, or `add/remove_affects_version`. <!-- lint-skills-allow-tool: deliberate negative examples — these tool names are named here precisely because they do NOT exist -->
 
 ## Step 2: Claim Issue and Create Branch
 
@@ -474,39 +474,52 @@ Read existing tasks and discussion context. If no tasks exist yet, you'll create
 
 ### 3c: Load frozen test-policy (Feature / Bug only — Regel E / KBT-F442)
 
-From the discussion entries loaded in 3a, locate the entry whose content starts with:
+Read the policy from the **beleidsrecord** — the same record the Done- and Review-gates evaluate:
+
 ```
-## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)
+MCP: mcp__kanbantic__get_test_policy(issueId)
 ```
 
-Parse the Markdown table to extract, per level (Unit / Integration / E2E):
-- **Applicability**: `Vereist` or `N.v.t.`
-- **Minimum**: integer (only meaningful when Vereist)
-- **N.v.t.-rationale**: the rationale text (only when N.v.t.)
+The response carries one entry per level with the live values:
 
-Store as `frozenPolicy`:
+| Response-veld | Waarden | Betekenis |
+|---|---|---|
+| `level` | `Unit` / `Integration` / `E2E` | het testniveau |
+| `applicability` | `Required` / `NotApplicable` | in dit SKILL.md geschreven als `Vereist` / `N.v.t.` |
+| `minCount` | integer | minimum aantal `Passed` test cases (0 bij `NotApplicable`) |
+| `notApplicableReason` | string | de N.v.t.-rationale (alleen bij `NotApplicable`) |
+| `isFrozen` | boolean | `true` na `claim_issue` — vanaf dat moment vergt verlagen een `overrideReason` |
+
+Map naar `frozenPolicy`, met de enum-vertaling expliciet (de tool antwoordt Engels, dit SKILL.md rekent in Nederlandse labels — een stilzwijgende mapping is precies hoe deze klasse fouten terugkomt):
+
 ```
 frozenPolicy = {
-  Unit:        { applicability: "Vereist"|"N.v.t.", min: N, reason: "..." },
-  Integration: { applicability: "Vereist"|"N.v.t.", min: N, reason: "..." },
-  E2E:         { applicability: "Vereist"|"N.v.t.", min: N, reason: "..." }
+  Unit:        { applicability: "Vereist"|"N.v.t.", min: <minCount>, reason: <notApplicableReason>, isFrozen: <isFrozen> },
+  Integration: { ... },
+  E2E:         { ... }
 }
 ```
 
-**If no test-policy entry is found:**
+**Lees de policy NOOIT uit de `Decision`-entry (KBT-B560).** De entry `## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)` blijft bestaan en is waardevol — hij legt uit *waarom* een niveau op N.v.t. staat, wat een record niet kan. Maar hij is een **momentopname**: elke `set_test_policy`-aanroep ná prepare (bijvoorbeeld door `kanbantic-issue-review` Step 5a, die E2E op N.v.t. zet zodat `update_user_story(Approved)` niet klemloopt) wijzigt het record en laat de entry ongemoeid. Rekenen met de entry levert dan een dekkingsoordeel dat afwijkt van wat de gates doen. Gebruik de entry als motivering, het record als bron.
+
+**If `get_test_policy` returns no policies at all** (only possible if the record was never initialised):
 - Add a `Comment` discussion entry:
   ```
   MCP: mcp__kanbantic__add_discussion_entry(
     issueId,
-    content: "⚠️ Geen test-policy Decision-entry gevonden op dit issue. Standaard: alle niveaus Vereist / minimum 1. Voeg een test-policy toe via kanbantic-issue-prepare (stap 5F.5 / 5B.6) om dit te corrigeren.",
+    content: "⚠️ Geen test-policy-record gevonden op dit issue. Standaard: alle niveaus Vereist / minimum 1. Laat kanbantic-issue-prepare (stap 5F.5 / 5B.6) de policy alsnog via set_test_policy vastleggen.",
     entryType: "Comment"
   )
   ```
-- Default `frozenPolicy` to all three levels Vereist/min=1.
+- Default `frozenPolicy` to all three levels Vereist/min=1 — the server default.
+
+**Divergentie-signaal (niet blokkerend).** Staat er wél een `Decision`-entry en wijkt die af van het record, meld dat als Comment-entry en **volg het record**. De afwijking is normaal na een reviewer-wijziging; stil negeren is dat niet.
 
 <HARD-GATE>
-The `frozenPolicy` is **read-only** for execute. Do NOT call `update_test_policy` or `set_applicability` to loosen minima or switch a level to N.v.t. mid-flight. Any policy change requires reviewer approval via `SetApplicability(overrideReason: ≥20 chars)` — this is out of scope for the execute-skill.
+The `frozenPolicy` is **read-only** for execute. Do NOT call `mcp__kanbantic__set_test_policy` to loosen minima or switch a level to N.v.t. mid-flight. After `claim_issue` the record is frozen (`isFrozen: true`): raising `minimumCount` stays free, but lowering it or switching to `NotApplicable` requires `set_test_policy(overrideReason: ≥20 chars)` — a reviewer-akkoord, recorded as a Decision entry, and out of scope for the execute-skill. Need it? Bounce it to `kanbantic-issue-review`.
 </HARD-GATE>
+
+**Re-read before the Review-gate.** Step 7 evaluates coverage against `frozenPolicy`. If anything in this run could have changed the policy (a bounce-back from review, an operator intervention), call `get_test_policy` again there rather than trusting the value loaded here.
 
 ### 3b: Load Project Knowledge from Kanbantic
 
@@ -980,7 +993,7 @@ Niet-UI-issues: sla deze substap over.
 Review transition is allowed **only** when all of the following are true. If any condition fails, the issue stays `InProgress`, and the skill reports the failing condition to the user. NO "door-drukken".
 
 1. Every task on the issue has status `Done` or `Cancelled`.
-2. **Test-policy coverage** (Regel E / KBT-F442) — per the `frozenPolicy` loaded in Step 3c:
+2. **Test-policy coverage** (Regel E / KBT-F442) — per the `frozenPolicy`. **Re-read it here** with `mcp__kanbantic__get_test_policy(issueId)` instead of reusing the Step 3c value: this is the gate, and the record may have moved since the claim (KBT-B560). Never derive these numbers from the `Decision`-entry.
    a. For each level with `Applicability = Vereist`: the count of test cases with status `Passed` at that level must be **≥ `frozenPolicy[level].min`**. A level with zero test cases fails this check even if no test cases have status `Failed` — missing coverage is a blocker, not just failing tests.
    b. For each level with `Applicability = N.v.t.`: no minimum count is required; the N.v.t.-rationale in `frozenPolicy[level].reason` must be non-empty (verified at prepare time; warn if missing).
    c. No test case at any level may have status `Failed` or `Blocked`.

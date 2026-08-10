@@ -39,6 +39,54 @@
 //             reference to a GitHub Release in prose). Complements invariant
 //             3: the prefixed `mcp__kanbantic__<version-tool>` refs restored
 //             in F12 are validated against the synced snapshot there.
+//   6. (vi) — NEAR-MISS tool-names in prose (KBT-B560). Invariant 3 only
+//             sees the prefixed `mcp__kanbantic__<name>` form, so a SKILL.md
+//             could — and did — prescribe `update_test_policy`, which does
+//             not exist while `set_test_policy` and `get_test_policy` do. An
+//             agent following that instruction looks for a tool that isn't
+//             there and most likely skips the step rather than reporting
+//             that it is stuck.
+//
+//             A "near miss" is a `verb_noun` token whose verb-prefix AND
+//             noun-suffix are BOTH borrowed from real tools, while the
+//             combination is not a tool. That is the shape a renamed or
+//             extended tool-family leaves behind, and it is the failure this
+//             lint exists for:
+//               update_test_policy → verb `update` ✔  noun `test_policy` ✔
+//               archive_version    → verb `archive` ✔ noun `version` ✔
+//
+//             Both halves are load-bearing. An earlier draft required only
+//             the verb-prefix; measured against 24 ordinary prose tokens it
+//             fired on 24 of them — `read_only`, `version_id`, `start_date`,
+//             `create_table`, `add_column`, `end_to_end`, plus every C#
+//             `CreateAsync(` / `AddScoped(` / `GetRequiredService(`. Verbs
+//             like get/set/add/read/start/end/open/link/mark/send are
+//             ordinary English; a rule built on them alone is a rule that
+//             gets switched off within the week, which is worse than no rule
+//             at all. Requiring the noun too drops that 24 to 1 (`app_version`,
+//             genuinely tool-shaped next to `app_version_at_date`).
+//
+//             What this deliberately does NOT catch: a wholly invented name
+//             whose noun appears in no tool, e.g. `set_applicability`. No
+//             lexical rule separates that from ordinary prose without the
+//             noise described above. That shape is covered instead by the
+//             explicit ghost-name assertions in
+//             plugin/tests/policy-from-record.test.js and — for the prefixed
+//             form — by invariant 3. Scope claimed honestly is better than
+//             scope claimed broadly and then disabled.
+//
+//             Further narrowing: candidates are only taken from inside an
+//             inline-code span, and the PascalCase call-form (`UpdateTestPolicy(`)
+//             is snake-cased and put through the same two-sided test. A line
+//             may opt out with the explicit marker `lint-skills-allow-tool`,
+//             mirroring invariant 5's marker — the escape hatch for "this
+//             name is here BECAUSE it does not exist".
+//
+//             Unlike invariants 1–2 and 4–5 (four lane SKILL.md files) this
+//             one — and, since KBT-B560, invariant 3 as well — walks every
+//             `*.md` under SKILLS_DIR, so the sibling prompt-files
+//             (implementer-prompt.md, reviewer-prompt.md, lane-shared/*)
+//             are covered too. They are just as runtime-loaded.
 //
 // Exit codes (mirror `check-bundle-tool-drift.js`):
 //   0 — all invariants pass.
@@ -101,6 +149,26 @@ function fail(invariant, file, message) {
   );
 }
 
+// Every `*.md` under SKILLS_DIR — invariant 6 is not lane-scoped, because a
+// wrong tool-name in reviewer-prompt.md is just as invisible and just as
+// runtime-loaded as one in a SKILL.md. Returns [] when the dir is unreadable;
+// the lane-loading above already reports missing infrastructure.
+function walkMarkdown(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkMarkdown(p));
+    else if (e.isFile() && e.name.endsWith('.md')) out.push(p);
+  }
+  return out;
+}
+
 function main() {
   const knownTools = loadSnapshot();
 
@@ -123,6 +191,18 @@ function main() {
 
   const byName = Object.fromEntries(skills.map(s => [s.name, s]));
   let violations = 0;
+
+  // Invariants 3 and 6 are tree-scoped: a wrong tool-name in reviewer-prompt.md
+  // or lane-shared/*.md is just as invisible, and just as runtime-loaded, as one
+  // in a lane SKILL.md (KBT-B560).
+  const markdownFiles = walkMarkdown(SKILLS_DIR);
+  const readOrDie = file => {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      return fatal(2, `infrastructure: ${file} unreadable: ${e.message}`);
+    }
+  };
 
   // -------- Invariant 1: F1 (update_validation_status presence) ----------
   // Both execute and review must reference the tool. Strict guard: the
@@ -155,19 +235,23 @@ function main() {
   }
 
   // -------- Invariant 3: MCP-tool refs resolve to live registry ----------
-  // Match every `mcp__kanbantic__<snake_case>` reference across all 4
-  // lane-skills and assert the tool-name is in the canonical snapshot.
+  // Match every `mcp__kanbantic__<snake_case>` reference across every skill
+  // markdown file and assert the tool-name is in the canonical snapshot.
   // Allow trailing identifier characters (lowercase + underscore + digits).
+  // Tree-scoped since KBT-B560: invariant 6 cannot see the prefixed form (the
+  // `__` separators swallow the word boundary), so a ghost tool written as
+  // `mcp__kanbantic__bogus` in reviewer-prompt.md was caught by nothing.
   const mcpRefRegex = /mcp__kanbantic__([a-z][a-z0-9_]*)/g;
-  for (const skill of skills) {
+  for (const file of markdownFiles) {
+    const content = readOrDie(file);
     const found = new Set();
     let match;
-    while ((match = mcpRefRegex.exec(skill.content)) !== null) {
+    while ((match = mcpRefRegex.exec(content)) !== null) {
       found.add(match[1]);
     }
     for (const name of found) {
       if (!knownTools.has(name)) {
-        fail(3, skill.file,
+        fail(3, file,
           `Unknown MCP-tool reference \`mcp__kanbantic__${name}\` ` +
           `is not in known-mcp-tools.json. Either the tool was removed/renamed ` +
           `(fix the SKILL.md) or the snapshot is stale (regenerate snapshot ` +
@@ -218,6 +302,56 @@ function main() {
             `legitimate mention. Per KBT-RL147 Invariant 5.`);
           violations++;
         }
+      }
+    }
+  }
+
+  // -------- Invariant 6: near-miss tool-names in prose --------------------
+  // KBT-B560. See the header comment for the two-sided test and the measured
+  // false-positive counts that motivate it.
+  const TOOL_VERBS = new Set([...knownTools].map(t => t.split('_')[0]));
+  const TOOL_NOUNS = new Set([...knownTools].map(t => t.slice(t.indexOf('_') + 1)));
+  const ALLOW_TOOL_MARKER = 'lint-skills-allow-tool';
+  const INLINE_CODE = /`[^`\n]+`/g;
+  const SNAKE_TOKEN = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/g;
+  const PASCAL_CALL = /\b([A-Z][a-z0-9]*(?:[A-Z][a-z0-9]*)+)\s*\(/g;
+
+  const toSnake = s => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+
+  // Both halves borrowed from real tools, the whole borrowed from none. The
+  // verb alone is not enough — see the header comment for the measurement.
+  function nearMiss(name) {
+    const i = name.indexOf('_');
+    if (i < 0 || knownTools.has(name)) return false;
+    return TOOL_VERBS.has(name.slice(0, i)) && TOOL_NOUNS.has(name.slice(i + 1));
+  }
+
+  for (const file of markdownFiles) {
+    const lines = readOrDie(file).split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.includes(ALLOW_TOOL_MARKER)) continue; // explicit opt-out
+      const hits = new Set();
+      for (const span of line.match(INLINE_CODE) || []) {
+        for (const m of span.matchAll(SNAKE_TOKEN)) {
+          if (nearMiss(m[1])) hits.add(m[1]);
+        }
+        for (const m of span.matchAll(PASCAL_CALL)) {
+          const snake = toSnake(m[1]);
+          if (nearMiss(snake)) hits.add(`${m[1]} (→ ${snake})`);
+        }
+      }
+      for (const name of hits) {
+        fail(6, file,
+          `Line ${i + 1} names \`${name}\`, which is not in known-mcp-tools.json ` +
+          `while both its verb-prefix and its noun-suffix ARE used by real tools — ` +
+          `the signature of a renamed or mis-remembered tool. ` +
+          `Either the name is wrong (use the real tool — e.g. \`set_test_policy\`, ` +
+          `not \`update_test_policy\`), the snapshot is stale (regenerate per the ` +
+          `JSON's \`regenerationCommand\`), or the mention is deliberate — in which ` +
+          `case add the \`${ALLOW_TOOL_MARKER}\` marker on the line. ` +
+          `Per KBT-B560 Invariant 6.`);
+        violations++;
       }
     }
   }
