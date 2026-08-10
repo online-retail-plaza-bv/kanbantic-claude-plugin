@@ -1,7 +1,7 @@
 {
   "name": "kanbantic-claude-plugin-tests",
   "private": true,
-  "version": "2.36.0",
+  "version": "2.37.0",
   "type": "commonjs",
   "description": "Test harness for the Kanbantic Claude Code Plugin proxy. Zero runtime deps — uses only Node built-ins (node:test). Not published. Plugin itself is shipped from plugin/.",
   "scripts": {
@@ -9,7 +9,8 @@
     "test:signals:docker": "sh plugin/scripts/run-signal-tests-in-docker.sh",
     "check:drift": "node plugin/scripts/check-bundle-tool-drift.js",
     "check:param-drift": "node plugin/scripts/check-tool-param-drift.js",
-    "check:version": "node plugin/scripts/check-version-sync.js"
+    "check:version": "node plugin/scripts/check-version-sync.js",
+    "check:notes": "node plugin/scripts/check-release-notes.js"
   },
   "engines": {
     "node": ">=18"

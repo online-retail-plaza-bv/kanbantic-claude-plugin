@@ -648,6 +648,84 @@ After this transition, surface the deploy-instructions to the caller:
 
 If the deploy fails: **there is no legal `InDeployment → Review` transition** — the Domain layer allows only `InDeployment → Done` (KBT-RL053, verified against `get_system_schema`; `InDeployment → Cancelled` is likewise blocked). Do **NOT** attempt an illegal transition. Instead: `report_status` + an `add_discussion_entry` documenting the failed deploy, leave the issue on `InDeployment`, and escalate to the PO for a hotfix-forward or a manual recovery decision. A proper failed-deploy return-path is tracked in **[OPEN: KBT-F589 / E104]**.
 
+## Step 8.5: Versie-registratie — a shipped version must be recorded (KBT-B545)
+
+<HARD-GATE>
+If the merge in Step 7 **changed the repository's version number**, then that merge **is a release**, and the release must be registered in Kanbantic before this skill returns. Do not defer it to "whoever picks up the next issue".
+</HARD-GATE>
+
+**Why this step exists.** KBT-B545: the plugin repo cut a release per merged issue while Kanbantic only ever got a new Version when the claim-gate demanded a bucket for new work. One bucket served dozens of issues, so nineteen shipped minors were never recorded. `preview_next_version` reckons from the highest **registered** Version, so it went on proposing numbers that had been out for weeks. Nothing was broken — a step simply did not exist. This is that step.
+
+### 8.5a: Determine whether this merge shipped a release
+
+**The version carrier is repo-specific — resolve it before you test it.** This skill runs for every repository in the workspace, and they do not agree on where the number lives:
+
+| Repository | Version carrier | Notes |
+|---|---|---|
+| `kanbantic-claude-plugin` | `plugin/.claude-plugin/plugin.json` → `version` | `.claude-plugin/marketplace.json` must match it in lockstep; `npm run check:version` enforces that. `package.json` is the test-harness package and is **not** the carrier (see `plugin/scripts/check-version-sync.js`). |
+| `kanbantic` (monorepo) | git tags (`git describe --tags`) | CI auto-creates the next PATCH tag on every push to `main`; the tag stream is a build counter, deliberately decoupled from the Kanbantic Versions. This step does **not** apply — go to Step 9. |
+| any other repo | resolve from its own release convention | If you cannot identify a carrier, this step does not apply. |
+
+Then compare the **value**, not whether the file was touched — an edit that leaves `version` alone (an added npm script, a reworded description) is not a release. For the plugin repo, run the detector:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-bump.js" .
+# → {"old":"2.36.0","new":"2.37.0","released":true}
+```
+
+It compares HEAD against its **first parent**. That matters here: by the time this step runs, Step 7 has already merged and checked out `main`, so HEAD *is* `origin/main` and any comparison against `origin/main` or `git merge-base` answers "no release" every single time. The first parent of a `--no-ff` merge commit is pre-merge `main`, which is the state you actually want to diff against. The script is covered by `plugin/tests/detect-release-bump.test.js`, which drives it over real synthetic merge commits — this trigger is not prose, it is executed.
+
+`released: false` ⇒ this merge did not ship a release: **skip to Step 9 silently.** Most merges are in this category, and that is not a warning.
+
+**On the PR path of Step 7** (branch protection, or a PR merged on GitHub) your local HEAD is still the branch tip and never became the merge commit. Move to the merged state first, or the detector will refuse. From a worktree — which Step 0.5 put you in, and where `git checkout main` fails if the primary clone already has it — ask about `origin/main` instead of switching to it:
+
+```bash
+git fetch origin
+node "$CLAUDE_PLUGIN_ROOT/scripts/detect-release-bump.js" . origin/main
+```
+
+The detector also refuses a **stale** default branch, so a checkout without a pull cannot report an old release as the new one. Fetch first.
+
+A **non-zero exit** means the script could not tell: not a repo, no parent, an unreadable manifest, a ref that is not the tip of the default branch, or a default branch that is **stale** relative to its remote. That is not the same as "no release" and must never be treated as one: report it and resolve it by hand before continuing.
+
+### 8.5b: Close out the shipped Version
+
+Read the number the repo now carries (never guess it, and never take it from `preview_next_version` — that is the tool this whole step exists to keep honest):
+
+```bash
+node -p "require('./plugin/.claude-plugin/plugin.json').version"
+```
+
+Find the matching Version for the issue's Application and mark it shipped:
+
+```
+MCP: mcp__kanbantic__list_versions(workspaceId)   // filter to issue.applicationId
+MCP: mcp__kanbantic__freeze_version(versionId)         // scope is final at release
+MCP: mcp__kanbantic__mark_version_released(versionId)
+```
+
+**No Version exists for the number the repo just shipped** ⇒ create it first, then freeze + release it. `create_version` is **app-scoped**: pass the issue's `applicationId` (PR #242); new Versions start in `Planned`. Note that `create_version` rejects a `description` on creation (KBT-B557) — create with the name only, then `update_version` for the body.
+
+### 8.5c: Open the next Planned Version against the repo, not against the preview
+
+The claim-gate (KBT-RL145) needs a `Planned` Version for the Application, so the next one is created here rather than by the next agent under time pressure. `preview_next_version` is a *suggestion*: verify its `baselineNumber` equals the number the repo actually carries before you accept its `proposed`.
+
+```
+MCP: mcp__kanbantic__preview_next_version(applicationId: <issue.applicationId>)
+```
+
+`baselineNumber` **below** the repo's version ⇒ the registry has drifted. Do not follow the proposal. Take the repo's number as the truth, bump from there, and record the discrepancy as a `Decision` discussion-entry so the drift is visible instead of silently absorbed.
+
+Record the outcome either way:
+
+```
+MCP: mcp__kanbantic__add_discussion_entry(
+  issueId,
+  content: "## Versie-registratie\n\n- Uitgebracht: `<version>` (tag `<tag>`, merge `<sha>`)\n- Version `<name>` → Frozen → Released\n- Volgende Planned Version: `<name>` (geverifieerd tegen `plugin/.claude-plugin/plugin.json`)",
+  entryType: "Decision"
+)
+```
+
 ## Step 9: Knowledge-Extractie (optional)
 
 After the issue is Done, prompt the reviewer for knowledge to capture. This step is **optional** — if the reviewer has nothing to add, skip the MCP calls.
