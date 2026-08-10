@@ -39,6 +39,37 @@
 //             reference to a GitHub Release in prose). Complements invariant
 //             3: the prefixed `mcp__kanbantic__<version-tool>` refs restored
 //             in F12 are validated against the synced snapshot there.
+//   6. (vi) — bare tool-names in prose (KBT-B560). Invariant 3 only sees the
+//             prefixed `mcp__kanbantic__<name>` form, so a SKILL.md could —
+//             and did — prescribe `update_test_policy`, `set_applicability`
+//             and `SetApplicability(...)`, none of which exist. An agent
+//             following that instruction looks for a tool that isn't there
+//             and most likely skips the step rather than reporting that it
+//             is stuck. This invariant resolves bare names too.
+//
+//             Scope is deliberately narrow, because a lint with false
+//             positives gets switched off and is then worse than nothing:
+//               - only inside an inline-code span (`...`) — prose words are
+//                 never candidates;
+//               - only `verb_noun` snake_case whose FIRST segment is a verb
+//                 that actually starts a tool name in the snapshot (`get_`,
+//                 `set_`, `update_`, `list_`, …), so `feature_branch` and
+//                 `notApplicableReason` never match;
+//               - plus the PascalCase CALL form (`SetApplicability(`), whose
+//                 snake-cased equivalent passes the same verb filter. The
+//                 trailing `(` is load-bearing: without it `ReviewApproval`
+//                 (→ `review_approval`, verb `review`) would trip.
+//             Measured over the whole plugin/skills tree at the time of
+//             writing: 4 hits, 3 of them the actual defect and 1 a deliberate
+//             negative mention. A line may opt out with the explicit marker
+//             `lint-skills-allow-tool`, mirroring invariant 5's marker — that
+//             is the escape hatch for "this name is here BECAUSE it does not
+//             exist".
+//
+//             Unlike invariants 1–5 (four lane SKILL.md files) this one walks
+//             every `*.md` under SKILLS_DIR, so the sibling prompt-files
+//             (implementer-prompt.md, reviewer-prompt.md) — equally
+//             runtime-loaded — are covered as well.
 //
 // Exit codes (mirror `check-bundle-tool-drift.js`):
 //   0 — all invariants pass.
@@ -99,6 +130,26 @@ function fail(invariant, file, message) {
   process.stdout.write(
     `FAIL invariant ${invariant}: ${file}\n  ${message}\n`
   );
+}
+
+// Every `*.md` under SKILLS_DIR — invariant 6 is not lane-scoped, because a
+// wrong tool-name in reviewer-prompt.md is just as invisible and just as
+// runtime-loaded as one in a SKILL.md. Returns [] when the dir is unreadable;
+// the lane-loading above already reports missing infrastructure.
+function walkMarkdown(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkMarkdown(p));
+    else if (e.isFile() && e.name.endsWith('.md')) out.push(p);
+  }
+  return out;
 }
 
 function main() {
@@ -218,6 +269,58 @@ function main() {
             `legitimate mention. Per KBT-RL147 Invariant 5.`);
           violations++;
         }
+      }
+    }
+  }
+
+  // -------- Invariant 6: bare tool-names in prose resolve -----------------
+  // KBT-B560. See the header comment for the scoping rationale and the
+  // measured false-positive count.
+  const TOOL_VERBS = new Set([...knownTools].map(t => t.split('_')[0]));
+  const ALLOW_TOOL_MARKER = 'lint-skills-allow-tool';
+  const INLINE_CODE = /`[^`\n]+`/g;
+  const SNAKE_TOKEN = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/g;
+  const PASCAL_CALL = /\b([A-Z][a-z0-9]*(?:[A-Z][a-z0-9]*)+)\s*\(/g;
+
+  const toSnake = s => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+
+  // A candidate is only a suspected tool-name when its verb-prefix is one the
+  // live registry actually uses. That single filter is what keeps the noise at
+  // zero — without it every snake_case word in prose would be a candidate.
+  const suspect = name => !knownTools.has(name) && TOOL_VERBS.has(name.split('_')[0]);
+
+  for (const file of walkMarkdown(SKILLS_DIR)) {
+    let content;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      fatal(2, `infrastructure: ${file} unreadable: ${e.message}`);
+    }
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.includes(ALLOW_TOOL_MARKER)) continue; // explicit opt-out
+      const spans = line.match(INLINE_CODE) || [];
+      const hits = new Set();
+      for (const span of spans) {
+        for (const m of span.matchAll(SNAKE_TOKEN)) {
+          if (suspect(m[1])) hits.add(m[1]);
+        }
+        for (const m of span.matchAll(PASCAL_CALL)) {
+          const snake = toSnake(m[1]);
+          if (suspect(snake)) hits.add(`${m[1]} (→ ${snake})`);
+        }
+      }
+      for (const name of hits) {
+        fail(6, file,
+          `Line ${i + 1} names \`${name}\`, which is not in known-mcp-tools.json ` +
+          `but reads as an MCP tool (its verb-prefix is one the registry uses). ` +
+          `Either the name is wrong (use the real tool — e.g. \`set_test_policy\`, ` +
+          `not \`update_test_policy\`), the snapshot is stale (regenerate per the ` +
+          `JSON's \`regenerationCommand\`), or the mention is deliberate — in which ` +
+          `case add the \`${ALLOW_TOOL_MARKER}\` marker on the line. ` +
+          `Per KBT-B560 Invariant 6.`);
+        violations++;
       }
     }
   }

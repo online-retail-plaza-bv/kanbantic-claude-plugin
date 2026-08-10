@@ -236,9 +236,17 @@ Build a requirements checklist from specifications and test cases.
 
 **Version context (KBT-F318):** capture the issue's assigned Version so it can be surfaced in the merge-summary. From the `get_issue` response (Step 1) read `VersionId`; resolve its name + status via `list_versions(workspaceId)` (or `issue_version_lookup`). Store as `versionContext = { name, status, applicationName }`. If the issue has no Version, record `versionContext = "—"` (backlog). The Version name is shown in the merge commit message (Step 7) and the final report (Step 10).
 
-**Test-policy (Regel E / KBT-F442):** From the discussion entries, locate the entry whose content starts with `## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)`. Parse the table to extract, per level (Unit / Integration / E2E): Applicability (`Vereist` / `N.v.t.`) + Minimum count + N.v.t.-rationale. Also count the actual `Passed` test cases per level from `list_test_cases`. Store as `frozenPolicy` with actual counts.
+**Test-policy (Regel E / KBT-F442):** read the policy from the **beleidsrecord**, the same record the gates evaluate:
 
-If no test-policy entry is found for a Feature / Bug issue, treat all three levels as Vereist/min=1 and flag the absence as a Critical review issue (the prepare-step was incomplete).
+```
+MCP: mcp__kanbantic__get_test_policy(issueId)
+```
+
+Per level (Unit / Integration / E2E) the response gives `applicability` (`Required` / `NotApplicable` — in this SKILL.md written as `Vereist` / `N.v.t.`), `minCount`, `notApplicableReason` and `isFrozen`. Also count the actual `Passed` test cases per level from `list_test_cases`. Store as `frozenPolicy` with actual counts.
+
+**Do not parse the `Decision`-entry for these numbers (KBT-B560).** The entry `## Test-policy (bevroren bij claim_issue — KBT-F442 / Regel E)` stays useful as the human-readable motivering — it explains *why* a level is N.v.t., which the record cannot — but it is a snapshot frozen at prepare-time. This very skill changes the record in Step 5a (`set_test_policy` to put E2E on N.v.t.) without touching that entry, so a reviewer reading the entry measures its own change out of existence. Read the record; quote the entry.
+
+If `get_test_policy` returns no policies for a Feature / Bug issue, treat all three levels as Vereist/min=1 and flag the absence as a Critical review issue (the prepare-step was incomplete). If the record and the `Decision`-entry disagree, that is not automatically a defect — a post-claim policy change is a legitimate route — but say so explicitly in the review report and judge on the record.
 
 **UI-contract & wireframe (KBT-F627):** for UI-issues (geldig `## Wireframe`-blok, geen opt-out `n.v.t. (geen UI)`) also load:
 
@@ -366,7 +374,7 @@ MCP: mcp__kanbantic__update_user_story(userStoryId: <id>, status: "Approved")
 # per linked Specification (title is required — pass the existing title unchanged):
 MCP: mcp__kanbantic__update_specification(id: <specId>, title: <existing title>, status: "Approved")
 ```
-- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`** — a User-Story-level precondition that is **independent of the issue test-policy**. So for a Feature with genuinely no E2E surface you cannot approve the US this way, and leaving it at `Ready` keeps `UserStoriesApproved` red. In that specific case the **documented override-with-reason is the correct route** (not a sluiproute): set the E2E level to `N.v.t.` via `set_test_policy`, then waive `UserStoriesApproved` with an `overrideReason` that cites the E2E-`N.v.t.` policy as the rationale — the override is audited (KBT-F170 / KBT-PR191). Closing this coupling (so `update_user_story` honours a `N.v.t.` E2E policy and no override is needed) is a server-side follow-up on KBT-F591/KBT-F587. For a Feature that *does* have a Passed E2E case, approve the US directly with no override.
+- `update_user_story(..., "Approved")` requires **≥1 linked E2E test case with status `Passed`** — a User-Story-level precondition that is **independent of the issue test-policy**. So for a Feature with genuinely no E2E surface you cannot approve the US this way, and leaving it at `Ready` keeps `UserStoriesApproved` red. In that specific case the **documented override-with-reason is the correct route** (not a sluiproute): set the E2E level to `N.v.t.` via `set_test_policy`, then waive `UserStoriesApproved` with an `overrideReason` that cites the E2E-`N.v.t.` policy as the rationale — the override is audited (KBT-F170 / KBT-PR191). **This call changes the policy *record* and leaves the prepare-time `Decision`-entry untouched — that divergence is expected, and it is exactly why Step 1b reads `get_test_policy` and never the entry (KBT-B560). If you make this call after having built the review-context, re-read the record before judging coverage in Step 4.** Closing this coupling (so `update_user_story` honours a `N.v.t.` E2E policy and no override is needed) is a server-side follow-up on KBT-F591/KBT-F587. For a Feature that *does* have a Passed E2E case, approve the US directly with no override.
 
 **Feature-level (KBT-PR200):** No `approve_phase` call (that mechanism is Phase-scoped). Record an `ApprovedWithComments` / `Approved` ReviewApproval scoped to the Feature, **then merge to the epic-integration branch**, **then** transition the Feature to `Done`:
 ```

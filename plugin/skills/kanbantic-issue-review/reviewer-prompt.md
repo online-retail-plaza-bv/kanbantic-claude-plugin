@@ -27,7 +27,9 @@ Agent tool (superpowers:code-reviewer):
     - [ ] KBT-TC002: [title] — [expected result]
 
     ## Frozen Test-Policy (Regel E / KBT-F442)
-    [PASTE the frozenPolicy table here, with actual Passed counts filled in:]
+    [PASTE the frozenPolicy table here — sourced from `get_test_policy` (the
+     beleidsrecord), NOT from the test-policy Decision-entry (KBT-B560) — with
+     actual Passed counts filled in:]
 
     | Niveau | Applicabiliteit | Minimum vereist | Passed (werkelijk) | Status |
     |---|---|---|---|---|
@@ -35,7 +37,10 @@ Agent tool (superpowers:code-reviewer):
     | Integration | Vereist | N | M | ✓ Gedekt / ✗ ONTBREKENDE COVERAGE |
     | E2E | N.v.t. — [reden] | — | — | ✓ N.v.t. / ✗ Rationale ontbreekt |
 
-    If no test-policy entry was found on the issue: treat all three levels as Vereist/min=1 and flag as Critical.
+    If `get_test_policy` returned no policies for the issue: treat all three
+    levels as Vereist/min=1 and flag as Critical. The Decision-entry may be
+    quoted as motivering for an N.v.t. level, but never as the source of these
+    numbers — it is a prepare-time snapshot and the record can have moved since.
 
     ## UI-contract & Wireframe (KBT-F627)
     [PASTE for UI-issues (wireframe-blok aanwezig, geen opt-out):
