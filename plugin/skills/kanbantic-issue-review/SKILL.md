@@ -688,12 +688,12 @@ Read the answer as follows:
 | `applicable: false` / `optedIn: false` | this repo has no carrier this check understands, or has not opted in — not applicable |
 
 <HARD-GATE>
-**An equal version number is not proof the release was registered.** `baselineNumber` is the highest *registered* Version whatever its lifecycle status, and a Version row normally exists **before** its release ships — 8.5c opens the next `Planned` bucket as part of the previous release. So a matching number is consistent with a bucket that was never frozen and never marked `Released`, which is precisely the miss KBT-B586 is about: a release-cut PR bumps the carrier, someone else merges it, 8.5b never runs, and the number matches anyway. No MCP tool exposes a Version's lifecycle status, so this cannot be settled by asking. Run 8.5b whenever the detector reports `mayBeUnreleased`. It is idempotent, so the cost of doing it needlessly is nil and the cost of skipping it is a release that stays unregistered.
+**An equal version number is not proof the release was registered.** `baselineNumber` is the highest *registered* Version whatever its lifecycle status, and a Version row normally exists **before** its release ships — 8.5c opens the next `Planned` bucket as part of the previous release. So a matching number is consistent with a bucket that was never frozen and never marked `Released`, which is precisely the miss KBT-B586 is about: a release-cut PR bumps the carrier, someone else merges it, 8.5b never runs, and the number matches anyway. No MCP tool exposes a Version's lifecycle status, so this cannot be settled by asking. Run 8.5b whenever the detector reports `mayBeUnreleased`: the cost of doing it needlessly is **one expected error to swallow** (see 8.5b — it is *not* a silent no-op), and the cost of skipping it is a release that stays unregistered.
 </HARD-GATE>
 
 The same check runs automatically as a `SessionStart` hook, so a release missed here surfaces at the next session in that repo — but only in a clone that carries a recognised version file and has opted in via `git config kanbantic.applicationId <guid>`. Without that it is silent by design.
 
-**The procedure is idempotent.** Registering a release that is already registered is a no-op: 8.5b finds the Version already `Released` and changes nothing, and 8.5c finds a `Planned` bucket already open. Because there are two entries, it *will* sometimes run twice on the same release — run it anyway rather than trying to work out whether the supervising agent got there first.
+**Re-running is safe, but it is not silent.** Because there are two entries, the procedure *will* sometimes run on a release that is already registered — run it anyway rather than trying to work out whether the supervising agent got there first. Be aware of what that costs, though: `freeze_version` and `mark_version_released` are **not** server-side no-ops. On a Version that has already passed the target state they throw `Kanbantic:InvalidVersionLifecycleTransition`, and nothing between the domain and the MCP boundary swallows it. 8.5b below says exactly which of those errors mean "already done" and must be treated as success. 8.5c is genuinely harmless on a re-run: it finds a `Planned` bucket already open.
 
 **What entry B does not cover** is written out in **KBT-BD208** and is worth knowing before relying on it: it reports *after the fact* rather than preventing, it needs a session to run, it is **not wired into CI** (a cost decision — one provisioned secret — and explicitly *not* a capability gap; see KBT-BD208 §3 before repeating any claim about it), it only covers repos with a resolvable carrier **and** a configured `kanbantic.applicationId`, it **cannot see a Version's lifecycle status** (§7, the reason for the HARD-GATE above), and it never backfills history.
 
@@ -745,7 +745,32 @@ MCP: mcp__kanbantic__freeze_version(versionId)         // scope is final at rele
 MCP: mcp__kanbantic__mark_version_released(versionId)
 ```
 
-**No Version exists for the number the repo just shipped** ⇒ create it first, then freeze + release it. `create_version` is **app-scoped**: pass the issue's `applicationId` (PR #242); new Versions start in `Planned`. Note that `create_version` rejects a `description` on creation (KBT-B557) — create with the name only, then `update_version` for the body.
+<HARD-GATE>
+**Both of those calls throw when the Version has already passed the state they target, and a throw here does NOT mean the Version is missing.**
+
+The lifecycle transitions are guarded in the domain (`Version.Freeze` / `Version.MarkReleased`) and nothing between there and the MCP boundary catches the failure:
+
+| Version's current state | `freeze_version` | `mark_version_released` |
+|---|---|---|
+| `Planned` / `InProgress` | succeeds | throws (needs `Frozen`/`StagingDeployed`) — run freeze first |
+| `Frozen` / `StagingDeployed` | **throws** — already frozen | succeeds |
+| `Released` | **throws** — already done | **throws** — already done |
+| `Archived` | throws | throws |
+
+The error is `Kanbantic:InvalidVersionLifecycleTransition`, carrying `current`, `method` and `allowedFrom` in its data.
+
+**How to read it.** Compare `current` against what you were trying to reach:
+
+- `method: Freeze` with `current` at `Frozen`, `StagingDeployed` or `Released` ⇒ **already frozen. Continue to `mark_version_released`.**
+- `method: MarkReleased` with `current: Released` ⇒ **already released. This step is done. Continue to 8.5c.**
+- `current: Archived`, or any other error code ⇒ genuinely unexpected. Stop and report; do not improvise.
+
+**Do not read a throw as "the Version does not exist."** You cannot check first — no MCP tool exposes a Version's lifecycle status (`list_versions` returns name, slug, description, isActive, issueCount; there is no `get_version`), so calling and interpreting the error *is* the supported way to be idempotent here. <!-- lint-skills-allow-tool: deliberate negative example — `get_version` is named precisely because it does NOT exist, which is why the error has to be interpreted instead --> Treating it as absence sends you down the create-a-Version path below and mints a **duplicate Version in the stream** — the exact KBT-B545 damage class this whole step exists to prevent. `list_versions` already told you the record exists; a lifecycle error cannot unsay that.
+
+A server-side no-op when the Version is already at or past the target would remove this trap entirely and is the cleaner fix. It belongs in the monorepo (`Version.Freeze` / `Version.MarkReleased`), not in this instruction — tracked as **KBT-B603**. Once that ships, this HARD-GATE collapses back to "call both, done".
+</HARD-GATE>
+
+**No Version exists for the number the repo just shipped** — that is, `list_versions` returned no matching name, **not** merely that a lifecycle call threw ⇒ create it first, then freeze + release it. `create_version` is **app-scoped**: pass the issue's `applicationId` (PR #242); new Versions start in `Planned`. Note that `create_version` rejects a `description` on creation (KBT-B557) — create with the name only, then `update_version` for the body.
 
 ### 8.5c: Open the next Planned Version against the repo, not against the preview
 

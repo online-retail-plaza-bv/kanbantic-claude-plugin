@@ -176,15 +176,44 @@ test('the registration is reachable by a route other than the skill\'s own merge
   );
 });
 
-test('the registration declares itself idempotent', () => {
-  // Two routes into one procedure means it will sometimes run twice on the same
-  // release — the skill merges and registers, and the drift check later finds
-  // nothing to do. That has to be stated as safe, or the second caller hesitates.
+test('the registration says re-running is safe AND how the expected error looks', () => {
+  // Two routes into one procedure means it will sometimes run on an already-registered
+  // release, so the step has to state that re-running is safe — otherwise the second
+  // caller hesitates and skips it.
+  //
+  // But "safe" here is NOT "nothing happens". This assertion used to be a bare
+  // /idempotent/i grep, and it passed happily while the step claimed a server-side no-op
+  // that does not exist: `Version.Freeze` and `Version.MarkReleased` both throw once the
+  // Version has passed the state they target, and nothing between the domain and the MCP
+  // boundary catches it. A word-match cannot tell a true safety claim from a false one, so
+  // pin the mechanism instead of the adjective.
+  //
+  // This matters because of where the false claim led. 8.5b's documented fallback is
+  // "no Version exists for this number ⇒ create it", so an agent that reads an unexpected
+  // lifecycle error as absence mints a duplicate Version — the KBT-B545 damage class this
+  // step exists to prevent.
   const body = section();
   assert.ok(
-    /idempotent/i.test(body),
-    'the step must say that running it again on an already-registered release is a '
-      + 'no-op, because it now has more than one caller.'
+    /re-?running is safe|safe to re-?run|run it anyway/i.test(body),
+    'the step must state that running the close-out again is safe, or a second caller '
+      + 'will skip it and leave the release unregistered.'
+  );
+  assert.ok(
+    body.includes('Kanbantic:InvalidVersionLifecycleTransition'),
+    'the step must name the error the already-registered case actually produces. Promising '
+      + 'a silent no-op is false: freeze_version and mark_version_released throw once the '
+      + 'Version has passed the target state.'
+  );
+  assert.ok(
+    /current/.test(body) && /Released/.test(body),
+    "the step must say how to read the error's `current` field, since no MCP tool exposes "
+      + 'a Version lifecycle status and interpreting the error is the only way to tell '
+      + '"already done" from a real failure.'
+  );
+  assert.ok(
+    /does not exist|do not read a throw/i.test(body),
+    'the step must warn against reading a lifecycle error as "the Version is missing" — '
+      + 'that misreading routes straight into create_version and duplicates the Version.'
   );
 });
 
