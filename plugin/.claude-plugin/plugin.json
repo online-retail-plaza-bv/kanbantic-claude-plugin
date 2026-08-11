@@ -1,6 +1,6 @@
 {
   "name": "kanbantic-claude-plugin",
-  "version": "2.37.0",
+  "version": "2.38.0",
   "description": "Drives the Kanbantic issue lifecycle from Claude Code: intake skills (bug / feature / epic), lane-skills for triage, prepare, execute and review, an autopilot and an orchestrator, plus a bundled MCP proxy and workflow hooks. Every artifact lives in Kanbantic — no local file output. Per-release details: RELEASE_NOTES_v*.md in the repository.",
   "author": {
     "name": "Kanbantic"
