@@ -12,6 +12,11 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start-toolkit-sync.js\"",
             "timeout": 30000
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start-release-drift.js\"",
+            "timeout": 20000
           }
         ]
       }

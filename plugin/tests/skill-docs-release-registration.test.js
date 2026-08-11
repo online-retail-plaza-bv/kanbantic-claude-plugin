@@ -144,3 +144,88 @@ test('the step warns against trusting preview_next_version over the repo', () =>
       + 'produced the v2.16.0 collision in KBT-B545.'
   );
 });
+
+//
+// KBT-B586 — the step must be reachable by more than the merge it performs itself.
+//
+// KBT-B545 put the registration behind Step 7's merge. That merge is one route
+// among several, and in this workspace it is the route that is deliberately NOT
+// taken: KBT-TRUL030 has a subagent deliver up to `Review` and a supervising agent
+// merge after checking. On 2026-08-10 all eight merged PRs went that way, so the
+// step covered none of them — including the release of v2.37.0, which shipped the
+// step itself and was registered by hand.
+//
+// A guard that only fires on the route nobody uses is not a guard.
+//
+
+test('the registration is reachable by a route other than the skill\'s own merge', () => {
+  const body = section();
+  assert.ok(
+    body.includes('detect-release-drift.js'),
+    'the step must offer an entry that does not depend on Step 7 having merged. '
+      + 'detect-release-bump.js answers an event-shaped question (HEAD vs its first '
+      + 'parent) and refuses any ref that is not the tip of the default branch, so '
+      + 'it is answerable only by whoever stands on the merge commit. The drift '
+      + 'detector compares repo against registry and needs no event — see KBT-RL210.'
+  );
+  const fenced = (body.match(/```[\s\S]*?```/g) || []).join('\n');
+  assert.ok(
+    fenced.includes('detect-release-drift.js'),
+    'a runnable block must actually invoke detect-release-drift.js. KBT-B545 shipped '
+      + 'its first trigger as prose and it was inert for exactly that reason.'
+  );
+});
+
+test('the registration says re-running is safe AND how the expected error looks', () => {
+  // Two routes into one procedure means it will sometimes run on an already-registered
+  // release, so the step has to state that re-running is safe — otherwise the second
+  // caller hesitates and skips it.
+  //
+  // But "safe" here is NOT "nothing happens". This assertion used to be a bare
+  // /idempotent/i grep, and it passed happily while the step claimed a server-side no-op
+  // that does not exist: `Version.Freeze` and `Version.MarkReleased` both throw once the
+  // Version has passed the state they target, and nothing between the domain and the MCP
+  // boundary catches it. A word-match cannot tell a true safety claim from a false one, so
+  // pin the mechanism instead of the adjective.
+  //
+  // This matters because of where the false claim led. 8.5b's documented fallback is
+  // "no Version exists for this number ⇒ create it", so an agent that reads an unexpected
+  // lifecycle error as absence mints a duplicate Version — the KBT-B545 damage class this
+  // step exists to prevent.
+  const body = section();
+  assert.ok(
+    /re-?running is safe|safe to re-?run|run it anyway/i.test(body),
+    'the step must state that running the close-out again is safe, or a second caller '
+      + 'will skip it and leave the release unregistered.'
+  );
+  assert.ok(
+    body.includes('Kanbantic:InvalidVersionLifecycleTransition'),
+    'the step must name the error the already-registered case actually produces. Promising '
+      + 'a silent no-op is false: freeze_version and mark_version_released throw once the '
+      + 'Version has passed the target state.'
+  );
+  assert.ok(
+    /current/.test(body) && /Released/.test(body),
+    "the step must say how to read the error's `current` field, since no MCP tool exposes "
+      + 'a Version lifecycle status and interpreting the error is the only way to tell '
+      + '"already done" from a real failure.'
+  );
+  assert.ok(
+    /does not exist|do not read a throw/i.test(body),
+    'the step must warn against reading a lifecycle error as "the Version is missing" — '
+      + 'that misreading routes straight into create_version and duplicates the Version.'
+  );
+});
+
+test('the step says what the route-independent entry does NOT cover', () => {
+  // Detecting drift catches every missed route but reports after the fact. Silence
+  // about that limit is how a partial guard gets mistaken for a complete one —
+  // which is the mistake KBT-B545 made about its own coverage.
+  const body = section();
+  assert.ok(
+    body.includes('KBT-BD208'),
+    "the step must point at the Boundary spec recording the route's limits "
+      + '(reports after the fact, needs a session, no CI coverage, carrier-resolvable '
+      + 'repos only, no historical backfill).'
+  );
+});
