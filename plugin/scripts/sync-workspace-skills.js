@@ -225,6 +225,52 @@ function sha256(s) {
 }
 
 /**
+ * Collapse every line-ending convention to LF.
+ *
+ * KBT-B543: drift-detection used to hash raw bytes. This script writes LF, but
+ * git rewrites those same files to CRLF on checkout whenever `core.autocrlf` is
+ * true — the default Git-for-Windows install. The stored `targetHash` (computed
+ * over the LF body we wrote) then never matched the bytes read back, so every
+ * mirror reported as "locally edited" after any git operation. A measured run
+ * showed 17 of 26 entries differing in line endings alone and 0 differing in
+ * content.
+ *
+ * That mattered far beyond the noise: the local-edit warning is the only brake
+ * between a sync and overwriting work that is not in the Toolkit yet. Firing it
+ * falsely on every Windows run trains the operator to reach for `--force`, and
+ * in KBT-B525 one of seventeen dismissed "false positives" was real —
+ * `kanbantic-deploy.md` lost 345 lines of runbook inside that noise.
+ *
+ * Applied to BOTH sides of every comparison, the hash becomes a content
+ * comparison instead of a byte comparison and a warning again means what it
+ * says. Deliberately narrow: ONLY line terminators are touched. Indentation,
+ * trailing spaces and blank lines all still count as content, so a genuinely
+ * hand-edited file keeps warning — that is the property KBT-B543's DoD 2 asks
+ * to be demonstrated, and KBT-TC3512 covers it with a file that is CRLF-
+ * converted and edited at the same time.
+ *
+ * The lone-CR branch covers classic-Mac endings; they are line terminators by
+ * the same argument, and leaving them out would make the normalisation
+ * incomplete rather than conservative.
+ */
+function normalizeEol(s) {
+  if (s == null) return '';
+  return String(s).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+/**
+ * SHA-256 over content, ignoring line-ending convention (KBT-B543).
+ *
+ * Every hash that participates in drift-detection goes through here, so the two
+ * sides of a comparison can never disagree about normalisation — which is how
+ * the original defect arose: `renderFile` normalised the body it wrote while
+ * `hashDisk` hashed the bytes it read.
+ */
+function hashContent(s) {
+  return sha256(normalizeEol(s));
+}
+
+/**
  * Model aliases Claude Code's loader accepts, keyed by every input shape a
  * caller can realistically hand us:
  *
@@ -313,7 +359,9 @@ function renderFile(item) {
   // `??` keeps a legitimate `0` from falling through to the other casing.
   const model = normalizeModel(item.model ?? item.Model);
   const modelLine = model ? `model: ${model}\n` : '';
-  const body = (item.content || '').replace(/\r\n/g, '\n');
+  // KBT-B543: normalizeEol also folds lone CRs, which the old inline
+  // `.replace(/\r\n/g, '\n')` left behind.
+  const body = normalizeEol(item.content || '');
   // Ensure exactly one trailing newline.
   const trimmed = body.endsWith('\n') ? body : body + '\n';
   return `---\n${nameLine}description: "${escDesc}"\n${sourceLine}${modelLine}---\n\n${trimmed}`;
@@ -494,10 +542,23 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
   for (const entry of slugged) {
     seenSlugs.add(entry.slug);
     const body = renderFile(entry);
-    const newTargetHash = sha256(body);
+    // KBT-B543: hashContent on both sides — this one is already LF (renderFile
+    // normalises), but routing it through the same helper as hashDisk is what
+    // guarantees the two can never drift apart again.
+    const newTargetHash = hashContent(body);
     // KBT-F437: fold the model into the source-hash so a model-only change
     // (same content, different model) registers as an UPDATE, not UNCHANGED.
-    const newSourceHash = sha256(entry.content + ' ' + (entry.model || ''));
+    // KBT-B543: normalise the Toolkit content too. The issue calls this out
+    // explicitly — without it the problem just moves to the source side, where
+    // the same item delivered with CRLF instead of LF would fake an UPDATE.
+    //
+    // Note the shape is unchanged from before (one hash over
+    // `content + ' ' + model`), only wrapped in the normaliser. That is
+    // deliberate: for the LF content this script has always produced,
+    // normalizeEol is the identity, so every sourceHash already in a manifest
+    // stays valid and upgrading does not churn every entry into a spurious
+    // UPDATE on the first run.
+    const newSourceHash = hashContent(entry.content + ' ' + (entry.model || ''));
     const prev = prevByEntrySlug.get(entry.slug);
     const onDisk = diskHashes[entry.targetPath];
 
@@ -653,7 +714,11 @@ function hashDisk(rootDir) {
       const rel = path.posix.join(sub, ent.name);
       const abs = path.join(rootDir, sub, ent.name);
       const buf = fs.readFileSync(abs, 'utf8');
-      out[rel] = sha256(buf);
+      // KBT-B543: hash the CONTENT, not the bytes. Git's autocrlf filter
+      // rewrites these files to CRLF on checkout; without this the on-disk hash
+      // never matches the LF-based targetHash we wrote, and every mirror
+      // reports as a local edit.
+      out[rel] = hashContent(buf);
     }
   }
   return out;
@@ -1098,6 +1163,8 @@ module.exports = {
   targetPathFor,
   deriveDescription,
   sha256,
+  normalizeEol,
+  hashContent,
   normalizeModel,
   normalizeCategory,
   gitIgnoresPath,
