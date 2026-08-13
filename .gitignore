@@ -1,0 +1,37 @@
+# Root .gitignore for kanbantic-claude-plugin (KBT-B605).
+#
+# Until this file existed, the only .gitignore in the repo lived in plugin/ and
+# covered plugin/ alone. `git add -A` at the root therefore picked up whatever
+# agents had left lying around — including their git worktrees, which git
+# silently records as embedded repositories. A clone of the outer repo then
+# contains neither the content nor any way to fetch it. Git does warn, but the
+# warning scrolls past in the output of an otherwise successful commit and
+# blocks nothing.
+#
+# Observed at KBT-T4030 (PR #70), where two foreign worktrees made it into a
+# commit and were only caught by a manual pre-push read-through.
+
+# --- Agent worktrees -------------------------------------------------------
+# Parallel agents create these; they are private to one agent and must never be
+# committed. Three conventions are in use across the tooling.
+#
+# Deliberately NOT a blanket `.claude/`: shared .claude/ content stays trackable,
+# and a blanket rule would also change what the sync script sees when it checks
+# gitignore coverage (KBT-B540). Only the worktree subdirectory is excluded.
+.claude/worktrees/
+.worktrees/
+.wt-*/
+
+# --- Dependencies ----------------------------------------------------------
+# package.json at the root drives the test harness, so node_modules/ can appear
+# here as well as under plugin/.
+node_modules/
+
+# --- OS and editor cruft ---------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
