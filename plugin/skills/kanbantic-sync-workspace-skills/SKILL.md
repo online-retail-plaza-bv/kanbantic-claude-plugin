@@ -184,8 +184,12 @@ Relay the script's summary line to the user. If `warnings > 0`, list the affecte
 
 For each active toolkit item the script computes:
 
-- `sourceHash` — SHA-256 over the toolkit item's `content` field.
+- `sourceHash` — SHA-256 over the toolkit item's `content` field **and its `model`** (**KBT-B556**). `model` is folded in because it is rendered into the frontmatter: changing a subagent from Sonnet to Opus leaves `content` untouched but must still re-render the mirror, so a hash over `content` alone would report UNCHANGED and leave the wrong `model:` line on disk (**KBT-F437**).
 - `targetHash` — SHA-256 over the full rendered file (frontmatter + body).
+
+Both hashes normalise line endings to LF before hashing, and so does the on-disk read they are compared against (**KBT-B543**). Without that, git's `core.autocrlf` rewrite on checkout made every mirror look locally edited on Windows. The normalisation touches line terminators only — indentation, trailing spaces and blank lines still count as content, so a genuine local edit is still detected.
+
+The other two frontmatter fields need no separate entry: `description` is derived from `content` and `name` from the slug, so both are already covered — `description` by `sourceHash`, and `name` by the title-to-slug mapping that decides the target path. A title change therefore moves the file rather than re-rendering it in place, which the delete/create rules below handle.
 
 Then per slug:
 
