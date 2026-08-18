@@ -1,0 +1,70 @@
+{
+  "_comment": "SOURCE OF TRUTH — spiegelt de LIVE ruleset (id 18930043, naam \"Protect Branch\") van Online-Retail-Plaza-BV/kanbantic-claude-plugin. Verifieer met de ruleset-drift-check (.github/workflows/ruleset-drift.yml); pas toe met deploy/github/scripts/apply-ruleset.ps1. NIET met de hand bijwerken om een GEWENSTE toestand te beschrijven: dit bestand wordt LETTERLIJK toegepast, dus alles wat hier staat wordt afgedwongen. Zie deploy/github/rulesets/README.md.",
+  "name": "Protect Branch",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/main"
+      ]
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": 231461909,
+      "actor_type": "User",
+      "bypass_mode": "pull_request"
+    }
+  ],
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "dismissal_restriction": {
+          "enabled": false,
+          "allowed_actors": []
+        },
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false,
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "test",
+            "integration_id": 15368
+          },
+          {
+            "context": "Analyze (actions)",
+            "integration_id": 15368
+          },
+          {
+            "context": "Analyze (javascript-typescript)",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ]
+}
