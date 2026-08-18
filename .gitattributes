@@ -1,2 +1,7 @@
 # Force LF line endings for shell scripts (required for bash on all platforms)
 *.sh text eol=lf
+
+# Workflows en Node-scripts draaien op linux runners; een CR breekt bash-blokken
+# in `run: |` (set -euo pipefail leest dan "pipefail").
+*.yml text eol=lf
+*.mjs text eol=lf
