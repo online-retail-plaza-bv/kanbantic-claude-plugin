@@ -10,6 +10,17 @@ on:
     branches: ["**"]
   pull_request:
 
+# Zonder dit blok krijgt GITHUB_TOKEN de repo-default. Die staat vandaag op
+# 'read', dus de blootstelling is nu klein — maar dat is een instelling elders
+# (Settings -> Actions -> Workflow permissions, of een org-default), niet iets
+# wat deze workflow zelf vastlegt. Zet iemand die om naar read/write, dan krijgt
+# dit script-uitvoerende job stilzwijgend schrijfrechten op de hele repo.
+# Expliciet dichtzetten op het minimum: checkout heeft contents:read nodig, en
+# check-version-sync.js en check-release-notes.js raken de GitHub-API niet.
+# CodeQL actions/missing-workflow-permissions.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: [self-hosted, linux, x64, baremetal]
