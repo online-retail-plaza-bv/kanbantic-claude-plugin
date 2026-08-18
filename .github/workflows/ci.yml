@@ -14,8 +14,8 @@ jobs:
   test:
     runs-on: [self-hosted, linux, x64, baremetal]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           # Node 22+ — `node --test` expands glob patterns natively (Node 20 does not,
           # which made `npm test`'s "plugin/tests/*.test.js" glob fail to match).
