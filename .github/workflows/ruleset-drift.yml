@@ -42,11 +42,11 @@ jobs:
     runs-on: [self-hosted, linux, x64, baremetal]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -117,7 +117,7 @@ jobs:
 
       - name: Upload both rulesets
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ruleset-drift
           path: |
