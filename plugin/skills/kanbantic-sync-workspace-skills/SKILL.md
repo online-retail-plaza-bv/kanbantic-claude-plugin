@@ -149,7 +149,8 @@ sync-workspace-skills: created=2 updated=1 unchanged=6 deleted=0 warnings=0 forc
 | `--input <path>` | Read items from a file instead of stdin (handy for debugging). |
 | `--root <path>`  | Run against an alternative repo root (defaults to cwd). |
 | `--workspace <slug>` | Workspace slug to record in the manifest. |
-| `--force`        | Overwrite locally-edited files (warning still reported). Also waives the completeness guard — see below. |
+| `--force`        | Overwrite locally-edited files (warning still reported). Nothing else — see below. |
+| `--prune`        | Waive the completeness guard, for items hard-deleted from the Toolkit — see below. |
 
 ### Exit codes
 
@@ -170,7 +171,11 @@ Both rejections happen in the planning phase, so **nothing is written** — no f
 
 A renamed toolkit item does **not** trip the completeness guard: its `id` and `code` are unchanged, so the script recognises it, retires the old slug and materializes the new one in the same run.
 
-`--force` waives the completeness guard, for the one legitimate case it cannot otherwise express: an item **hard-deleted** from the Toolkit is absent from every future list, so its mirror could never be cleaned up. Review the reported slugs before reaching for it — `--force` also overwrites local edits.
+`--prune` waives the completeness guard, for the one legitimate case it cannot otherwise express: an item **hard-deleted** from the Toolkit is absent from every future list, so its mirror could never be cleaned up. Review the reported slugs before reaching for it.
+
+**`--force` does not waive the guard, and must not.** The two are separate flags since **KBT-B654**. They used to be one, and the SessionStart hook passes `--force` unattended on every run to overwrite local edits — so a single fetch that returned 17 Skills and 0 Subagents without erroring deleted all nine Subagent mirrors and stripped them from the manifest, silently. Overwriting a local edit and accepting an incomplete input are different authorities; only the first belongs to something that runs unattended.
+
+If you reach for `--force` and get `INCOMPLETE_INPUT`, that is the guard working. Re-fetch before you reach for `--prune`: an incomplete list is far more often a truncated fetch than a real deletion.
 
 ## Step 4: Report summary
 
