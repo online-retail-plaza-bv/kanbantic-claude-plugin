@@ -1,0 +1,126 @@
+name: ruleset-drift
+
+# Does the committed ruleset still describe reality?
+#
+# The rules protecting `main` live in GitHub's database, not in this repo.
+# GitHub never reads a ruleset from a file — so deploy/github/rulesets/
+# main-protection.json is by definition a COPY, and a copy that nothing checks
+# drifts. This job is the thing that checks it.
+#
+# The pattern is ported from the monorepo (Online-Retail-Plaza-BV/kanbantic,
+# KBT-B533 / KBT-F620), where exactly that went wrong: the committed file had
+# drifted from the live ruleset on EVERY setting, with zero overlap in required
+# status checks, and went unnoticed for months. It was not cosmetic — during
+# KBT-B512 someone read that file and concluded a red `security / all-checks`
+# blocked all PRs. It did not; that context was not live-required at all.
+#
+# DELIBERATELY NOT A REQUIRED STATUS CHECK. It is path-filtered, so on most PRs
+# it never runs and therefore never reports — exactly the condition that makes a
+# required check block forever (KBT-SR590 / KBT-RL194). Requiring it would
+# reproduce the trap this check exists to prevent. Red here blocks no merge; it
+# is a signal to a human, not a gate.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/github/rulesets/**'
+      - '.github/scripts/ruleset-drift.mjs'
+      - '.github/workflows/ruleset-drift.yml'
+  schedule:
+    # 05:00 UTC on Mondays. A ruleset changed through the GitHub UI produces no
+    # commit and therefore no PR-triggered run — without this cron, UI drift is
+    # invisible until someone happens to touch the files above.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: ruleset-drift (live vs committed)
+    runs-on: [self-hosted, linux, x64, baremetal]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # Reading rulesets needs a token with Administration:Read. The default
+      # GITHUB_TOKEN cannot have it — `permissions:` has no `administration`
+      # scope to grant, so there is no way to ask for it here.
+      #
+      # This repo has no secrets yet (unlike the monorepo, which carries
+      # KANBANTIC_BOT_GITHUB_TOKEN). Until one is added the job fails on the
+      # step below with the instructions in MISSING_TOKEN_HELP. That is the
+      # intended behaviour: a check that cannot read its subject must say so
+      # loudly and never report "no drift" — silent green is exactly how the
+      # monorepo's drift went unnoticed for months.
+      #
+      # RULESET_READ_TOKEN is tried first so this repo can carry its own
+      # narrowly-scoped token; KANBANTIC_BOT_GITHUB_TOKEN is the fallback for
+      # when the org-wide bot token is made available here.
+      - name: Fetch live ruleset
+        env:
+          GH_TOKEN: ${{ secrets.RULESET_READ_TOKEN || secrets.KANBANTIC_BOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          MISSING_TOKEN_HELP="Create a repo secret RULESET_READ_TOKEN: a fine-grained PAT on this repo with Repository permissions -> Administration: Read (a classic PAT with 'repo' also works). Nothing was compared."
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::No token available for reading rulesets. $MISSING_TOKEN_HELP"
+            exit 1
+          fi
+
+          # Look the ruleset up by the NAME the committed file claims, rather
+          # than by a hardcoded id. That makes this check catch a second, subtler
+          # failure: apply-ruleset.ps1 also matches by name, so a name mismatch
+          # would make it CREATE a second ruleset instead of updating the first —
+          # and GitHub enforces the UNION of all matching rulesets.
+          NAME=$(node -p "require('./deploy/github/rulesets/main-protection.json').name")
+          echo "Committed ruleset name: $NAME"
+
+          if ! gh api "repos/${{ github.repository }}/rulesets" > all-rulesets.json 2>rulesets.err; then
+            if grep -q "Bad credentials\|HTTP 401" rulesets.err; then
+              echo "::error::The token was rejected (401 Bad credentials) — it is not a valid GitHub token. $MISSING_TOKEN_HELP"
+            elif grep -q "HTTP 403\|Resource not accessible" rulesets.err; then
+              echo "::error::The token is valid but not allowed to read rulesets (403). $MISSING_TOKEN_HELP"
+            else
+              echo "::error::Could not list rulesets. $MISSING_TOKEN_HELP"
+            fi
+            sed 's/^/  /' rulesets.err
+            exit 1
+          fi
+
+          ID=$(node -e "
+            const all = require('./all-rulesets.json');
+            const hit = all.find(r => r.name === process.argv[1]);
+            process.stdout.write(hit ? String(hit.id) : '');
+          " "$NAME")
+
+          if [[ -z "$ID" ]]; then
+            echo "::error::No live ruleset named \"$NAME\". apply-ruleset.ps1 matches by name and would CREATE a duplicate ruleset rather than update the existing one — GitHub then enforces the union of both. Live rulesets:"
+            node -e "require('./all-rulesets.json').forEach(r => console.log('    id=' + r.id + '  ' + r.enforcement + '  ' + r.name))"
+            exit 1
+          fi
+
+          echo "Live ruleset id: $ID"
+          gh api "repos/${{ github.repository }}/rulesets/$ID" > live-ruleset.json
+
+      - name: Compare live ruleset against the committed file
+        run: node .github/scripts/ruleset-drift.mjs live-ruleset.json deploy/github/rulesets/main-protection.json
+
+      - name: Upload both rulesets
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ruleset-drift
+          path: |
+            live-ruleset.json
+            deploy/github/rulesets/main-protection.json
+          if-no-files-found: warn
