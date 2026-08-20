@@ -1305,13 +1305,23 @@ test('KBT-TC3304: a genuine deactivation still deletes — the guard blocks omis
   }
 });
 
-test('KBT-TC3304: --force waives the guard, for items hard-deleted from the Toolkit', () => {
+test('KBT-TC3304: --prune waives the guard, for items hard-deleted from the Toolkit', () => {
   const root = mkTmpRoot();
   try {
     const items = trio();
     sync.runSync({ rootDir: root, items, workspace: 'kanbantic', now: FIXED_NOW });
 
-    const s = sync.runSync({ rootDir: root, items: [items[0]], workspace: 'kanbantic', now: FIXED_NOW, force: true });
+    // KBT-B654 — this waiver used to hang off `--force`, which the SessionStart
+    // hook passes unattended on every run. One partial fetch was then enough to
+    // delete every Subagent mirror. `--force` still only overwrites local edits.
+    assert.throws(
+      () => sync.runSync({ rootDir: root, items: [items[0]], workspace: 'kanbantic', now: FIXED_NOW, force: true }),
+      (e) => e.kind === 'INCOMPLETE_INPUT',
+      '--force alone must no longer waive the completeness guard'
+    );
+    assert.ok(readFileOrNull(path.join(root, '.claude/agents/beta-specialist.md')), 'nothing may be deleted yet');
+
+    const s = sync.runSync({ rootDir: root, items: [items[0]], workspace: 'kanbantic', now: FIXED_NOW, prune: true });
     assert.equal(s.deleted, 2);
     assert.equal(readFileOrNull(path.join(root, '.claude/agents/beta-specialist.md')), null);
     assert.ok(readFileOrNull(path.join(root, '.claude/commands/alpha.md')));

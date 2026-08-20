@@ -22,10 +22,18 @@
 // than mirrors that are one session out of date. Blocking a session start is
 // the more expensive mistake.
 //
-// ── Why --force ────────────────────────────────────────────────────────────
+// ── Why --force, and why never --prune ─────────────────────────────────────
 // The mirrors are generated artefacts; local-is-disposable is the correct
 // assumption now. Without --force every session would re-print the same
 // warnings about files nobody edits by hand.
+//
+// --prune is a different authority and this hook must never pass it. It waives
+// the completeness guard (KBT-B489), which is the only thing standing between a
+// partial fetch and a mass deletion. Until KBT-B654 the two lived on one flag:
+// a fetch that returned 17 Skills and 0 Subagents without erroring deleted all
+// nine Subagent mirrors, silently, because this hook skips quietly by design.
+// Deleting a mirror whose source is gone from the Toolkit is a deliberate act;
+// it does not belong to an unattended session-start hook.
 //
 
 const fs = require('node:fs');

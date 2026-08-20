@@ -230,7 +230,32 @@ async function fetchToolkitItems({
       category,
       maxResults: 200,
     });
-    for (const item of payload.items || []) items.push(item);
+
+    // KBT-B654 — `payload.items || []` used to stand here, which made "the call
+    // came back without an items key" indistinguishable from "there are zero
+    // items of this category". The caller then handed a half-empty list to a
+    // sync running with --force, and nine Subagent mirrors were deleted. A
+    // malformed or truncated answer is an error, not an empty result: throwing
+    // here reaches the hook, which skips the sync entirely (KBT-BD206).
+    if (!payload || !Array.isArray(payload.items)) {
+      throw new Error(
+        `list_toolkit_items(${category}) returned no items array — ` +
+        `refusing to treat a malformed answer as an empty category`
+      );
+    }
+    if (payload.truncated === true) {
+      throw new Error(
+        `list_toolkit_items(${category}) reported truncated:true — the list is incomplete`
+      );
+    }
+    if (typeof payload.totalCount === 'number' && payload.totalCount !== payload.items.length) {
+      throw new Error(
+        `list_toolkit_items(${category}) returned ${payload.items.length} items ` +
+        `but reported totalCount ${payload.totalCount}`
+      );
+    }
+
+    for (const item of payload.items) items.push(item);
   }
   return items;
 }

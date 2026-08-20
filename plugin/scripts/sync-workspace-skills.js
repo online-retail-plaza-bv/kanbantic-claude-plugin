@@ -393,6 +393,7 @@ function renderFile(item) {
  */
 function buildPlan({ items, prevManifest, diskHashes, options }) {
   const force = !!(options && options.force);
+  const prune = !!(options && options.prune);
   const prevEntries = prevManifest && Array.isArray(prevManifest.items) ? prevManifest.items : [];
 
   // -------- 0. Category validation on ACTIVE items (KBT-B491) --------------
@@ -502,11 +503,18 @@ function buildPlan({ items, prevManifest, diskHashes, options }) {
   // not. Matching on id/code as well as slug keeps a renamed toolkit item (new
   // title ⇒ new slug) from reading as a disappearance.
   //
-  // `--force` bypasses this, because an item HARD-deleted from the Toolkit is
+  // `--prune` bypasses this, because an item HARD-deleted from the Toolkit is
   // genuinely absent from every future input and its mirror must still be able
   // to go away.
+  //
+  // KBT-B654 — this used to hang off `--force`, which the SessionStart hook
+  // passes on every run to overwrite local edits. One partial fetch (17 Skills,
+  // 0 Subagents, no error) was then enough to delete all nine Subagent mirrors
+  // and strip them from the manifest. Overwriting a local edit and accepting an
+  // incomplete input are different authorities; only the first belongs to a
+  // hook that runs unattended.
   const missingFromInput = [];
-  if (!force && prevEntries.length > 0) {
+  if (!prune && prevEntries.length > 0) {
     const inputSlugs = new Set();
     const inputIds = new Set();
     const inputCodes = new Set();
@@ -944,10 +952,14 @@ function ensureGitignore(rootDir) {
  *                              `list_toolkit_items` (Skill + Command + Subagent)
  *   - workspace     (optional) workspace slug to record in the manifest
  *   - force         (optional, default false) overwrite local edits
+ *   - prune         (optional, default false) accept an input that does not
+ *                              account for every manifest entry, and delete the
+ *                              unaccounted-for mirrors (KBT-B654 keeps this
+ *                              separate from `force` on purpose)
  *   - now           (optional) ISO timestamp to record as `lastSyncedAt`
  *   - skipGitignore (optional, default false) don't touch .gitignore
  */
-function runSync({ rootDir, items, workspace, force, now, skipGitignore }) {
+function runSync({ rootDir, items, workspace, force, prune, now, skipGitignore }) {
   if (!rootDir || typeof rootDir !== 'string') {
     throw new SyncError('BAD_ARG', 'runSync requires rootDir (absolute path).');
   }
@@ -961,7 +973,7 @@ function runSync({ rootDir, items, workspace, force, now, skipGitignore }) {
   const prevManifest = readManifest(rootDir);
   const diskHashes = hashDisk(rootDir);
   const { plan, collisions, localEdits, unknownCategories, missingFromInput } = buildPlan({
-    items, prevManifest, diskHashes, options: { force: !!force },
+    items, prevManifest, diskHashes, options: { force: !!force, prune: !!prune },
   });
 
   // KBT-B491 — unrecognised category on an active item. Checked first: it is the
@@ -995,8 +1007,8 @@ function runSync({ rootDir, items, workspace, force, now, skipGitignore }) {
       `not mentioned anywhere in the supplied item list. Nothing was written. This usually means the list is ` +
       `truncated — check that every list_toolkit_items call returned all of totalCount, and that the Skill and ` +
       `Subagent categories were both fetched. A deactivated item must still be PRESENT in the list (with ` +
-      `isActive: false) to be removed. Re-run with --force if these items were genuinely deleted from the ` +
-      `Toolkit.\n${detail}${more}`,
+      `isActive: false) to be removed. Re-run with --prune if these items were genuinely deleted from the ` +
+      `Toolkit — deliberately, and not from an unattended hook.\n${detail}${more}`,
       { missingFromInput }
     );
   }
@@ -1038,12 +1050,14 @@ function cliMain(argv) {
   // support reading from a file via --input <path>.
   const args = argv.slice(2);
   let force = false;
+  let prune = false;
   let inputPath = null;
   let workspace = '';
   let rootDir = process.cwd();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--force') { force = true; continue; }
+    if (a === '--prune') { prune = true; continue; }
     if (a === '--input' && i + 1 < args.length) { inputPath = args[++i]; continue; }
     if (a === '--workspace' && i + 1 < args.length) { workspace = args[++i]; continue; }
     if (a === '--root' && i + 1 < args.length) { rootDir = args[++i]; continue; }
@@ -1089,7 +1103,7 @@ function cliMain(argv) {
 
   let summary;
   try {
-    summary = runSync({ rootDir, items, workspace, force });
+    summary = runSync({ rootDir, items, workspace, force, prune });
   } catch (e) {
     if (e instanceof SyncError) {
       process.stderr.write(`sync-workspace-skills: ${e.kind}: ${e.message}\n`);
@@ -1129,7 +1143,7 @@ function formatSummary(s) {
 }
 
 const USAGE = [
-  'sync-workspace-skills [--input <path>] [--root <path>] [--workspace <slug>] [--force]',
+  'sync-workspace-skills [--input <path>] [--root <path>] [--workspace <slug>] [--force] [--prune]',
   '',
   'Reads a JSON array of toolkit items from stdin (or --input <path>) and',
   'materializes them under .claude/commands/ and .claude/agents/ at the repo',
@@ -1143,8 +1157,12 @@ const USAGE = [
   '`category` is accepted as the enum name ("Skill", "Subagent") or as the enum',
   'integer (1 = Skill, 6 = Subagent); an unrecognised value aborts (KBT-B491).',
   '',
-  'Pass --force to overwrite local edits (warning preserved in summary). --force',
-  'also waives the completeness guard, for items hard-deleted from the Toolkit.',
+  'Pass --force to overwrite local edits (warning preserved in summary).',
+  '',
+  'Pass --prune to waive the completeness guard, for items hard-deleted from the',
+  'Toolkit. This is a separate flag from --force on purpose (KBT-B654): the',
+  'SessionStart hook passes --force unattended on every run, and one partial',
+  'fetch was enough to delete every Subagent mirror while it did.',
   '',
   'Exit codes:',
   '  0 — sync completed without warnings.',
