@@ -33,7 +33,7 @@ Complete the Review → InDeployment lane transition (per KBT-RL053; backend aut
 4. **Record feedback** — discussion entry with categorized issues
 5. **Decide** — approve or reject phase
 6. **Verify final-approve gate** — merge only after last phase (Epic) or first approve (Feature/Bug)
-7. **Merge** — `git merge --no-ff` to main, push, clean up feature branch
+7. **Land on main** — unprotected `main`: `git merge --no-ff` + push. Protected `main`: open a PR and let it land per the repo's merge policy in the Toolkit (see Step 7). Then clean up the feature branch
 8. **Close issue** — transition to Done
 9. **Knowledge-extractie (optional)** — toolkit items + document impacts + `KnowledgeExtraction` entry
 
@@ -512,7 +512,17 @@ git merge --no-ff <epic-integration-branch> -m "Merge <ISSUE-CODE> (<versionCont
 git push origin main
 ```
 
-**Where `main` is protected** (push-to-main blocked — check the repository's own branch-protection settings): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with title and body stamped with the creating agent's identity (see below), let CI (T3) run, and merge the PR. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR merges.
+**Where `main` is protected** (push-to-main blocked — check the repository's own branch-protection settings): do **not** push to `main` directly. Open a PR `<epic-integration-branch> → main` with title and body stamped with the creating agent's identity (see below) and let CI (T3) run. (For a standalone Feature/Bug the source is simply its own branch, not an epic-integration branch.) The rest of this step (cleanup, Step 7.5, Step 8) proceeds after the PR lands on `main`.
+
+**How the PR then lands is NOT decided here.** Merge policy is per-workspace and per-repository: one repo may use a merge queue, another may require a human to press merge, a third may want the agent to merge it itself. This skill ships to every workspace, so it states the mechanism (open a PR, get it green) and leaves the policy to the workspace that owns the repo.
+
+Read the policy from the **AI Toolkit of the workspace the issue belongs to**, scoped to the repository you are working in (`list_repositories` gives the repo code, e.g. `KBT-REPO001`). Toolkit items in the `Rule` / `Gotcha` / `Pattern` categories are loaded at session start, so the policy is normally already in your context — look for a merge-policy Rule naming your repo before you act.
+
+Three things follow from that:
+
+- **Do not hard-code a merge command in this skill or in a subagent briefing.** If you find yourself typing `gh pr merge` from memory, you are guessing at policy.
+- **Match the repo, not the workspace.** A workspace can own several repositories with different policies. A Rule that names `KBT-REPO001` says nothing about `KBT-REPO002`.
+- **If no policy is recorded for this repo, stop and ask.** Open the PR, report that it is green and awaiting a merge decision, and leave the issue on `Review`. Do not merge on a guess — an unattended merge into a repo that expects a deliberate one is not recoverable by re-running this skill.
 
 **PR-identity stamp (KBT-B538).** GitHub attributes PR authorship to whichever shared, per-repository PAT authenticated the `gh pr create` call (KBT-GTCH086) — it cannot be overridden per-call, and per-agent GitHub accounts don't scale as the agent fleet grows. To make the creating agent visible on GitHub's own PR list anyway, stamp the title and body via `kanbantic-pr-identity-stamp.js` before calling `gh pr create` — do **not** hand-format the `[AgentName]` prefix / `Created by:` footer yourself, the script is the single source of truth for the exact format (and safely no-ops, passing text through unstamped, if identity resolution fails):
 
@@ -541,7 +551,9 @@ git push origin --delete <feature-branch> # remote delete (warning on failure, n
 - **Local branch delete failure** → blocker; investigate (usually uncommitted changes). Do not proceed.
 - **Remote branch delete failure** → warning only (someone else may have deleted it, or branch protection prevents it). Log the warning in the issue and proceed to Step 8.
 
-Use `--no-ff` as the default merge strategy. Do NOT use `--squash` or `--rebase` unless the workspace explicitly opts in via a Toolkit rule (auto-merge-beleid valt onder Execution Hardening, v0.6.0).
+Use `--no-ff` as the default merge strategy on the direct-push path. Do NOT use `--squash` or `--rebase` unless the workspace explicitly opts in via a Toolkit rule.
+
+On the PR path the merge method is not yours to pick either: a merge queue imposes its own (`merge_method` on the ruleset), and a repo without one follows whatever its Toolkit merge-policy Rule says. Same principle as above — this skill supplies the mechanism, the workspace supplies the policy.
 
 ## Step 7.5: Record Review Approval
 
