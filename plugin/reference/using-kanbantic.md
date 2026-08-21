@@ -36,7 +36,7 @@ lopen gegarandeerd uit elkaar; dat is precies de drift die KBT-F623 opruimde.
 | **execute** | [isReadyToClaim is afgeleid](#isreadytoclaim-is-afgeleid-nooit-zelf-zetten) · [Claim gaat via Ready](#claimen-kan-alleen-vanuit-ready-niet-vanuit-triaged) · [Worktree in een subagent](#enterworktree-werkt-niet-in-een-subagent) |
 | **review** | [Gate-overzicht](#welke-gate-blokkeert-wat) · [InDeployment ≠ Done](#indeployment-is-niet-done) · [Self-approve werkt](#approve_review-checkt-alleen-dat-er-een-rij-bestaat) · [Merge-step worktree](#de-merge-step-heeft-een-eigen-worktree-nodig) |
 | **specialists** | [De agent is de executor](#bij-een-specialist-run-ben-jij-de-executor) |
-| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Partial update wist velden](#een-partial-update-kan-velden-wissen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) |
+| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Weglaten is veilig](#weglaten-is-veilig--stuur-niet-meer-terug-dan-je-wilt-wijzigen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) |
 
 ---
 
@@ -393,32 +393,54 @@ Bij gelijktijdigheid antwoordt de deployer met HTTP 503 en `Retry-After: 60`.
 Dat is geen storing maar een wachtrij van één. `gh run rerun <id> --failed` lost
 het op, soms na één of twee pogingen.
 
-### Een partial update kan velden wissen
+### Weglaten is veilig — stuur niet meer terug dan je wilt wijzigen
 
-Een MCP-tool of API-endpoint die maar een **deel** van een update-DTO doorstuurt,
-wist stilzwijgend de velden die het niet meestuurt. Wie "even de titel bijwerkt"
-verliest ongemerkt andere velden.
+**Doen:** stuur alleen de velden die je wilt wijzigen. Een veld dat je weglaat
+blijft staan. Een veld dat je expliciet meestuurt als `null` — of als lege string,
+waar de parameter een string is — wis je bewust.
 
-**Doen:** fetch-merge-write. Haal het huidige item op, pas aan wat je wilt
-wijzigen, en stuur het geheel terug. Ga er niet vanuit dat weglaten "ongewijzigd
-laten" betekent — tenzij het tool expliciet patch-semantiek documenteert.
+**Niet doen:** fetch-merge-write. Het huidige item ophalen en integraal
+terugsturen is sinds KBT-F626 niet alleen overbodig maar schadelijk: je
+overschrijft er een gelijktijdige wijziging van iemand anders mee met de waarde
+uit jouw eigen lees-actie. Dat is een lost update, en hij verloopt stil — er komt
+geen conflict.
 
-De oorzaak is een AppService die onvoorwaardelijk `item.SetX(input.X)` doet:
-PUT-semantiek. Een surface die `X` niet meestuurt levert `null` aan, en dat wist.
-De Angular-UI heeft er geen last van omdat die de volledige DTO stuurt; alleen het
-MCP- en partial-pad verliest data.
+#### Waarom hier eerst het omgekeerde stond
 
-> **Nuance sinds 2026-08.** Kanbantic kent inmiddels echte patch-semantiek
-> (`Patch<T>`) die "niet meegestuurd" van "expliciet leegmaken" onderscheidt, óók
-> over de HTTP-grens. Een tijd lang was dat kapot: een weggelaten veld stak de
-> grens als `null` over en werd aan de ontvangkant als *wissen* gelezen. Dat is
-> gefixt en uitgerold. Waar een DTO `Patch<T>` gebruikt is weglaten dus veilig.
->
-> Het advies hierboven blijft staan voor alles wat dat **niet** doet — tools die
-> maar een deel van de DTO doorsturen zijn er nog steeds. En één les blijft in elk
-> geval geldig: **werk nooit om een foutmelding heen door er extra velden bij te
-> gooien tot de call slaagt.** Precies die reflex ontkoppelde vijf testcases van
-> hun issue; de fout was echt, alleen de oorzaak lag ergens anders.
+Tot 2026-08 was `Update*Input` vol-vervangend: de AppService deed
+onvoorwaardelijk `item.SetX(input.X)`, dus een surface die `X` niet meestuurde
+leverde `null` aan en wiste het veld. De MCP-tools vingen dat op door alles wat je
+niet noemde in te lezen en terug te echoën. Fetch-merge-write was toen het juiste
+advies, en dit document gaf het.
+
+KBT-F626 heeft de oorzaak weggenomen in plaats van het symptoom:
+
+- Elke `Update*Input` draagt nu `Patch<T>`, dat "niet meegestuurd" van "expliciet
+  leegmaken" onderscheidt — óók over de HTTP-grens, want daar zit het verschil.
+- De read-then-merge in de MCP-tools is weg. Ze sturen door wat jij opgaf, niets
+  meer.
+- Een architectuurtest bewaakt het: een nieuw veld dat de twee niet kan
+  onderscheiden laat de build vallen, met de naam van het type, het veld en de te
+  nemen actie erbij.
+
+#### Wat wél blijft gelden
+
+**Collecties zijn vervangend, niet samenvoegend.** Stuur je `tagIds`,
+`permissions` of een scorelijst mee, dan vervangt die de volledige set — een lege
+lijst wist hem dus. Weglaten laat hem met rust. Dat is bedoeld gedrag, geen
+uitzondering op het bovenstaande: je stuurt het veld immers mee.
+
+**Wissen vraagt om een expliciet signaal.** Waar een MCP-parameter een string is,
+kan een echte JSON-`null` niet worden onderscheiden van een weggelaten argument —
+beide komen als `null` binnen. Daar geldt de lege string als wis-signaal. Zo haalt
+`update_issue(VersionId: "")` een issue uit zijn Version; het weglaten van
+`VersionId` laat hem staan. De tool-beschrijving zegt per parameter wat weglaten
+en wat meesturen doet; lees die in plaats van te gokken.
+
+**En de les die los staat van dit alles:** werk nooit om een foutmelding heen door
+er extra velden bij te gooien tot de call slaagt. Precies die reflex ontkoppelde
+vijf testcases van hun issue; de fout was echt, alleen de oorzaak lag ergens
+anders.
 
 ### Een lege registry-sweep bewijst niets
 
