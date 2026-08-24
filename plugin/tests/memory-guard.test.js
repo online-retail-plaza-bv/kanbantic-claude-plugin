@@ -88,6 +88,10 @@ function ruleItem(overrides) {
       category: 'Rule',
       title: 'NOOIT lokale memory — kennis hoort in de AI Toolkit',
       content: RULE_BODY,
+      // KBT-B678: de tag is sinds de tagselectie het enige dat telt. De body
+      // hierboven blijft staan omdat de melding hem citeert, niet omdat de
+      // selector hem leest.
+      tags: ['memory-guard'],
       isActive: true,
     },
     overrides
@@ -287,14 +291,17 @@ test('KBT-TC3583 #4: Toolkit hangs ⇒ times out and allows, without wedging the
 });
 
 test('KBT-TC3583 #5: workspace declares no local-memory rule ⇒ allow silently', async () => {
-  // A Rule list that is non-empty but says nothing about memory. The plugin has
+  // A Rule list that is non-empty but carries no tagged rule. The plugin has
   // no standing to impose one workspace's convention on another (KBT-TRUL028).
+  // `tags: []` is explicit: ruleItem() defaults to the guard tag, and inheriting
+  // it here would silently invert what this test asserts.
   const stub = await startStub({
     items: [
       ruleItem({
         code: 'KBT-TRUL099',
         title: 'Commit message convention',
         content: 'Use conventional commits: feat, fix, refactor.\n',
+        tags: [],
       }),
     ],
   });
@@ -370,6 +377,98 @@ test('KBT-TC3583: garbage stdin ⇒ allow silently', async () => {
     assert.equal(r.status, 0);
     assert.equal(r.stdout, '');
   } finally {
+    cleanup(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// KBT-B678 — selection moved from content to tag (KBT-TC3603)
+// ---------------------------------------------------------------------------
+
+test('KBT-TC3603: an untagged rule that names MEMORY.md no longer triggers anything', async () => {
+  // The integration counterpart of the unit-level absence assertion. Before
+  // KBT-B678 this exact item WAS the match; it must now be silent, or text
+  // matching was supplemented instead of replaced.
+  const stub = await startStub({
+    items: [
+      ruleItem({
+        code: 'KBT-TRUL021',
+        content: 'Schrijf niets in ~/.claude/projects/x/memory/ of MEMORY.md.\n',
+        tags: [],
+      }),
+    ],
+  });
+  const dir = tmpDir();
+  try {
+    const r = await runHook(dir, MEMORY_PATH, {
+      KANBANTIC_API_KEY: 'test-key',
+      KANBANTIC_WORKSPACE_ID: 'kanbantic',
+      KANBANTIC_MCP_URL: stub.url,
+    });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, '', 'text resemblance alone must no longer produce a decision');
+    assert.ok(
+      stub.calls.some((c) => c.name === 'list_toolkit_items'),
+      'the lookup did happen — the silence is a decision, not a skipped step'
+    );
+  } finally {
+    stub.server.close();
+    cleanup(dir);
+  }
+});
+
+test('KBT-TC3603: two tagged rules — first wins, and nothing is said without debug', async () => {
+  const stub = await startStub({
+    items: [
+      ruleItem({ code: 'KBT-TRUL021', title: 'Eerste regel' }),
+      ruleItem({ code: 'KBT-TRUL077', title: 'Tweede regel' }),
+    ],
+  });
+  const dir = tmpDir();
+  try {
+    const r = await runHook(dir, MEMORY_PATH, {
+      KANBANTIC_API_KEY: 'test-key',
+      KANBANTIC_WORKSPACE_ID: 'kanbantic',
+      KANBANTIC_MCP_URL: stub.url,
+    });
+    assert.equal(r.status, 0);
+    const reason = JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason;
+    assert.ok(reason.includes('KBT-TRUL021'), 'the first tagged rule is quoted');
+    assert.ok(!reason.includes('KBT-TRUL077'), 'the second is not merged into the message');
+    assert.equal(
+      r.stderr,
+      '',
+      'a configuration question must not nag an operator who did not ask'
+    );
+  } finally {
+    stub.server.close();
+    cleanup(dir);
+  }
+});
+
+test('KBT-TC3603: with debug on, both tagged codes are reported on stderr', async () => {
+  const stub = await startStub({
+    items: [
+      ruleItem({ code: 'KBT-TRUL021', title: 'Eerste regel' }),
+      ruleItem({ code: 'KBT-TRUL077', title: 'Tweede regel' }),
+    ],
+  });
+  const dir = tmpDir();
+  try {
+    const r = await runHook(dir, MEMORY_PATH, {
+      KANBANTIC_API_KEY: 'test-key',
+      KANBANTIC_WORKSPACE_ID: 'kanbantic',
+      KANBANTIC_MCP_URL: stub.url,
+      KANBANTIC_SYNC_DEBUG: '1',
+    });
+    assert.equal(r.status, 0, 'the debug flag changes visibility, never behaviour');
+    assert.ok(r.stderr.includes('KBT-TRUL021'), 'first code named');
+    assert.ok(r.stderr.includes('KBT-TRUL077'), 'second code named');
+    // The decision itself is unchanged by the flag.
+    const reason = JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason;
+    assert.ok(reason.includes('KBT-TRUL021'));
+  } finally {
+    stub.server.close();
     cleanup(dir);
   }
 });
