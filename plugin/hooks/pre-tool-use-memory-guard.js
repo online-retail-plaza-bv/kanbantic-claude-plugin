@@ -157,32 +157,59 @@ function readJsonOrNull(file) {
 }
 
 /**
- * Does this Toolkit item state the local-memory rule?
+ * The tag a workspace puts on the Rule item this hook must quote.
  *
- * Selection is by CONTENT, never by item code. A hard-coded `KBT-TRUL021`
- * would put one workspace's identifier in a plugin every workspace installs —
- * the very thing KBT-SR611 forbids — and would silently fail in AdminHub,
- * where the same rule is ADM-TRUL006.
+ * Workspace-scoped: each workspace owns its own `Tag` row with its own GUID
+ * (`Tag : IMustHaveWorkspace`), so matching happens on the NAME — which is what
+ * `list_toolkit_items` returns. Matching on id could not work across workspaces.
+ */
+const MEMORY_GUARD_TAG = 'memory-guard';
+
+/**
+ * Which Toolkit items does this workspace declare as its local-memory rule?
  *
- * A textual match is enough and stays robust against re-numbering or a
- * re-title, mirroring the reasoning behind `findLegacyHook()` in the
- * SessionStart sync. The cost of a false positive is one confirmation prompt
- * quoting a slightly-off rule; the cost of a false negative is no guard at all.
+ * Selection is by TAG, never by item code and no longer by content.
+ *
+ * A hard-coded `KBT-TRUL021` would put one workspace's identifier in a plugin
+ * every workspace installs — the very thing KBT-SR611 forbids. But the content
+ * match that replaced it was just as fragile in the other direction: it
+ * depended on which words the author of a rule happened to choose. Measured on
+ * 2026-08-19, it found the rule in exactly one of seven workspaces. `ADM-TRUL006`
+ * states the same prohibition and was missed, because it says "geheugen" and
+ * never names the path.
+ *
+ * Widening the pattern was measured and rejected: `ADM-TRUL007` contains the
+ * word "memory" in the sense of *in-memory session state on production
+ * replicas*. A broader matcher would interrupt a write with a rule about
+ * infrastructure — and a false positive costs more here than a false negative,
+ * because that is how an enforcement mechanism loses its credibility (KBT-B678).
+ *
+ * A tag turns "the hook hopefully finds it" into "the workspace declares it".
+ * No tag means no rule means silence, per KBT-BD210 — that is an answer, not a
+ * failure.
+ *
+ * Pure and exported for unit-testing.
+ */
+function taggedMemoryRules(items) {
+  if (!Array.isArray(items)) return [];
+  return items.filter(
+    (item) => item && Array.isArray(item.tags) && item.tags.includes(MEMORY_GUARD_TAG)
+  );
+}
+
+/**
+ * The single rule to quote, or null.
+ *
+ * More than one tagged item is a configuration question, not an error: the hook
+ * takes the first and reports every hit through `debug()`. Silently skipping
+ * would leave the workspace believing it has coverage while nothing happens —
+ * the exact failure mode this whole line of work exists to remove.
  *
  * Pure and exported for unit-testing.
  */
 function selectMemoryRule(items) {
-  if (!Array.isArray(items)) return null;
-  for (const item of items) {
-    if (!item) continue;
-    const haystack = `${item.title || ''}\n${item.content || ''}`;
-    // Either shape the rule is about: the per-project memory directory, or the
-    // MEMORY.md file it names explicitly.
-    if (/\.claude\/[^\s]*memory\//i.test(haystack) || /\bMEMORY\.md\b/i.test(haystack)) {
-      return item;
-    }
-  }
-  return null;
+  const matches = taggedMemoryRules(items);
+  return matches.length > 0 ? matches[0] : null;
 }
 
 /**
@@ -217,12 +244,13 @@ async function resolveWorkspace(rootDir, client) {
 }
 
 /**
- * Fetch the workspace's Rule items and pick the local-memory one.
+ * Fetch the workspace's Rule items and pick the tagged one.
  *
- * `includeContent: true` is required: the knowledge categories (Pattern,
- * Gotcha, Rule) return summaries WITHOUT a body by default, and selecting on
- * content against a body-less payload would match nothing — a silent no-op
- * indistinguishable from "this workspace has no such rule".
+ * `includeContent: true` is still required, but for a different reason than
+ * before: selection no longer reads the body, yet `buildReason` quotes it. The
+ * knowledge categories (Pattern, Gotcha, Rule) return summaries WITHOUT a body
+ * by default, so dropping the flag would produce a confirmation prompt with an
+ * empty rule — technically a hit, practically useless.
  */
 async function findMemoryRule(workspace, client) {
   const payload = await client.call('list_toolkit_items', {
@@ -231,7 +259,18 @@ async function findMemoryRule(workspace, client) {
     includeContent: true,
     maxResults: 200,
   });
-  return selectMemoryRule(payload && payload.items);
+
+  const matches = taggedMemoryRules(payload && payload.items);
+  if (matches.length > 1) {
+    // Visible only with KANBANTIC_SYNC_DEBUG. The hook keeps working; an
+    // operator who wonders which rule was quoted can find out without the
+    // guard turning into a blocker (KBT-BD210).
+    debug(
+      `workspace ${workspace} has ${matches.length} items tagged "${MEMORY_GUARD_TAG}" `
+        + `(${matches.map((m) => m.code || '?').join(', ')}) — using the first`
+    );
+  }
+  return matches.length > 0 ? matches[0] : null;
 }
 
 /** Compose the operator-facing message from the workspace's own rule. */
@@ -315,7 +354,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  MEMORY_GUARD_TAG,
   extractFilePath,
+  taggedMemoryRules,
   selectMemoryRule,
   buildReason,
   resolveWorkspace,
