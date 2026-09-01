@@ -62,10 +62,26 @@ let shuttingDown = false;
 
 // Agent Communication Hub state (set after register_agent_session succeeds).
 let agentSessionId = null;       // Kanbantic AgentSession.Id
-let agentChannelId = null;       // Kanbantic AgentChannel.Id (1:1 with session)
-let inboxCursor = null;          // ISO timestamp — only fetch messages with SentAt > this
+let agentChannelId = null;       // Home channel — the 1:1 AgentChannel of this session
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
+
+// SPIKE (multi-room) — an agent listens to N channels instead of exactly one.
+//
+// There is no Room entity on the server yet. There does not have to be one for this
+// spike: posting to a channel is gated on nothing but workspace-view (see the
+// cross-channel branch in AgentChannelAppService.ResolveAgentSessionIdAsync), so any
+// channel id that several participants agree to share already behaves as a room. The
+// only thing standing in the way was this proxy's single-channel inbox — one variable,
+// one cursor. It becomes one subscription per channel:
+//
+//   Map<channelId, { cursor: ISO string, label: string, home: boolean }>
+//
+// The cap is deliberate: this is the knob the spike exists to measure. Every subscribed
+// room pushes into the same context window, so "how many rooms before the agent loses
+// the thread" is the question, not an implementation detail to hide.
+const roomSubscriptions = new Map();
+const MAX_ROOM_SUBSCRIPTIONS = 8;
 // KBT-B470 — keep-alive heartbeat. The backend stale-sweep marks a session Stale after
 // HeartbeatTimeoutSeconds (300s) of no LastSeen refresh, archiving its channel and dropping it
 // from /agent-sessions. An idle spawned agent never calls the heartbeat tool itself, so the
@@ -125,6 +141,13 @@ function send(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
+// Test seam: the inbox-poll emits through this indirection so unit tests can capture
+// channel notifications instead of writing them to stdout. `send` is a hoisted function
+// declaration, so this module-load initialization safely captures it. Production
+// behaviour is unchanged.
+let __sendImpl = send;
+function setSendForTest(fn) { __sendImpl = fn || send; }
+
 // ---------------------------------------------------------------------------
 // dispatch: validate, forward, post-process, respond
 // ---------------------------------------------------------------------------
@@ -153,6 +176,14 @@ async function dispatch(line) {
         id: msg.id,
       });
     }
+    return;
+  }
+
+  // SPIKE (multi-room): join_room / leave_room / list_rooms are proxy-local. They must
+  // be answered here and never forwarded — the server does not know these tools.
+  const localRoom = handleLocalRoomTool(msg);
+  if (localRoom) {
+    if (msg.id != null) send(localRoom);
     return;
   }
 
@@ -216,9 +247,9 @@ function postProcess(request, response) {
     if (parsed && parsed.success && parsed.sessionId && parsed.channelId) {
       agentSessionId = parsed.sessionId;
       agentChannelId = parsed.channelId;
-      // Initialize the inbox-poll cursor at 'now' so we don't replay old history.
-      inboxCursor = new Date().toISOString();
-      startInboxPoll();
+      // SPIKE (multi-room): the session's own channel is just the first subscription —
+      // marked home so it keeps its unprefixed wire format and cannot be left.
+      subscribeRoom(agentChannelId, 'home', { home: true });
       startHeartbeat(); // KBT-B470 — keep the session alive while connected
       writeSessionFile();
       process.stderr.write(
@@ -236,12 +267,14 @@ function postProcess(request, response) {
     removeSessionFile();
     agentSessionId = null;
     agentChannelId = null;
+    roomSubscriptions.clear(); // SPIKE (multi-room)
   }
 
   // 4. KBT-F464: advertise `filePath` as an optional alternative to each tool's
   //    inline content field on every content-bearing tool in the tools/list response.
   if (request.method === 'tools/list' && response.result) {
     augmentToolsListResponse(response);
+    injectRoomToolsIntoList(response); // SPIKE (multi-room) — advertise the local tools
   }
 }
 
@@ -295,6 +328,8 @@ function __resetForTest() {
   API_KEY = process.env.KANBANTIC_API_KEY;
   stopInboxPoll();
   stopHeartbeat(); // KBT-B470
+  roomSubscriptions.clear(); // SPIKE (multi-room)
+  __sendImpl = send;
 }
 
 // KBT-B470 — test hook: set the active session id so sendHeartbeat() can be exercised in isolation.
@@ -821,13 +856,141 @@ async function sendHeartbeat() {
   }
 }
 
+// --- room subscriptions -----------------------------------------------------
+
+function subscribeRoom(channelId, label, { home = false } = {}) {
+  if (!channelId || typeof channelId !== 'string') {
+    return { ok: false, reason: 'channelId is required' };
+  }
+  const existing = roomSubscriptions.get(channelId);
+  if (existing) {
+    if (label) existing.label = label;
+    return { ok: true, alreadyJoined: true, channelId, label: existing.label };
+  }
+  if (roomSubscriptions.size >= MAX_ROOM_SUBSCRIPTIONS) {
+    return {
+      ok: false,
+      reason: `already listening to ${MAX_ROOM_SUBSCRIPTIONS} rooms (spike cap) — leave one first`,
+    };
+  }
+  roomSubscriptions.set(channelId, {
+    // Start at 'now': joining a room must never replay its backlog into context.
+    // History stays reachable on demand via get_channel_messages(before: ...).
+    cursor: new Date().toISOString(),
+    label: label || (home ? 'home' : `room-${channelId.slice(0, 8)}`),
+    home,
+  });
+  startInboxPoll();
+  return { ok: true, alreadyJoined: false, channelId, label: roomSubscriptions.get(channelId).label };
+}
+
+function unsubscribeRoom(channelId) {
+  const sub = roomSubscriptions.get(channelId);
+  if (!sub) return { ok: false, reason: 'not listening to that room' };
+  if (sub.home) {
+    return { ok: false, reason: 'the home channel of this session cannot be left' };
+  }
+  roomSubscriptions.delete(channelId);
+  return { ok: true, channelId, label: sub.label };
+}
+
+function listRooms() {
+  return [...roomSubscriptions.entries()].map(([channelId, s]) => ({
+    channelId,
+    label: s.label,
+    home: s.home,
+    cursor: s.cursor,
+  }));
+}
+
+// --- proxy-local room tools -------------------------------------------------
+//
+// join_room / leave_room / list_rooms are answered by the proxy and never forwarded:
+// the server has no Room entity, and subscribing is per-process state that no server
+// call could hold anyway. Keeping them local is also what makes this spike deployable
+// — it runs against production Kanbantic with no backend change and no migration.
+
+const LOCAL_ROOM_TOOLS = {
+  join_room: {
+    description:
+      'Start listening to another agent channel as a shared room. Messages posted there '
+      + 'arrive in your context prefixed with the room label, alongside your own channel. '
+      + 'Get channel ids from list_agents. Reply into a room with send_message(channelId).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'AgentChannel id to listen to.' },
+        label: {
+          type: 'string',
+          description: 'Short name used to tag incoming messages, e.g. "KBT-B123".',
+        },
+      },
+      required: ['channelId'],
+    },
+  },
+  leave_room: {
+    description: 'Stop listening to a room. Your own session channel cannot be left.',
+    inputSchema: {
+      type: 'object',
+      properties: { channelId: { type: 'string' } },
+      required: ['channelId'],
+    },
+  },
+  list_rooms: {
+    description: 'List the rooms this session is currently listening to.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+};
+
+// Returns a JSON-RPC response when `msg` is a local room tool call, else null.
+function handleLocalRoomTool(msg) {
+  if (!msg || msg.method !== 'tools/call' || !msg.params) return null;
+  const name = msg.params.name;
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_ROOM_TOOLS, name)) return null;
+
+  const args = msg.params.arguments || {};
+  let payload;
+  if (name === 'join_room') payload = subscribeRoom(args.channelId, args.label);
+  else if (name === 'leave_room') payload = unsubscribeRoom(args.channelId);
+  else payload = { ok: true, rooms: listRooms() };
+
+  const { ok, ...rest } = payload;
+  return {
+    jsonrpc: '2.0',
+    id: msg.id,
+    result: {
+      content: [{ type: 'text', text: JSON.stringify({ success: ok, ...rest }) }],
+    },
+  };
+}
+
+function injectRoomToolsIntoList(response) {
+  const tools = response && response.result && response.result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const [name, def] of Object.entries(LOCAL_ROOM_TOOLS)) {
+    if (tools.some((t) => t && t.name === name)) continue;
+    tools.push({ name, description: def.description, inputSchema: def.inputSchema });
+  }
+}
+
+// --- inbox poll -------------------------------------------------------------
+
 async function pollInbox() {
-  if (!agentChannelId || shuttingDown) return;
+  if (shuttingDown || roomSubscriptions.size === 0) return;
+  // Snapshot the keys: a leave_room issued while an await is in flight must not be
+  // undone by a drain that is still walking the old set.
+  for (const channelId of [...roomSubscriptions.keys()]) {
+    await pollRoom(channelId);
+  }
+}
+
+async function pollRoom(channelId) {
+  if (shuttingDown || !roomSubscriptions.has(channelId)) return;
 
   try {
     const result = await callInternalTool('get_channel_messages', {
-      channelId: agentChannelId,
-      after: inboxCursor,
+      channelId,
+      after: roomSubscriptions.get(channelId).cursor,
       maxResults: 50,
     });
 
@@ -836,18 +999,27 @@ async function pollInbox() {
     if (messages.length === 0) return;
 
     for (const msg of messages) {
+      // Re-read every iteration: the subscription can disappear mid-drain.
+      const sub = roomSubscriptions.get(channelId);
+      if (!sub || shuttingDown) return;
+
+      if (msg.sentAt > sub.cursor) sub.cursor = msg.sentAt;
+
       // Skip messages authored by the same session — those are our own outbound
       // posts coming back through the channel.
-      if (msg.authorAgentSessionId && msg.authorAgentSessionId === agentSessionId) {
-        if (msg.sentAt > inboxCursor) inboxCursor = msg.sentAt;
-        continue;
-      }
+      if (msg.authorAgentSessionId && msg.authorAgentSessionId === agentSessionId) continue;
 
-      send({
+      // Room provenance goes in the content, not only in meta. Whether the model can
+      // keep several concurrent rooms apart is the whole question this spike asks, and
+      // meta is not guaranteed to reach it — so for a non-home room the origin is made
+      // literal. The home channel keeps its exact current wire format.
+      const content = sub.home ? msg.content : `[${sub.label}] ${msg.content}`;
+
+      __sendImpl({
         jsonrpc: '2.0',
         method: 'notifications/claude/channel',
         params: {
-          content: msg.content,
+          content,
           meta: {
             from_session: msg.authorAgentSessionId || null,
             from_user: msg.authorUserId || null,
@@ -857,14 +1029,14 @@ async function pollInbox() {
             sent_at: msg.sentAt,
             message_id: msg.id,
             channel_id: msg.channelId,
+            room_label: sub.label,
+            room_is_home: sub.home,
           },
         },
       });
-
-      if (msg.sentAt > inboxCursor) inboxCursor = msg.sentAt;
     }
   } catch (e) {
-    process.stderr.write(`[kanbantic-proxy] inbox-poll error: ${e.message}\n`);
+    process.stderr.write(`[kanbantic-proxy] inbox-poll error (${channelId}): ${e.message}\n`);
   }
 }
 
@@ -1056,4 +1228,13 @@ module.exports = {
   stopHeartbeat,
   sendHeartbeat,
   __setSessionForTest,
+  // SPIKE (multi-room) — exported for testing the room subscriptions + local tools.
+  subscribeRoom,
+  unsubscribeRoom,
+  listRooms,
+  handleLocalRoomTool,
+  injectRoomToolsIntoList,
+  pollInbox,
+  setSendForTest,
+  MAX_ROOM_SUBSCRIPTIONS,
 };
