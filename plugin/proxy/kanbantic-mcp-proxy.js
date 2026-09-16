@@ -1440,6 +1440,9 @@ async function pollRoom(channelId) {
     if (messages.length === 0) return;
 
     let cursorAdvanced = false;
+    // KBT-F723 — message-id's this poll-round successfully forwarded via notifications/
+    // claude/channel, for the HOME channel only (see the batched ack below the loop).
+    const deliveredMessageIds = [];
     for (const msg of messages) {
       // Re-read every iteration: the subscription can disappear mid-drain.
       const current = roomSubscriptions.get(channelId);
@@ -1486,30 +1489,63 @@ async function pollRoom(channelId) {
       // literal. The home channel keeps its exact current wire format.
       const content = current.home ? msg.content : `[${current.label}] ${msg.content}`;
 
-      __sendImpl({
-        jsonrpc: '2.0',
-        method: 'notifications/claude/channel',
-        params: {
-          content,
-          meta: {
-            from_session: msg.authorAgentSessionId || null,
-            from_user: msg.authorUserId || null,
-            from_display_name: msg.authorDisplayName || 'Unknown',
-            author_type: msg.authorType,
-            message_type: msg.messageType,
-            sent_at: msg.sentAt,
-            message_id: msg.id,
-            channel_id: msg.channelId,
-            room_label: current.label,
-            room_is_home: current.home,
+      // KBT-F723 — only a message __sendImpl actually forwarded WITHOUT throwing counts
+      // as "delivered". A synchronous stdout-write failure (e.g. EPIPE) must never be
+      // reported to the server as delivered — that would tell the UI "afgeleverd" for a
+      // push that never left this process. Best-effort: a send failure here must not
+      // abort the rest of the poll-round (mirrors the heartbeat try/catch pattern).
+      try {
+        __sendImpl({
+          jsonrpc: '2.0',
+          method: 'notifications/claude/channel',
+          params: {
+            content,
+            meta: {
+              from_session: msg.authorAgentSessionId || null,
+              from_user: msg.authorUserId || null,
+              from_display_name: msg.authorDisplayName || 'Unknown',
+              author_type: msg.authorType,
+              message_type: msg.messageType,
+              sent_at: msg.sentAt,
+              message_id: msg.id,
+              channel_id: msg.channelId,
+              room_label: current.label,
+              room_is_home: current.home,
+            },
           },
-        },
-      });
+        });
+        // KBT-F723 — only the HOME channel is this session's OWN channel; the server
+        // rejects (harmlessly) an ack for a message in a room-channel it doesn't own
+        // (SPIKE multi-room). Never batch those — there is nothing to gain from a call
+        // that is guaranteed to land in RejectedMessageIds.
+        if (current.home && msg.id) deliveredMessageIds.push(msg.id);
+      } catch (e) {
+        process.stderr.write(
+          `[kanbantic-proxy] notify send failed for message ${msg.id} (non-fatal, not acked): ${e.message}\n`
+        );
+      }
     }
 
     // KBT-F719 — persist the advanced cursor so a proxy restart of this SAME logical
     // session resumes here instead of at 'now' (a gap) or at the old cursor (a replay).
     if (cursorAdvanced) writeSessionFile();
+
+    // KBT-F723 — batched delivery-ack: report every message this poll-round actually
+    // forwarded, ONE call per poll-round (not per message). Best-effort — a failed ack
+    // must never crash the poll-loop; the next successful ack round for the SAME message
+    // is a no-op server-side (idempotent), so nothing is lost, only delayed.
+    if (deliveredMessageIds.length > 0 && agentSessionId) {
+      try {
+        await callInternalTool('acknowledge_channel_delivery', {
+          sessionId: agentSessionId,
+          messageIds: deliveredMessageIds.join(','),
+        });
+      } catch (e) {
+        process.stderr.write(
+          `[kanbantic-proxy] acknowledge_channel_delivery failed (non-fatal): ${e.message}\n`
+        );
+      }
+    }
   } catch (e) {
     recordPollFailure(sub, e.message, channelId);
   }
