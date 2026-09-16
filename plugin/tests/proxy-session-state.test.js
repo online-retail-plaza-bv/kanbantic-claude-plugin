@@ -286,14 +286,24 @@ test('KBT-SR621-4 — the process token is stable across calls but regenerated b
 test('KBT-SR622-1 — sessionFilePath is keyed by CLAUDE_CODE_SESSION_ID, write/read/remove round-trips', () => {
   proxy.__resetForTest();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-f717-proxy-sf-'));
-  const savedHome = process.env.USERPROFILE;
+  // KBT-F717 (CI flake, 3rd occurrence) — os.homedir() reads $HOME on Linux/macOS
+  // and %USERPROFILE% on Windows. Overriding only USERPROFILE (as this test did
+  // before) redirects sessionFilePath() on Windows but is a silent no-op on Linux
+  // CI: os.homedir() then returns the REAL runner home directory, the test's
+  // fixture files land in a completely different (untouched) directory, and every
+  // assertion about that directory is measuring the wrong filesystem location.
+  // Set BOTH so the redirection is real on every platform this suite runs on.
+  const savedUserProfile = process.env.USERPROFILE;
+  const savedHomeEnv = process.env.HOME;
   const savedSid = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.USERPROFILE = home;
+  process.env.HOME = home;
   process.env.CLAUDE_CODE_SESSION_ID = 'test-session-xyz';
   try {
     proxy.__setFullSessionForTest('sess-1', 'chan-1');
     const p = proxy.sessionFilePath();
     assert.strictEqual(path.basename(p), '.claude-kanbantic-session-test-session-xyz.json');
+    assert.strictEqual(path.dirname(p), home, 'sessionFilePath() must resolve inside THIS test\'s temp home, not the real one');
     proxy.writeSessionFile();
     assert.ok(fs.existsSync(p), 'writeSessionFile must create the per-session file');
     const written = JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -302,7 +312,8 @@ test('KBT-SR622-1 — sessionFilePath is keyed by CLAUDE_CODE_SESSION_ID, write/
     proxy.removeSessionFile();
     assert.ok(!fs.existsSync(p), 'removeSessionFile must remove exactly its own file');
   } finally {
-    process.env.USERPROFILE = savedHome;
+    process.env.USERPROFILE = savedUserProfile;
+    process.env.HOME = savedHomeEnv;
     if (savedSid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
     else process.env.CLAUDE_CODE_SESSION_ID = savedSid;
     fs.rmSync(home, { recursive: true, force: true });
@@ -317,12 +328,20 @@ test('KBT-SR622-1 — sessionFilePath is keyed by CLAUDE_CODE_SESSION_ID, write/
 test('KBT-SR622-2 — staleSessionFileCleanup removes ONLY the file whose recorded pid is dead', () => {
   proxy.__resetForTest();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-f717-proxy-gc-'));
-  const savedHome = process.env.USERPROFILE;
+  // KBT-F717 (CI flake, 3rd occurrence) — see the KBT-SR622-1 comment above: both
+  // USERPROFILE and HOME must be overridden, or this test's fixture files land in
+  // the real home directory on Linux CI while staleSessionFileCleanup() scans it,
+  // never seeing each other. That masqueraded as a PID-liveness/timing flake for
+  // two earlier "fixes" that were both real improvements but not the actual cause.
+  const savedUserProfile = process.env.USERPROFILE;
+  const savedHomeEnv = process.env.HOME;
   const savedSid = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.USERPROFILE = home;
+  process.env.HOME = home;
   process.env.CLAUDE_CODE_SESSION_ID = 'own-session';
   try {
     const ownPath = proxy.sessionFilePath();
+    assert.strictEqual(path.dirname(ownPath), home, 'sessionFilePath() must resolve inside THIS test\'s temp home');
     fs.writeFileSync(ownPath, JSON.stringify({ pid: process.pid }));
 
     const deadPid = getKnownDeadPid();
@@ -349,7 +368,8 @@ test('KBT-SR622-2 — staleSessionFileCleanup removes ONLY the file whose record
     assert.ok(fs.existsSync(oldButAlivePath), 'must NOT remove an old-but-still-alive session — mtime alone is not proof of death');
     assert.ok(fs.existsSync(noPidPath), 'must NOT remove a file with no pid recorded — doubt resolves to keeping it');
   } finally {
-    process.env.USERPROFILE = savedHome;
+    process.env.USERPROFILE = savedUserProfile;
+    process.env.HOME = savedHomeEnv;
     if (savedSid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
     else process.env.CLAUDE_CODE_SESSION_ID = savedSid;
     fs.rmSync(home, { recursive: true, force: true });
@@ -371,8 +391,11 @@ test('KBT-SR622-4 — MUTATION CHECK: an mtime-based GC would wrongly delete an 
   // the SAME fixture by age alone flags the alive session for deletion.
   proxy.__resetForTest();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kbt-f717-proxy-gc-mutation-'));
-  const savedHome = process.env.USERPROFILE;
+  // KBT-F717 (CI flake, 3rd occurrence) — see the KBT-SR622-1/2 comments above.
+  const savedUserProfile = process.env.USERPROFILE;
+  const savedHomeEnv = process.env.HOME;
   process.env.USERPROFILE = home;
+  process.env.HOME = home;
   try {
     const oldButAlivePath = path.join(home, '.claude-kanbantic-session-old-but-alive.json');
     fs.writeFileSync(oldButAlivePath, JSON.stringify({ pid: process.pid }));
@@ -392,7 +415,8 @@ test('KBT-SR622-4 — MUTATION CHECK: an mtime-based GC would wrongly delete an 
     proxy.staleSessionFileCleanup();
     assert.ok(fs.existsSync(oldButAlivePath), 'the actual GC must leave the alive session alone');
   } finally {
-    process.env.USERPROFILE = savedHome;
+    process.env.USERPROFILE = savedUserProfile;
+    process.env.HOME = savedHomeEnv;
     fs.rmSync(home, { recursive: true, force: true });
     proxy.__resetForTest();
   }
