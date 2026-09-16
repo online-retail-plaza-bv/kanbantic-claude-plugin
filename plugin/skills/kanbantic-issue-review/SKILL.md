@@ -66,6 +66,9 @@ when a session already exists:
 ```
 MCP: mcp__kanbantic__register_agent_session(workspaceId, host: <hostname>, cwd: <current working directory>)
 ```
+Since the proxy caches the active session per process (KBT-F717 / KBT-SR620), this call is idempotent — it returns the existing session instead of creating a second one when one is already active.
+
+**KBT-F717 — this skill never calls `end_agent_session`.** Reviewing and merging this issue is not the end of the process — report completion of your own turn with `report_status(sessionId, status: "Idle")` if useful, but do not close the session. Only real process termination (SIGINT/SIGTERM/stdin-end) or an explicit user action ends it.
 
 **0b. Verify local access to the workspace's code repository:**
 

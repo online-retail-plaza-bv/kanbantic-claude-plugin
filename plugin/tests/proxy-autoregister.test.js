@@ -51,7 +51,10 @@ test('autoRegister: sends correct register call (workspace/workstation/spawnComm
 
   await proxy.autoRegister();
   proxy.stopInboxPoll(); // clean the inbox timer before it can fire a real poll
-  try { fs.unlinkSync(path.join(os.homedir(), '.claude-kanbantic-session.json')); } catch { /* may not exist */ }
+  // KBT-F717 — ask the module itself for the path it just wrote to (per-session
+  // filename now, not the old hardcoded global name) so cleanup actually removes
+  // the real file instead of leaving a stray one in the developer's home dir.
+  try { fs.unlinkSync(proxy.sessionFilePath()); } catch { /* may not exist */ }
 
   assert.strictEqual(forwarded.length, 1);
   assert.strictEqual(forwarded[0].params.name, 'register_agent_session');
@@ -85,7 +88,7 @@ test('autoRegister: host falls back to os.hostname(); optional ids omitted when 
 
   await proxy.autoRegister();
   proxy.stopInboxPoll();
-  try { fs.unlinkSync(path.join(os.homedir(), '.claude-kanbantic-session.json')); } catch { /* may not exist */ }
+  try { fs.unlinkSync(proxy.sessionFilePath()); } catch { /* may not exist */ } // KBT-F717
 
   const args = forwarded[0].params.arguments;
   assert.strictEqual(args.host, os.hostname());

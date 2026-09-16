@@ -47,9 +47,16 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
+const { sessionFilePath: computeSessionFilePath } = require('../proxy/session-file'); // KBT-F717
 
 const PROXY_PATH = path.resolve(__dirname, '..', 'proxy', 'kanbantic-mcp-proxy.js');
 const IS_WINDOWS = process.platform === 'win32';
+// KBT-F717 — pin a deterministic CLAUDE_CODE_SESSION_ID for the spawned proxy so
+// the session-file path assertions below don't depend on whatever env this test
+// runner itself happens to inherit (this test may itself run inside a Claude Code
+// session, which sets its own CLAUDE_CODE_SESSION_ID — that value must NOT leak
+// into the child under test).
+const TEST_CLAUDE_SESSION_ID = 'kbt-b224-e2e-fixed-session-id';
 
 // ---------------------------------------------------------------------------
 // Stub MCP backend — identical contract to proxy-signal-cleanup.test.js but
@@ -171,6 +178,7 @@ function spawnProxy(port, homeDir) {
     KANBANTIC_API_KEY: 'test-key',
     HOME: homeDir,
     USERPROFILE: homeDir,
+    CLAUDE_CODE_SESSION_ID: TEST_CLAUDE_SESSION_ID, // KBT-F717 — deterministic session-file name
   };
   const child = spawn(process.execPath, [PROXY_PATH], {
     env,
@@ -267,8 +275,9 @@ async function runE2ECleanup({ trigger }) {
     await new Promise((r) => setTimeout(r, 100));
 
     // Confirm the session file exists pre-shutdown — required to validate the
-    // removeSessionFile() step of gracefulExit afterwards.
-    const sessionFile = path.join(homeDir, '.claude-kanbantic-session.json');
+    // removeSessionFile() step of gracefulExit afterwards. KBT-F717: per-session
+    // filename, keyed by the CLAUDE_CODE_SESSION_ID pinned in spawnProxy() above.
+    const sessionFile = computeSessionFilePath(homeDir, { CLAUDE_CODE_SESSION_ID: TEST_CLAUDE_SESSION_ID });
     assert.ok(
       fs.existsSync(sessionFile),
       'proxy must write the session file after register_agent_session (pre-shutdown invariant)'
@@ -358,7 +367,7 @@ async function runE2ECleanup({ trigger }) {
     }
     stub.server.close();
     try {
-      const sessionFile = path.join(homeDir, '.claude-kanbantic-session.json');
+      const sessionFile = computeSessionFilePath(homeDir, { CLAUDE_CODE_SESSION_ID: TEST_CLAUDE_SESSION_ID });
       if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
       fs.rmdirSync(homeDir);
     } catch {

@@ -53,13 +53,16 @@ run or a finished task that isn't recorded makes the board lie:
 register_agent_session (Step 0a) ─▶ claim_issue ─▶ set_current_issue
       │
       ├─ per task:  update_task_status(InProgress) ─▶ [build + verify] ─▶ update_task_status(Done)
-      │                    └─ periodically: heartbeat
       ├─ per test:  [run the test] ─▶ update_test_case(Passed | Failed | Skipped)   ← Step 6d; feeds the non-overridable AllTestsPassed gate
       ├─ milestone / blocker:  report_status + add_discussion_entry
-      └─ end:  end_agent_session
+      └─ end of THIS issue:  report_status(status: "Idle") + set_current_issue(null)
 ```
 
-`register_agent_session` now runs in Step 0a — earlier than `claim_issue` — so its `claudeAgentName`/`claudeAgentEmail` (KBT-F614) are available for the git-identity setup in Step 0b, before any status-mutating call happens. `set_current_issue` reuses that same `sessionId`.
+`register_agent_session` now runs in Step 0a — earlier than `claim_issue` — so its `claudeAgentName`/`claudeAgentEmail` (KBT-F614) are available for the git-identity setup in Step 0b, before any status-mutating call happens. `set_current_issue` reuses that same `sessionId`. Since the proxy already caches the active session per process (KBT-F717 / KBT-SR620), calling `register_agent_session` here even when a session already exists (e.g. a previous issue in the same continuous run) is safe and cheap — it returns the cached session instead of creating a second one.
+
+**KBT-F717 — finishing this issue does NOT end the session.** Do **not** call `end_agent_session` at the end of this skill. The chat channel belongs to the *process*, not the issue: another issue may follow in the same run (orchestrator hand-off), or a human may keep chatting after this issue lands on Review. Report completion with `report_status(sessionId, status: "Idle")` + `set_current_issue(sessionId, issueId: null)` instead — the session, its inbox-poll and its heartbeat stay alive. The proxy itself ends the session on real process termination (SIGINT/SIGTERM/stdin-end) or an explicit user action; a skill finishing its work is neither.
+
+**Heartbeat is automatic — do not call it from this skill.** The proxy already refreshes `LastSeen` every 90s for as long as the process is connected (KBT-B470); a skill-level periodic `heartbeat` call was redundant duplication and has been removed from this skill.
 
 The Phase/Golf calls (`mark_phase_for_review` → `approve_phase` → `unlock_phase`)
 apply to Epic-walks; their ownership (orchestrator vs. executing agent) is tracked

@@ -43,9 +43,12 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
+const { sessionFilePath: computeSessionFilePath } = require('../proxy/session-file'); // KBT-F717
 
 const PROXY_PATH = path.resolve(__dirname, '..', 'proxy', 'kanbantic-mcp-proxy.js');
 const IS_WINDOWS = process.platform === 'win32';
+// KBT-F717 — deterministic session-file name regardless of the test runner's own env.
+const TEST_CLAUDE_SESSION_ID = 'kbt-b224-signal-fixed-session-id';
 
 const SKIP_WINDOWS_REASON =
   "Windows host: Node converts child.kill('SIGTERM') and child.kill('SIGINT') " +
@@ -193,6 +196,7 @@ function spawnProxy(port, homeDir) {
     KANBANTIC_API_KEY: 'test-key',
     HOME: homeDir,
     USERPROFILE: homeDir,
+    CLAUDE_CODE_SESSION_ID: TEST_CLAUDE_SESSION_ID, // KBT-F717
   };
   const child = spawn(process.execPath, [PROXY_PATH], {
     env,
@@ -375,7 +379,7 @@ async function runSignalCleanupTest(signalName) {
     stub.server.close();
     // Remove the session file (if proxy didn't already remove it) + the temp dir.
     try {
-      const sessionFile = path.join(homeDir, '.claude-kanbantic-session.json');
+      const sessionFile = computeSessionFilePath(homeDir, { CLAUDE_CODE_SESSION_ID: TEST_CLAUDE_SESSION_ID });
       if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
       fs.rmdirSync(homeDir);
     } catch {

@@ -10,10 +10,11 @@
 //   Version v1.5.0 voor Kanbantic API — 5 issues, status InProgress, %done 60%
 //
 // The summary is read from the Kanbantic session-file that the stdio proxy
-// maintains (the same `~/.claude-kanbantic-session.json` the transcript hooks
-// read). The proxy is the component with the full picture of the current
-// issue's Version, so it stamps a `versionContext` object into the session
-// file; this hook simply renders it at Stop.
+// maintains — since KBT-F717 one file PER Claude session
+// (`~/.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json`), not one
+// global file. The proxy is the component with the full picture of the
+// current issue's Version, so it stamps a `versionContext` object into the
+// session file; this hook simply renders it at Stop.
 //
 // versionContext shape (all fields required to render — any missing field ⇒
 // silent no-op so an irrelevant session never prints a half-built line):
@@ -22,21 +23,38 @@
 // Sessions with no Version context (no session-file, no versionContext) print
 // NOTHING and exit 0 — "niet-relevante sessions stil" (TC2365 variant).
 //
-// Config (env):
-//   KANBANTIC_SESSION_FILE — override the session-file path (testing). Default
-//                            ~/.claude-kanbantic-session.json (HOME/USERPROFILE).
+// KBT-F717 — resolving WHICH session file is this hook's job now that there
+// can be several on disk at once (one Claude session per proxy process). This
+// hook is a separate subprocess from the proxy and does not know the proxy's
+// PID, so it uses the shared, fail-closed resolver in session-file.js:
+//   - CLAUDE_CODE_SESSION_ID set  → that exact file.
+//   - unset, exactly 1 file found → that file (single-session-on-workstation case).
+//   - unset, 0 or ≥2 files found  → no file (never GUESS which one is "ours" —
+//     that is precisely the cross-session bug this Feature fixes).
 //
-// Zero deps — Node built-ins only.
+// Config (env):
+//   KANBANTIC_SESSION_FILE — override the session-file path (testing). Takes
+//                            precedence over the resolver above.
+//
+// Zero deps — Node built-ins only (session-file.js is a plugin-local sibling).
 //
 
 const fs = require('node:fs');
-const path = require('node:path');
 const os = require('node:os');
+const { resolveExistingSessionFile } = require('../proxy/session-file');
 
 function sessionFilePath() {
   if (process.env.KANBANTIC_SESSION_FILE) return process.env.KANBANTIC_SESSION_FILE;
   const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
-  return path.join(home, '.claude-kanbantic-session.json');
+  const resolved = resolveExistingSessionFile(home, process.env);
+  if (resolved.ambiguous) {
+    process.stderr.write(
+      '[kanbantic-hook] multiple session files found and CLAUDE_CODE_SESSION_ID is not ' +
+      `set — cannot tell which session is ours (candidates: ${resolved.candidates.join(', ')}). ` +
+      'Skipping the Version summary rather than guessing.\n'
+    );
+  }
+  return resolved.path; // may be null — loadVersionContext() below already handles that
 }
 
 function loadVersionContext() {

@@ -77,12 +77,15 @@ De orchestrator is vaak een lang-lopende, multi-issue sessie — precies het soo
 | Moment | Call | Effect |
 |---|---|---|
 | Start van de sequencer-run | `register_agent_session` + `set_current_issue` | Bord toont dat de orchestrator actief is en (optioneel) welk issue net gestart is |
-| Doorlopend, tijdens lange runs | `heartbeat` (periodiek) | Toont dat de orchestrator leeft/actief is tussen lane-skill-invocaties door |
 | Na elk issue-hand-off | `report_status` + de Comment-entry uit Step 5 | Samenvatting van voortgang zichtbaar buiten alleen de discussion-timeline |
 | Bij een geparkeerd/geblokkeerd issue | `report_status(status: "Blocked")` + Decision/Comment-entry | Board-signaal dat de sequencer bewust wacht, niet hangt |
-| Einde van de run | `end_agent_session` | Sessie netjes afgesloten |
+| Einde van de run | `report_status(status: "Idle")` + `set_current_issue(null)` | Bord toont dat de sequencer klaar is met deze batch — de sessie zelf blijft open |
 
 Dit is een **aanvullende** laag bovenop de per-issue statusmelding die elke lane-skill al eigenaar van is (`kanbantic-issue-execute` / `kanbantic-issue-review` §Mandatory calls) — de orchestrator herimplementeert die niet, maar rapporteert wél zijn eigen sequencer-niveau voortgang.
+
+**Heartbeat is automatisch (KBT-B470)** — de proxy vernieuwt zelf elke 90s de `LastSeen` van de sessie zolang het proces verbonden blijft. Een periodieke `heartbeat`-aanroep vanuit de orchestrator was dubbel werk en is verwijderd.
+
+**KBT-F717 — de sequencer-run afronden beëindigt de sessie niet.** `end_agent_session` staat hier bewust niet meer: het einde van een batch is géén procesbeëindiging, en niets garandeert dat het Claude-proces meteen daarna stopt (een mens kan doorpraten, of een volgende batch kan starten in dezelfde run). Alleen echte procesbeëindiging (proxy-niveau, SIGINT/SIGTERM/stdin-end) of een expliciete gebruikersactie sluit de sessie — de orchestrator meldt alleen dat hij klaar is.
 
 ## Lane routing table
 
