@@ -251,7 +251,13 @@ test('pollRoom: a same-instant tie serialized with different fractional-second p
   proxy.__resetForTest();
 });
 
-test('pollRoom: AgentChannel.Archived is terminal — the room is marked archived and never polled again', async () => {
+// KBT-F726 — this is defensive-handling coverage, not a production-behavior proof. The real
+// AgentChannelAppService.GetMessagesAsync never raises `AgentChannel.Archived` (only the write
+// side, PostMessageAsync, does — see KBT-F722's Stale/Done distinction), so this exact response
+// shape never comes from the live server today (KBT-T4610, cancelled — the read-side gap was
+// deliberately left as-is). This test proves pollRoom stops polling correctly IF the server
+// ever returns this error, via a mocked forward — it does not exercise the real read path.
+test('pollRoom: a hypothetical AgentChannel.Archived error is handled as terminal — the room is marked archived and never polled again', async () => {
   proxy.__resetForTest();
   captureSends();
   let calls = 0;

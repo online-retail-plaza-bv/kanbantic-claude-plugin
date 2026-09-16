@@ -12,13 +12,20 @@
 // The summary is read from the Kanbantic session-file that the stdio proxy
 // maintains — since KBT-F717 one file PER Claude session
 // (`~/.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json`), not one
-// global file. The proxy is the component with the full picture of the
-// current issue's Version, so it stamps a `versionContext` object into the
-// session file; this hook simply renders it at Stop.
+// global file.
 //
 // versionContext shape (all fields required to render — any missing field ⇒
 // silent no-op so an irrelevant session never prints a half-built line):
 //   { versionName, applicationName, issueCount, status, percentDone }
+//
+// KBT-F726 (misleading-description finding) — as of today NOTHING writes this
+// field. `writeSessionFile()` in plugin/proxy/kanbantic-mcp-proxy.js persists
+// { sessionId, channelId, claudeCliSessionId, apiUrl, writtenAt, pid, cursors }
+// only; it never computes or stamps a `versionContext`. This hook is therefore
+// ALWAYS silent today — `loadVersionContext()` always returns null. The shape
+// above documents the intended contract for whoever wires up the write side
+// (tracked as a follow-up; this hook and its tests are correct and stay in
+// place as the read/render half of that contract).
 //
 // Sessions with no Version context (no session-file, no versionContext) print
 // NOTHING and exit 0 — "niet-relevante sessions stil" (TC2365 variant).

@@ -4,10 +4,11 @@
 # orchestrator (KBT-F438), POSIX/macOS/Linux counterpart of
 # launch-orchestrator.ps1.
 #
-# This is a deliberate BRIDGE, not the end state. The full Workstation-Daemon
-# `SpawnCommand` / Agent-Sessions integration is intentionally DEFERRED until the
-# v0.14.0 line is mature — see KBT-BD151 / KBT-BD154. Until then an operator runs
-# this by hand on each participating workstation.
+# This is a deliberate manual BRIDGE, not a stand-in for missing functionality
+# (KBT-F726 correction — this used to claim the daemon integration was DEFERRED;
+# it is live: SpawnCommandPollingService spawns+supervises orchestrator sessions
+# today, see KBT-B465/F722/F724). An operator runs this by hand on each
+# workstation for a one-off run outside that daemon-managed flow.
 #
 # API key resolution: environment only. There is no HKCU\Environment fallback on
 # non-Windows hosts (that branch is Windows-specific; see the .ps1 variant).
@@ -64,4 +65,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 echo "launch-orchestrator: starting Claude Code for $WORKSPACE / $INITIATIVE (key source: env)."
-exec "$CLAUDE_EXE" --dangerously-load-development-channels server:kanbantic "$PROMPT"
+# KBT-B976 / KBT-SR632 — MUST be the equals-form, ONE argv entry. The space-form
+# lets the CLI parser swallow the following $PROMPT as an untagged channel
+# entry, which Claude Code rejects with exit 1 (KBT-B242).
+exec "$CLAUDE_EXE" --dangerously-load-development-channels=plugin:kanbantic-claude-plugin@kanbantic "$PROMPT"

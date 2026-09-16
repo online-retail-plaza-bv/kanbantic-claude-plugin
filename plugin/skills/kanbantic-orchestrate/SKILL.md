@@ -307,4 +307,4 @@ the sync (which deletes the mirror file), or delete the mirror and re-sync.
 - **One issue at a time** — finish or park before advancing.
 - **Priority + in-flight first** — drain started work before opening new work.
 - **Document blockers, don't guess** — park blocked issues with a logged reason.
-- **Stay in your layer** — no claim, no push, no merge, no status mutation here.
+- **Stay in your layer** — no claim, no push, no merge, no status mutation on a **child Feature/Bug** (that's the lane-skills' job). The sole exception (KBT-F581) is [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581): claiming the **parent Epic itself**, once, to bootstrap the run.

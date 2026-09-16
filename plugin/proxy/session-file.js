@@ -5,10 +5,11 @@
 //
 // Shared, pure helpers for the per-process Kanbantic session-file. Required by
 // both kanbantic-mcp-proxy.js (the writer) and hooks/stop-version-summary.js
-// (a reader) so the naming scheme lives in exactly one place. The PowerShell
-// reader (hooks/transcript-helpers.ps1) reimplements the same scheme — it
-// cannot `require()` this module — and MUST be kept in sync by hand; see the
-// comment block at the top of that file.
+// (the only registered reader) so the naming scheme lives in exactly one
+// place. KBT-F726 removed hooks/transcript-helpers.ps1 (a second, dead
+// PowerShell reimplementation of this same scheme, never registered in
+// hooks.json and so never invoked) — there is no longer a second reader to
+// keep in sync by hand.
 //
 // Why CLAUDE_CODE_SESSION_ID and not PID:
 //   The proxy (an MCP-server stdio subprocess) and the hooks (separate

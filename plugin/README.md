@@ -4,7 +4,7 @@ Claude plugin for Kanbantic issue lifecycle management. All artifacts are create
 
 ## Skill ↔ Lane mapping (plugin v2.4.0)
 
-Three intake-skills create issues; four lane-skills move them through the eight statuses; deploy webhooks complete the journey to production. An autopilot skill drives bugs end-to-end without manual handoffs, and an orchestration skill sequences a whole initiative across the lane-skills.
+Three intake-skills create issues; four lane-skills move them through the ten statuses (`IssueStatus` — `Blocked`/`OnHold` were added in KBT-F561 as InProgress side-states, not shown in the linear chain below); deploy webhooks complete the journey to production. An autopilot skill drives bugs end-to-end without manual handoffs, and an orchestration skill sequences a whole initiative across the lane-skills.
 
 | Source lane | Target lane | Skill | Command | Mode |
 |-------------|-------------|-------|---------|------|
@@ -12,8 +12,8 @@ Three intake-skills create issues; four lane-skills move them through the eight 
 | — | **New** | `kanbantic-feature-request` | `/request-feature` | Intake (Feature) |
 | — | **New** | `kanbantic-epic-proposal` | `/propose-epic` | Intake (Epic) |
 | New | Triaged *or* Cancelled | `kanbantic-issue-triage` | `/triage-issue` | Lane-skill (go/no-go) |
-| Triaged | **Prepared** | `kanbantic-issue-prepare` | `/prepare-issue` | Lane-skill (artifacts) |
-| Prepared | **InProgress** | `kanbantic-issue-execute` | `/execute-issue` | Lane-skill (atomic claim) |
+| Triaged | **Ready** | `kanbantic-issue-prepare` | `/prepare-issue` | Lane-skill (artifacts) |
+| Ready | **InProgress** | `kanbantic-issue-execute` | `/execute-issue` (via `claim_issue`) | Lane-skill (atomic claim) |
 | InProgress | Review | `kanbantic-issue-execute` | (continues) | Lane-skill (implementation) |
 | Review | **InDeployment** | `kanbantic-issue-review` | *(auto via /loop-style chain)* | Lane-skill (merge + transition) |
 | InDeployment | Done | (deploy webhooks + manual `update_issue_status`) | — | Operational gate |
@@ -22,10 +22,10 @@ Three intake-skills create issues; four lane-skills move them through the eight 
 
 > **Orchestration vs lane-skills (KBT-F436).** `kanbantic-orchestrate` is a *sequencer*, not a lane-skill: given `{workspace, initiative, repos}` it selects actionable issues by priority, orders them, and invokes the matching lane-skill per issue. It owns no status transition and re-implements no claim/push/merge logic — those stay in `kanbantic-issue-execute` / `kanbantic-issue-review`. Workspaces override the prompt via a Toolkit **Skill** item with slug `kanbantic-orchestrate` (the workspace mirror wins over the plugin baseline; see the skill's "Workspace override" section). Scripted launch is documented under [Launching the orchestrator](#launching-the-orchestrator-kbt-f438).
 
-**Lane-flow** (8 statuses; `Cancelled` is terminal from any non-Done, non-InDeployment status):
+**Lane-flow** (10 statuses total; the chain below shows the 7 forward-progressing ones plus `Cancelled`; `Blocked`/`OnHold` are InProgress side-states, not part of the linear chain — `Cancelled` is terminal from any non-Done, non-InDeployment status):
 
 ```
-intake → New → triage → Triaged → prepare → Prepared → execute → InProgress → execute → Review → review → InDeployment → deploy → Done
+intake → New → triage → Triaged → prepare → Ready → execute → InProgress → execute → Review → review → InDeployment → deploy → Done
 ```
 
 **Key invariants** (since plugin v2.4.0 / KBT-F250):
@@ -35,11 +35,11 @@ intake → New → triage → Triaged → prepare → Prepared → execute → I
   - **Legacy shape** (existing Epics): `Epic → Phase → Task`. Continues to work without restructuring.
 - `kanbantic-issue-review` works at three levels for new-shape Epics — Feature / Phase / Epic — auto-detected from the issue argument. Per-Feature mini-reviews keep deltas small; Epic-level review becomes a lightweight cross-Phase coherence check.
 - Three new MCP tools: `assign_feature_to_phase`, `assign_features_to_phase` (bulk), `list_features_by_phase`. Together they let `kanbantic-issue-prepare` and `kanbantic-issue-execute` query and mutate the Phase ↔ Feature relation cleanly.
-- `isReadyToClaim` is **derived** from status (`Prepared ⟺ true`) — it is no longer settable explicitly.
+- `isReadyToClaim` is **derived** from status (`Ready ⟺ true`) — it is no longer settable explicitly.
 - Direct `Triaged → InProgress` is **blocked** (use `/prepare-issue` first).
 - Direct `InDeployment → InProgress` and `InDeployment → Cancelled` are **blocked at the Domain layer** (use `Review` for rollback or `Done` for post-deploy completion).
 - The `kanbantic-issue-review` skill transitions to `InDeployment` after merge — the Done-transition is a separate operational step (deploy webhooks + smoke + manual `update_issue_status(status: "Done")`). Auto-transition via `GateEvaluationService` is deferred to KBT-INI032 Epic D.
-- Existing `Triaged-with-isReadyToClaim=true` and `Review-with-merged-branch` issues are migrated automatically by the backend `PreparedStatusBackfillSeeder` and `InDeploymentBackfillSeeder` on first post-deploy startup.
+- Existing `Triaged-with-isReadyToClaim=true` and `Review-with-merged-branch` issues are migrated automatically by the backend `PreparedStatusBackfillSeeder` and `InDeploymentBackfillSeeder` on first post-deploy startup. (`PreparedStatusBackfillSeeder` keeps its historical name; the status it backfills into is `Ready`, renamed from `Prepared` in KBT-E103/v3.)
 
 ## Specialist run skills (plugin v2.7.0+, KBT-F382)
 
@@ -60,7 +60,7 @@ Each is a thin wrapper over one shared definition — `skills/specialist-run-sha
 
 - **v2.4.0** — Phase-of-Features-of-Tasks Epic shape (KBT-F250): new-shape Epics group Features into Phases instead of Tasks; dual-mode auto-detection in execute; three review levels (Feature / Phase / Epic); three new MCP tools (`assign_feature_to_phase`, `assign_features_to_phase`, `list_features_by_phase`).
 - **v2.3.0** — InDeployment lane (KBT-F236): new status between Review and Done; `kanbantic-issue-review` transitions to InDeployment after merge.
-- **v2.2.0** — Prepared lane (KBT-F235): new status between Triaged and InProgress; `kanbantic-issue-prepare` transitions to Prepared on green readiness.
+- **v2.2.0** — `Ready` lane (KBT-F235; originally named `Prepared`, renamed to `Ready` in KBT-E103/v3): new status between Triaged and InProgress; `kanbantic-issue-prepare` transitions here on green readiness.
 - **v2.0.0** — Lane Workflow Skills (KBT-INI033): one skill per lane transition; consolidates the legacy `kanbantic-issue-design` + `kanbantic-issue-planning` + `kanbantic-debugging` into `kanbantic-issue-prepare`; renames `kanbantic-issue-executing` → `kanbantic-issue-execute` and `kanbantic-code-review` → `kanbantic-issue-review`.
 
 ## Epic shape examples (v2.4.0)
@@ -129,7 +129,7 @@ Hoe het werkt:
 **Vereiste launch-flag voor Claude Code (channels zijn experimental):**
 
 ```bash
-claude --dangerously-load-development-channels server:kanbantic
+claude --dangerously-load-development-channels plugin:kanbantic-claude-plugin@kanbantic
 ```
 
 (Claude Code v2.1.80+ vereist; channels werken niet zonder deze flag.)
@@ -239,7 +239,7 @@ Gedrag (afgedwongen in `proxy/kanbantic-mcp-proxy.js`):
 
 Het patroon is **generiek**: de substitutie geldt voor elke `tools/call` met een `filePath`-argument, niet alleen `add_wireframe_version`. De proxy verrijkt bovendien de `tools/list`-respons zodat `filePath` als optionele parameter (met beschrijving) verschijnt op elke tool die een `content`-property heeft — `filePath` wordt nooit aan `required` toegevoegd. Geen extra dependencies; alleen Node built-ins.
 
-> **Trust boundary.** `filePath` laat een tool-aanroep elk lokaal bestand lezen waartoe het proxy-proces toegang heeft, en stuurt de inhoud naar de Kanbantic-server. Dat is exact het doel (de proxy draait lokaal met filesystem-rechten), maar het betekent dat een foutieve of kwaadaardige tool-aanroep in principe gevoelige bestanden zou kunnen inlezen. Geef alleen `filePath`-waarden door die je bedoelt te uploaden. De proxy legt bewust géén pad-allowlist of groottelimiet op — dat blijft een verantwoordelijkheid van de aanroeper. (Vergelijk de server-side `AddIssueAttachment`, KBT-SR224, die wél een 25MB-cap hanteert omdat die de payload base64 in het protocol stopt; de proxy-substitutie heeft die overhead niet.)
+> **Trust boundary (KBT-B411).** `filePath` laat een tool-aanroep elk lokaal bestand lezen waartoe het proxy-proces toegang heeft, en stuurt de inhoud naar de Kanbantic-server. Dat is exact het doel (de proxy draait lokaal met filesystem-rechten), maar het betekent dat een foutieve of kwaadaardige tool-aanroep in principe gevoelige bestanden zou kunnen inlezen. Geef alleen `filePath`-waarden door die je bedoelt te uploaden. Sinds KBT-B411 screent de proxy elke `filePath`-lezing: het pad wordt gecanoniciseerd (symlinks/relatieve segmenten opgelost), er geldt een **25 MiB-groottelimiet** (`MAX_FILEPATH_BYTES`, hetzelfde als de server-side `AddIssueAttachment`-cap, KBT-SR224), en bekende secret/credential-bestanden (`.env`, private keys/certs, gevoelige mapsegmenten) worden geweigerd. Er is **geen positieve map-allowlist** — elk niet-geweigerd pad binnen de limiet wordt gelezen — dus blijf zelf terughoudend met welke `filePath`-waarden je doorgeeft.
 
 > **⚠️ Client-ondersteuning — `filePath` is proxy-only (KBT-B395).** `filePath` wordt **uitsluitend** geresolved door de gebundelde `kanbantic-mcp-proxy.js`, die lokaal met filesystem-toegang draait. Alleen clients die via die proxy verbinden krijgen deze feature:
 >
@@ -393,7 +393,7 @@ Caveats: the API key is embedded **literally** in the config (treat the file as 
 
 `kanbantic-orchestrate` (see the [Skill ↔ Lane table](#skill--lane-mapping-plugin-v240)) can be started by hand, but a per-workstation launch script removes the repetitive setup: it resolves the API key the same way the proxy does, adds the channel flag, and seeds the session with the right `/kanbantic-orchestrate` invocation.
 
-> **Deferred boundary — read this first.** This script is a deliberate **bridge**, not the destination. The full **Workstation-Daemon `SpawnCommand` / Agent-Sessions integration** — a daemon that spawns and supervises orchestrator sessions automatically across workstations — is **intentionally deferred until the v0.14.0 line is mature** (see **KBT-BD151 / KBT-BD154**). Until that lands, an operator runs the launch script manually on each workstation that should participate in an autonomous run. The same caveat is repeated in the script header so it is visible at the call-site.
+> **Manual bridge, not "deferred" (KBT-F726 correction).** This script remains the manual route, but the Workstation-Daemon `SpawnCommand` / Agent-Sessions integration it used to describe as "intentionally deferred until the v0.14.0 line is mature" is **live today, not future work**: `SpawnCommandPollingService` (daemon) spawns Claude with the resolved `cwd`, `InitialPrompt`, and injected env under supervision — auto-restart included — covered by `ProcessOrchestratorIntegrationTests`, `RegisterCommandIntegrationTests`, and `RealClaudeSpawnE2ETests`. KBT-B465 is a real production spawn on a workstation; KBT-F722 (Resume) and KBT-F724 (lifecycle: Kill/Restart, exit codes, specialist registration) are both `InDeployment`. This script stays useful as the **manual** route for a one-off orchestrator run outside that daemon-managed flow — it just isn't standing in for missing functionality anymore.
 
 ### From manual launch to the script
 
@@ -401,7 +401,7 @@ Previously each workstation was started by hand:
 
 ```powershell
 $env:KANBANTIC_API_KEY = "ka_<agent>_<key>"   # if not already a User env var
-claude --dangerously-load-development-channels server:kanbantic
+claude --dangerously-load-development-channels plugin:kanbantic-claude-plugin@kanbantic
 # …then type: /kanbantic-orchestrate workspace=kanbantic initiative=KBT-INI033
 ```
 
@@ -431,7 +431,7 @@ A POSIX counterpart for macOS/Linux workstations is `plugin/scripts/launch-orche
 1. Validates `-Workspace` and `-Initiative` (fail-fast, exit 2 if missing).
 2. Resolves `KANBANTIC_API_KEY`: environment → `HKCU\Environment` (Windows). If neither yields a key it **fails fast with a clear message and a non-zero exit (3) — Claude Code is never spawned** with a missing key.
 3. Propagates the resolved key into the child environment (so a registry-only key still reaches the proxy).
-4. Launches `claude --dangerously-load-development-channels server:kanbantic` with an initial `/kanbantic-orchestrate workspace=… initiative=… [repos=…]` prompt.
+4. Launches `claude --dangerously-load-development-channels plugin:kanbantic-claude-plugin@kanbantic` with an initial `/kanbantic-orchestrate workspace=… initiative=… [repos=…]` prompt.
 
 `-DryRun` prints the resolved launch plan as a single JSON line (workspace, initiative, repos, `apiKeySource`, the `claude` args) and exits 0 **without** spawning — useful for verifying setup. The key value itself is never printed, only its presence and source.
 
@@ -442,7 +442,7 @@ A POSIX counterpart for macOS/Linux workstations is `plugin/scripts/launch-orche
 | `missing -Workspace` / `missing -Initiative` (exit 2) | Pass both parameters. |
 | `KANBANTIC_API_KEY not found … NOT started` (exit 3) | Set the User env var: `[Environment]::SetEnvironmentVariable('KANBANTIC_API_KEY','ka_<agent>_<key>','User')`, open a new terminal, retry. Verify with `reg query HKCU\Environment /v KANBANTIC_API_KEY`. |
 | `claude` not found | Install Claude Code / put it on PATH, or pass `-ClaudeExe <full-path>`. |
-| Channels don't push (user → agent) | Confirm Claude Code v2.1.80+ and that the `--dangerously-load-development-channels server:kanbantic` flag survived (the script always adds it). |
+| Channels don't push (user → agent) | Confirm Claude Code v2.1.80+ and that the `--dangerously-load-development-channels plugin:kanbantic-claude-plugin@kanbantic` flag survived (the script always adds it). |
 
 ## Troubleshooting
 

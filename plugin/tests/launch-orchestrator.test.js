@@ -90,9 +90,10 @@ test('launch-orchestrator.ps1', { skip: PWSH ? false : 'no PowerShell (pwsh/powe
     assert.equal(plan.apiKeyPresent, true);
     assert.equal(plan.apiKeySource, 'env');
     assert.equal(plan.spawned, false);
-    // The channel flag is always present; the prompt carries the parameters.
-    assert.ok(plan.claudeArgs.includes('--dangerously-load-development-channels'));
-    assert.ok(plan.claudeArgs.includes('server:kanbantic'));
+    // The channel flag+value is always present as ONE equals-form argument
+    // (KBT-B976 / KBT-SR632) — the space-form would let the CLI parser swallow
+    // the following prompt as an untagged channel entry (KBT-B242, exit 1).
+    assert.ok(plan.claudeArgs.includes('--dangerously-load-development-channels=plugin:kanbantic-claude-plugin@kanbantic'));
     assert.match(plan.prompt, /^\/kanbantic-orchestrate workspace=kanbantic initiative=KBT-INI033 repos=repoA,repoB$/);
     // The key value must NEVER appear in output.
     assert.ok(!r.stdout.includes('ka_env_abc123'), 'API key leaked into stdout');
