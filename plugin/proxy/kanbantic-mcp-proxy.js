@@ -1380,14 +1380,29 @@ async function pollRoom(channelId) {
       const current = roomSubscriptions.get(channelId);
       if (!current || shuttingDown) return;
 
-      // KBT-F719 — composite cursor: advance on (sentAt, id), not sentAt alone, so a
-      // same-timestamp tie never gets silently re-requested (and never gets stuck either —
-      // the id half breaks the tie deterministically on both ends).
-      if (msg.sentAt > current.cursorAt || (msg.sentAt === current.cursorAt && msg.id)) {
-        current.cursorAt = msg.sentAt;
-        current.cursorId = msg.id || null;
-        cursorAdvanced = true;
-      }
+      // KBT-F719 (hoofdagent-review) — composite cursor: advance unconditionally to this
+      // message, trusting the SERVER's order rather than re-deriving it here. `pollRoom`
+      // always calls get_channel_messages with `after: sub.cursorAt` set (subscribeRoom
+      // never leaves it unset), which is exclusively the ascending-(SentAt, Id) branch of
+      // AgentChannelAppService.GetMessagesAsync — so `messages` already arrives in the
+      // exact order the cursor must walk. Two comparison-based approaches were tried and
+      // rejected here:
+      //   - Comparing `sentAt` as strings (`msg.sentAt > current.cursorAt`) is fragile: the
+      //     .NET side does not guarantee fixed fractional-second precision on
+      //     serialization, so the identical instant can arrive as
+      //     "...T03:00:00Z" vs "...T03:00:00.000Z" — those compare UNEQUAL, and in the
+      //     wrong direction, as plain strings.
+      //   - Re-deriving a tiebreak from `msg.id` on the JS side does not work either: the
+      //     server's tiebreak is `Guid.CompareTo`, which does NOT sort a GUID's string
+      //     form lexicographically. Comparing id strings here can advance the cursor to a
+      //     message the server considers EARLIER in its own order, silently skipping
+      //     whatever the server considers to sit between them.
+      // Trusting iteration order sidesteps both: it never inspects sentAt's format or
+      // reimplements Guid ordering, it just walks forward exactly as far as the server
+      // already walked.
+      current.cursorAt = msg.sentAt;
+      current.cursorId = msg.id || null;
+      cursorAdvanced = true;
 
       // KBT-F719 — dedup on message id. The overlap guard above should make this
       // unreachable in steady state, but a message can also legitimately be re-delivered

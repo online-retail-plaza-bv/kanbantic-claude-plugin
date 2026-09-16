@@ -143,6 +143,114 @@ test('pollRoom: advances the composite cursor and sends afterId on the next poll
   proxy.__resetForTest();
 });
 
+test('pollRoom: a same-timestamp tie spanning two pages advances by trusting server order, not by comparing ids', async () => {
+  // hoofdagent-review (KBT-F719, PR #88 round 1) — the server's tiebreak is
+  // Guid.CompareTo, which does NOT sort a GUID's string form lexicographically.
+  // Deliberately pick ids whose STRING order is the *opposite* of the order the server
+  // places them in, so a comparison-based (wrong) fix and a trust-the-order (correct) fix
+  // disagree on the outcome, and this test can only pass with the latter.
+  proxy.__resetForTest();
+  captureSends();
+  const tie = at(0);
+  const first = message({ id: 'z-arrived-first', sentAt: tie });
+  const second = message({ id: 'm-arrived-second', sentAt: tie });
+  const third = message({ id: 'a-arrived-third', sentAt: tie }); // lexicographically smallest, but LAST in server order
+  const seenArgs = [];
+  let pageIndex = 0;
+  const pages = [[first], [second, third], []];
+  proxy.setForwardForTest(async (body) => {
+    const parsed = JSON.parse(body);
+    seenArgs.push(parsed.params.arguments);
+    const batch = pages[pageIndex] || [];
+    pageIndex++;
+    return [{
+      jsonrpc: '2.0',
+      id: parsed.id,
+      result: { content: [{ type: 'text', text: JSON.stringify({ success: true, messages: batch }) }] },
+    }];
+  });
+  proxy.subscribeRoom('chan-a', 'room-a');
+
+  await proxy.pollRoom('chan-a'); // page 1: [first]
+  await proxy.pollRoom('chan-a'); // page 2: [second, third] — third is server-last despite its id "looking" smallest
+  await proxy.pollRoom('chan-a'); // page 3: empty — just to observe what afterId this poll sent
+
+  assert.equal(seenArgs[2].afterId, 'a-arrived-third', 'the cursor lands on the LAST message the server returned, not the lexicographically-largest id');
+  proxy.__resetForTest();
+});
+
+test('pollRoom: the next poll after a tied batch sends the LAST message of that batch as afterId, regardless of id string order', async () => {
+  proxy.__resetForTest();
+  captureSends();
+  const tie = at(0);
+  const second = message({ id: 'm-arrived-second', sentAt: tie });
+  const third = message({ id: 'a-arrived-third', sentAt: tie }); // lexicographically smallest, but LAST in server order
+  const seenArgs = [];
+  let batch = [second, third];
+  proxy.setForwardForTest(async (body) => {
+    const parsed = JSON.parse(body);
+    seenArgs.push(parsed.params.arguments);
+    const out = batch;
+    batch = [];
+    return [{
+      jsonrpc: '2.0',
+      id: parsed.id,
+      result: { content: [{ type: 'text', text: JSON.stringify({ success: true, messages: out }) }] },
+    }];
+  });
+  proxy.subscribeRoom('chan-a', 'room-a');
+
+  await proxy.pollRoom('chan-a'); // delivers [second, third] in one page
+  await proxy.pollRoom('chan-a'); // asks for what comes after them
+
+  assert.equal(seenArgs[1].afterId, 'a-arrived-third', 'the cursor lands on the batch\'s last message, not the lexicographically-largest id');
+  proxy.__resetForTest();
+});
+
+test('pollRoom: a same-instant tie serialized with different fractional-second precision across polls does not stall the cursor', async () => {
+  // hoofdagent-review (KBT-F719, PR #88 round 1) — SentAt.ToString("O")-style
+  // serialization is not guaranteed to have fixed fractional-second precision; the exact
+  // same instant can round-trip as "...T03:00:00Z" from one call and
+  // "...T03:00:00.000Z" from another. A string comparison (`msg.sentAt > cursorAt`) can
+  // disagree with the true chronological/tiebreak order on inputs like these:
+  // ".000Z" < "Z" lexicographically ('.' sorts before 'Z'), so a message arriving in the
+  // fractional-second form AFTER one that arrived in the bare-"Z" form would, under a
+  // string comparison, look neither greater-than nor equal-to the current cursor — the
+  // cursor would silently STALL instead of advancing, and every subsequent poll would
+  // re-request (and, without the id-based dedup backstop, re-deliver) from that stale
+  // point forever. Two SEPARATE polls (not one batch) is deliberate: this is a
+  // cross-poll cursor-carry bug, not a same-batch ordering bug (see the two tests above
+  // for that one).
+  proxy.__resetForTest();
+  captureSends();
+  const withoutMillis = '2027-03-01T00:00:00Z'; // same instant, no fractional seconds
+  const withMillis = '2027-03-01T00:00:00.000Z'; // same instant, ".000Z" form — server-later message
+  const m1 = message({ id: 'm-1', sentAt: withoutMillis });
+  const m2 = message({ id: 'm-2', sentAt: withMillis }); // server places this AFTER m1 despite the "smaller-looking" string
+  const seenArgs = [];
+  let pageIndex = 0;
+  const pages = [[m1], [m2], []];
+  proxy.setForwardForTest(async (body) => {
+    const parsed = JSON.parse(body);
+    seenArgs.push(parsed.params.arguments);
+    const batch = pages[pageIndex] || [];
+    pageIndex++;
+    return [{
+      jsonrpc: '2.0',
+      id: parsed.id,
+      result: { content: [{ type: 'text', text: JSON.stringify({ success: true, messages: batch }) }] },
+    }];
+  });
+  proxy.subscribeRoom('chan-a', 'room-a');
+
+  await proxy.pollRoom('chan-a'); // page 1: [m1] — cursor becomes m1
+  await proxy.pollRoom('chan-a'); // page 2: [m2] — cursor must become m2, not stall at m1
+  await proxy.pollRoom('chan-a'); // page 3: empty — observe what afterId this poll sent
+
+  assert.equal(seenArgs[2].afterId, 'm-2', 'the cursor advances past a differently-formatted same-instant message instead of stalling');
+  proxy.__resetForTest();
+});
+
 test('pollRoom: AgentChannel.Archived is terminal — the room is marked archived and never polled again', async () => {
   proxy.__resetForTest();
   captureSends();
