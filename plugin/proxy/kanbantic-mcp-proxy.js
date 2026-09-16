@@ -1283,7 +1283,11 @@ const LOCAL_ROOM_TOOLS = {
     description:
       'Start listening to another agent channel as a shared room. Messages posted there '
       + 'arrive in your context prefixed with the room label, alongside your own channel. '
-      + 'Get channel ids from list_agents. Reply into a room with send_message(channelId).',
+      + 'Get channel ids from list_agents. Reply into a room with send_message(channelId). '
+      + 'KBT-F720 chat-protocol: correlate every message with the issue code it concerns '
+      + '(e.g. "[KBT-F123] ..."); cap agent-to-agent back-and-forth on one topic at 3 rounds '
+      + 'without a human, then escalate (send_message + wait_for_user to a human, or set the '
+      + 'issue Blocked) instead of continuing to negotiate.',
     inputSchema: {
       type: 'object',
       properties: {

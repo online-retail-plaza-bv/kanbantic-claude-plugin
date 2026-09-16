@@ -69,6 +69,8 @@ apply to Epic-walks; their ownership (orchestrator vs. executing agent) is track
 in **[OPEN: KBT-F582]** — see `kanbantic-orchestrate`. This table is the full
 continue-statusmelding call-set from v3 **§5.3** — no calls are missing.
 
+**Human input mid-execution (KBT-F720).** If you hit a genuine blocker that needs a human decision (not covered by the Blocked/OnHold side-states below, which are for external/deliberate pauses, not for "I need an answer"), do not just sit on `report_status("WaitingForInput")` and wait at the terminal — this skill is routinely invoked unattended (`kanbantic-orchestrate`, a spawned worktree run). Post the question in your own channel (`send_message`) first, then `wait_for_user`, then end your turn; on a reply, `resume_working`. Full protocol — including the agent-to-agent escalation path and the no-push polling fallback — is Toolkit **Rule KBT-TRUL041**, loaded via the Rule-category pull in Step 3b.
+
 ## Model-selectie — goedkoopste-capabele per rol (v3 §5.6)
 
 **Kernprincipe:** gebruik altijd het **lichtste model dat de taak aankan**; escaleer pas als het lichtere **aantoonbaar tekortschiet**. Wissel per subtaak/rol — dit geldt zowel voor de hoofd-Agent die deze skill draait als voor elke subagent die hij dispatcht (zie Subagent Mode, verderop).
