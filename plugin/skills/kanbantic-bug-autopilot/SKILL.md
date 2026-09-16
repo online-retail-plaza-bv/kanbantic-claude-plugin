@@ -85,9 +85,10 @@ Priority order:
 
 ```
 MCP: mcp__kanbantic__list_toolkit_items(workspaceId: <workspaceId>, category: "ClaudeMd")
+MCP: mcp__kanbantic__list_toolkit_items(workspaceId: <workspaceId>, category: "Rule")
 ```
 
-Read **all** returned items fully and carefully. They contain conventions, rules, and decisions you **must** follow. Do not skip any item. Toolkit rules are law.
+Read **all** returned items fully and carefully. They contain conventions, rules, and decisions you **must** follow. Do not skip any item. Toolkit rules are law — this is where the chat-protocol Rule (KBT-TRUL041, KBT-F720) and any workspace-specific Rules live.
 
 ### Step 0d: Fetch the Live Workflow
 
@@ -190,6 +191,16 @@ MCP: mcp__kanbantic__report_status(sessionId: <sessionId>, status: "Working", su
 <HARD-GATE>
 Never skip a lane or step based on assumption — even if the current issue content looks sufficient for the next lane. Every lane-skill performs its own checks, **which is only true when you actually invoke it** — performing a lane's work yourself silently skips those checks. When in doubt about the workflow, re-read what you fetched in Step 0d and consult the Toolkit before proceeding.
 </HARD-GATE>
+
+### Human input during an unattended run — use the channel, not the terminal (KBT-F720)
+
+This skill is designed to run **unattended** — nobody is necessarily watching the terminal. If a lane-skill genuinely needs a human decision mid-batch (an ambiguous no-go, a conflicting spec, anything that would otherwise leave the run just sitting on `report_status("WaitingForInput")` with no one to see it), do not rely on the terminal to be watched:
+
+1. Post the actual question in your own channel: `send_message(channelId: <own channelId>, content: "<question>")`.
+2. Call `wait_for_user(sessionId, prompt: "<short version>")` — this only sets status for `/agent-sessions`, it does not post anything itself (step 1 is not optional).
+3. End your turn. On a reply, `resume_working` and continue with the next bug or the current lane.
+
+Full protocol (identity verification, agent-to-agent escalation, the no-push polling fallback): Toolkit **Rule KBT-TRUL041** ("Agent chat-protocol"), loaded via `list_toolkit_items(category: "Rule")` in Step 0c.
 
 ---
 

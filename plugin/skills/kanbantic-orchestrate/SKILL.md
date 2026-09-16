@@ -132,6 +132,16 @@ orchestrator bootstraps the Epic **once**, before routing any child:
 This is the **only** claim/branch action the orchestrator performs; child
 Feature/Bug claims + branches remain owned by `kanbantic-issue-execute`.
 
+### Agent ↔ agent overleg voor hand-offs (optioneel, KBT-F720)
+
+Draait deze sequencer-run naast een andere agent die aan een gerelateerd issue werkt (bv. een parallelle fan-out over Features van dezelfde Epic — [Step 3.5](#step-35-epic-bootstrap-parallel-fan-out-kbt-f581)), dan mag de orchestrator via channels overleggen in plaats van blind door te sequencen op status alleen:
+
+1. Ontdek de andere sessie via `list_agents(workspaceId, onlyActive: true)`.
+2. Post de vraag in HAAR channel, gecorreleerd met de issue-code (`send_message(channelId: <target.channelId>, content: "[KBT-Fxxx] ...")`); verwacht het antwoord in je eigen channel.
+3. **Maximaal 3 heen-en-weer-rondes** zonder mens; daarna verplicht escaleren (`send_message` + `wait_for_user` naar een mens, of het issue op `Blocked` zetten) — nooit zelf verder onderhandelen.
+
+Dit is **optioneel** en vervangt de bestaande status-/Comment-gebaseerde coördinatie niet — het is een extra kanaal voor een hand-off die anders op een polling-interval van "opnieuw `get_issue`" zou wachten. Volledig protocol (identiteitsverificatie, geen-push-fallback, etiquette): Toolkit **Rule KBT-TRUL041**, geladen in Step 2 via `bootstrap_agent`/`get_context` en expliciet doorzoekbaar via `list_toolkit_items(category: "Rule", search: "chat-protocol")`.
+
 ## Checklist
 
 1. **Resolve parameters** — `{workspace, initiative, repos}` (HARD GATE on workspace + initiative).

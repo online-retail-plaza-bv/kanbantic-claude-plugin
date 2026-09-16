@@ -70,6 +70,8 @@ Since the proxy caches the active session per process (KBT-F717 / KBT-SR620), th
 
 **KBT-F717 — this skill never calls `end_agent_session`.** Reviewing and merging this issue is not the end of the process — report completion of your own turn with `report_status(sessionId, status: "Idle")` if useful, but do not close the session. Only real process termination (SIGINT/SIGTERM/stdin-end) or an explicit user action ends it.
 
+**Human input mid-review (KBT-F720).** A rejection/fix-loop or an ambiguous finding that needs a PO/human call should not just sit silently — this skill is often invoked unattended (`kanbantic-orchestrate`, a spawned review run). Post the question in your own channel (`send_message`) before `wait_for_user`, then end your turn; `resume_working` on reply. Full protocol: Toolkit **Rule KBT-TRUL041**, loaded via the Rule-category pull in this skill's knowledge-loading step.
+
 **0b. Verify local access to the workspace's code repository:**
 
 1. Run `git remote -v` to check if you're in a git repository

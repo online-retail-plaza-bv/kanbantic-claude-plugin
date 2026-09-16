@@ -100,6 +100,8 @@ Dit is aanvullend op de bestaande Decision-entries uit Step 6/6a — het board-s
 
 **Heartbeat is automatisch.** De proxy vernieuwt zelf elke 90s de `LastSeen` van de sessie zolang het proces verbonden blijft (KBT-B470) — een periodieke `heartbeat`-aanroep vanuit deze skill was dubbel werk en is verwijderd.
 
+**Mens-input: terminal vs. channel (KBT-F720).** De requirements-dialoog (Step 5F.1 e.v.) gebruikt `AskUserQuestion`, wat een mens live aan de terminal aanneemt. Draait deze run onbewaakt (via `kanbantic-orchestrate`): post de vraag eerst in het eigen channel (`send_message`) en gebruik dan `wait_for_user` in plaats van alleen op de terminal te wachten. Volledig protocol: Toolkit **Rule KBT-TRUL041**, geladen in Step 3 via de Rule-categorie.
+
 ## Step 0: Ensure Repository Access
 
 Before starting, verify you have local access to the workspace's code repository:

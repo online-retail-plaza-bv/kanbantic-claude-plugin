@@ -71,6 +71,8 @@ register_agent_session ─▶ set_current_issue ─▶ [dialoog + metadata-updat
 
 **KBT-F717 — nooit `end_agent_session` aan het einde van triage.** Dit issue is klaar; het proces niet — er volgt vaak meteen `kanbantic-issue-prepare` in dezelfde run. `end_agent_session` zou de chat van de rest van de run afsluiten. Meld afronding met `report_status(status: "Idle")` + `set_current_issue(issueId: null)`.
 
+**Mens-input: terminal vs. channel (KBT-F720).** `AskUserQuestion` in Step 4/5a hierboven neemt aan dat een mens de terminal live meeleest — de normale situatie voor een interactieve triage-dialoog. Draait deze run onbewaakt (aangeroepen door `kanbantic-orchestrate` of `kanbantic-bug-autopilot` zonder mens aan de terminal) en is er toch een go/no-go-beslissing die niet zonder mens kan: post de vraag eerst in het eigen channel (`send_message`) en gebruik dan `wait_for_user` — niet alleen `report_status("WaitingForInput")`, dat zet enkel status en post niets. Volledig protocol: Toolkit **Rule KBT-TRUL041**.
+
 ## Checklist
 
 1. **Load issue** — `get_issue`
