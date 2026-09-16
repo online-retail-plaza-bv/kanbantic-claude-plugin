@@ -97,6 +97,58 @@ test('autoRegister: host falls back to os.hostname(); optional ids omitted when 
   assert.ok(!('spawnCommandId' in args));
 });
 
+test('KBT-F722 — autoRegister includes claudeCliSessionId when CLAUDE_CODE_SESSION_ID is set', async () => {
+  process.env.KANBANTIC_WORKSPACE_ID = 'ws-1';
+  process.env.KANBANTIC_API_KEY = 'ka_test';
+  process.env.CLAUDE_CODE_SESSION_ID = 'cli-abc';
+  proxy.__resetForTest();
+
+  const forwarded = [];
+  proxy.setForwardForTest(async (body) => {
+    const msg = JSON.parse(body);
+    forwarded.push(msg);
+    return [{
+      jsonrpc: '2.0', id: msg.id,
+      result: { content: [{ type: 'text', text: JSON.stringify({ success: true, sessionId: 's3', channelId: 'c3' }) }] },
+    }];
+  });
+
+  try {
+    await proxy.autoRegister();
+    proxy.stopInboxPoll();
+    assert.strictEqual(forwarded[0].params.arguments.claudeCliSessionId, 'cli-abc');
+  } finally {
+    try { fs.unlinkSync(proxy.sessionFilePath()); } catch { /* may not exist */ }
+    delete process.env.CLAUDE_CODE_SESSION_ID;
+  }
+});
+
+test('KBT-F722 — autoRegister omits claudeCliSessionId when CLAUDE_CODE_SESSION_ID is unset (MUTATION CHECK baseline)', async () => {
+  process.env.KANBANTIC_WORKSPACE_ID = 'ws-1';
+  process.env.KANBANTIC_API_KEY = 'ka_test';
+  delete process.env.CLAUDE_CODE_SESSION_ID;
+  proxy.__resetForTest();
+
+  const forwarded = [];
+  proxy.setForwardForTest(async (body) => {
+    const msg = JSON.parse(body);
+    forwarded.push(msg);
+    return [{
+      jsonrpc: '2.0', id: msg.id,
+      result: { content: [{ type: 'text', text: JSON.stringify({ success: true, sessionId: 's4', channelId: 'c4' }) }] },
+    }];
+  });
+
+  await proxy.autoRegister();
+  proxy.stopInboxPoll();
+  try { fs.unlinkSync(proxy.sessionFilePath()); } catch { /* may not exist */ }
+
+  // MUTATION CHECK: if the `if (process.env.CLAUDE_CODE_SESSION_ID) args.claudeCliSessionId = ...`
+  // guard were replaced with an unconditional assignment, this would be an empty-string/undefined
+  // key present on args instead of omitted entirely — 'in' catches both mutations.
+  assert.ok(!('claudeCliSessionId' in forwarded[0].params.arguments));
+});
+
 test('autoRegister: 403 failure does not crash (finite retry, slot claimed)', async () => {
   process.env.KANBANTIC_WORKSPACE_ID = 'ws-1';
   process.env.KANBANTIC_API_KEY = 'ka_test';
