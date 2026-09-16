@@ -276,6 +276,12 @@ async function dispatch(line) {
   // trap: a mutation that never reaches the forwarded body).
   const tokenAttached = attachProcessTokenToRegisterCall(msg);
 
+  // KBT-F718 fast-follow — inject this session's own id into an outbound send_message
+  // call so the server uses F718's explicit-sender path instead of its guessing fallback.
+  // Must feed the same "forward the re-serialized message" decision as the other
+  // mutations here, or the attached id is silently dropped (KBT-GTCH149-style trap).
+  const fromSessionIdAttached = attachFromSessionIdToSendMessageCall(msg);
+
   // KBT-F464: resolve a filePath argument into content before forwarding. On an
   // ambiguity / unreadable-file error, respond with a JSON-RPC error and do NOT
   // forward. On success, the message's arguments are mutated in place and the
@@ -289,7 +295,7 @@ async function dispatch(line) {
     }
     return;
   }
-  const bodyToForward = (fp.mutated || tokenAttached) ? JSON.stringify(msg) : line;
+  const bodyToForward = (fp.mutated || tokenAttached || fromSessionIdAttached) ? JSON.stringify(msg) : line;
 
   try {
     const responses = await forward(bodyToForward);
@@ -474,6 +480,29 @@ function attachProcessTokenToRegisterCall(msg) {
   }
   if (msg.params.arguments.processToken) return false; // caller already set one — don't clobber
   msg.params.arguments.processToken = PROCESS_TOKEN;
+  return true;
+}
+
+// KBT-F718 fast-follow — send_message's explicit-sender path (fromSessionId) only helps if
+// something actually populates it. Before this, EVERY call fell back to the server's
+// heuristic (AgentChannelAppService.ResolveAgentSessionIdAsync's "most recently seen
+// non-Done/Stale session of the same ClaudeAgentId"), which is exactly the guesswork KBT-F718
+// built the explicit path to replace — an agent with two active sessions (two processes/
+// workstations under the same identity) could have a message misattributed to the wrong one.
+// The proxy is the one place that reliably knows ITS OWN sessionId (captured at register
+// time, KBT-F717), so it injects it automatically: the model never has to know this
+// parameter exists, and an explicit override the caller DID set (rare, but not this proxy's
+// call to forbid) is never clobbered.
+function attachFromSessionIdToSendMessageCall(msg) {
+  if (!msg || msg.method !== 'tools/call' || !msg.params || msg.params.name !== 'send_message') {
+    return false;
+  }
+  if (!agentSessionId) return false; // not registered yet — nothing to inject, forward as-is
+  if (!msg.params.arguments || typeof msg.params.arguments !== 'object') {
+    msg.params.arguments = {};
+  }
+  if (msg.params.arguments.fromSessionId) return false; // caller already set one — don't clobber
+  msg.params.arguments.fromSessionId = agentSessionId;
   return true;
 }
 
@@ -1664,6 +1693,8 @@ module.exports = {
   postProcess,
   handleRegisterAgentSessionShortCircuit,
   attachProcessTokenToRegisterCall,
+  // KBT-F718 fast-follow — exported for testing the automatic fromSessionId injection.
+  attachFromSessionIdToSendMessageCall,
   sessionFilePath,
   writeSessionFile,
   removeSessionFile,
