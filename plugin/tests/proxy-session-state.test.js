@@ -16,25 +16,27 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const proxy = require('../proxy/kanbantic-mcp-proxy');
 
-// A PID that is guaranteed to no longer exist: spawn a trivial child, let it
-// exit, and reuse its (now-free) pid. Far more reliable than guessing a large
-// constant, which could theoretically collide with something real.
-// A PID that is guaranteed to no longer exist: spawn a trivial child, let it exit,
-// and reuse its (now-free) pid. KBT-F717 (CI flake, Linux runner): under enough PID
-// churn a freed pid can be handed to an unrelated process before this function
-// returns, making `proxy.isPidAlive(pid)` see the wrong process and report `true`.
-// Verify immediately (using the SAME production isPidAlive the test will assert
-// against) and retry with a fresh child on the rare occasions that happens, rather
-// than trusting a single spawn.
+// A PID that is guaranteed to no longer exist. KBT-F717 (CI flake, Linux runner,
+// second occurrence): the original implementation spawned a trivial child, let it
+// exit, and reused its (now-free) pid. That is NOT safe on a busy CI runner: under
+// enough PID churn the OS can hand that exact pid to an unrelated process in the
+// window between "the child exited" and "staleSessionFileCleanup() calls
+// isPidAlive() on it" — verifying once at pid-acquisition time (the first attempted
+// fix) does not close that window, it only narrows it, and it still flaked in CI.
+//
+// A deterministic, always-out-of-range sentinel closes the window entirely instead
+// of narrowing it: Linux caps PID_MAX_LIMIT at 2^22 (4 194 304) even on a kernel
+// configured for the maximum; Windows process ids are also always far below this.
+// A number past that ceiling can NEVER be a real, currently-assigned pid on either
+// platform — there is no reuse race to lose, because no live process can ever hold
+// this number. Empirically confirmed on this (Windows) dev machine: `process.kill
+// (999_999_999, 0)` throws `ESRCH` — exactly the "definitively dead" signal
+// isPidAlive() requires, with zero dependency on OS process-table timing.
+const GUARANTEED_INVALID_PID = 999_999_999;
 function getKnownDeadPid() {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const result = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-    if (proxy.isPidAlive(result.pid) === false) return result.pid;
-  }
-  throw new Error('getKnownDeadPid: could not obtain a verifiably-dead pid after 5 attempts');
+  return GUARANTEED_INVALID_PID;
 }
 
 function toolCallMsg(name, args, id = 1) {
@@ -355,7 +357,7 @@ test('KBT-SR622-2 — staleSessionFileCleanup removes ONLY the file whose record
   }
 });
 
-test('KBT-SR622-3 — isPidAlive: own pid alive, spawned-then-exited pid dead, non-integer unknown', () => {
+test('KBT-SR622-3 — isPidAlive: own pid alive, guaranteed-invalid pid dead, non-integer unknown', () => {
   assert.strictEqual(proxy.isPidAlive(process.pid), true);
   assert.strictEqual(proxy.isPidAlive(getKnownDeadPid()), false);
   assert.strictEqual(proxy.isPidAlive(null), null);
