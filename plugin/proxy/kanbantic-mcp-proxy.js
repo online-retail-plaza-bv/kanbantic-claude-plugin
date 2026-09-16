@@ -80,13 +80,67 @@ const INBOX_POLL_INTERVAL_MS = 1000;
 // only thing standing in the way was this proxy's single-channel inbox — one variable,
 // one cursor. It becomes one subscription per channel:
 //
-//   Map<channelId, { cursor: ISO string, label: string, home: boolean }>
+//   Map<channelId, {
+//     cursorAt: ISO string,      // KBT-F719 — renamed from `cursor`: paired with cursorId
+//                                // below, this is now a composite (SentAt, Id) cursor, not
+//                                // a bare timestamp — see get_channel_messages(afterId).
+//     cursorId: string|null,     // message id half of the composite cursor
+//     label: string,
+//     home: boolean,
+//     failCount: number,         // KBT-F719 — consecutive poll failures, for backoff
+//     nextRetryAt: number,       // KBT-F719 — Date.now() ms; polling this channel is
+//                                // skipped until this passes (backoff-with-jitter)
+//     archived: boolean,         // KBT-F719 — server said AgentChannel.Archived; stop
+//                                // retrying a channel that can never succeed again
+//                                // instead of backing off forever on a dead end
+//                                // (KBT-F721 finding: end_agent_session archives the
+//                                // channel server-side — a permanent, not transient, state)
+//   }>
 //
 // The cap is deliberate: this is the knob the spike exists to measure. Every subscribed
 // room pushes into the same context window, so "how many rooms before the agent loses
 // the thread" is the question, not an implementation detail to hide.
 const roomSubscriptions = new Map();
 const MAX_ROOM_SUBSCRIPTIONS = 8;
+
+// KBT-F719 — overlap guard: a single `get_channel_messages` call is allowed up to 120s
+// (forward()'s own timeout), but the poll interval is 1s. Without this, a slow request
+// plus the next setInterval tick firing anyway meant two concurrent polls of the same
+// channel with the SAME (not-yet-advanced) cursor — i.e. every message in flight during
+// the slow request got pushed to the host TWICE. `pollInbox` is now a no-op while a
+// previous invocation is still running; the timer keeps ticking, but overlapping ticks
+// just skip instead of racing.
+let pollInFlight = false;
+
+// KBT-F719 — bounded dedup, belt-and-suspenders on top of the cursor fix above. Two
+// independent causes could still hand the same messageId to `__sendImpl` twice: a
+// process restart that resumes from a slightly-stale persisted cursor (deliberately
+// erring toward "maybe one repeat" rather than "maybe a gap" — see
+// loadPersistedCursor()), or a future code path this file doesn't anticipate yet. A
+// small LRU (Set, insertion-ordered, capped) means a genuine duplicate is dropped
+// instead of re-delivered, without growing unbounded over a long session.
+const recentlySeenMessageIds = new Set();
+const RECENTLY_SEEN_CAP = 500;
+function rememberMessageId(id) {
+  if (recentlySeenMessageIds.has(id)) return false; // already seen — caller should skip it
+  recentlySeenMessageIds.add(id);
+  if (recentlySeenMessageIds.size > RECENTLY_SEEN_CAP) {
+    // Map/Set iteration order is insertion order — the first key is the oldest.
+    recentlySeenMessageIds.delete(recentlySeenMessageIds.values().next().value);
+  }
+  return true; // not seen before — caller should deliver it
+}
+
+// KBT-F719 — backoff-with-jitter tuning. A network blip must never mean "stop polling
+// silently forever" (the Epic's own complaint about this proxy) NOR "hammer a down
+// server every 1s". Exponential, capped, with jitter so many concurrently-recovering
+// rooms do not all retry on the exact same tick.
+const BACKOFF_BASE_MS = 1000;
+const BACKOFF_MAX_MS = 30_000;
+function computeBackoffMs(failCount) {
+  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, failCount - 1));
+  return exp + Math.floor(Math.random() * BACKOFF_BASE_MS); // jitter: up to +1 base interval
+}
 // KBT-B470 — keep-alive heartbeat. The backend stale-sweep marks a session Stale after
 // HeartbeatTimeoutSeconds (300s) of no LastSeen refresh, archiving its channel and dropping it
 // from /agent-sessions. An idle spawned agent never calls the heartbeat tool itself, so the
@@ -477,6 +531,8 @@ function __resetForTest() {
   roomSubscriptions.clear(); // SPIKE (multi-room)
   __sendImpl = send;
   PROCESS_TOKEN = crypto.randomUUID(); // KBT-F717 — fresh per-process token per test
+  pollInFlight = false; // KBT-F719 — a test must never inherit a stuck in-flight guard
+  recentlySeenMessageIds.clear(); // KBT-F719 — dedup set must not leak ids across tests
 }
 
 // KBT-B470 — test hook: set the active session id so sendHeartbeat() can be exercised in isolation.
@@ -874,12 +930,22 @@ function sessionFilePath() {
 
 function writeSessionFile() {
   if (!agentSessionId || !agentChannelId) return;
+  // KBT-F719 — persist each subscribed channel's composite cursor so a restarted proxy for
+  // this SAME logical session (same CLAUDE_CODE_SESSION_ID, see sessionFilePath()) can resume
+  // exactly where it left off via loadPersistedCursor() instead of defaulting to 'now' (a gap)
+  // or re-reading from empty (a replay). Built fresh from roomSubscriptions on every write —
+  // no separate tracking to keep in sync.
+  const cursors = {};
+  for (const [channelId, sub] of roomSubscriptions.entries()) {
+    if (sub.cursorAt) cursors[channelId] = { at: sub.cursorAt, id: sub.cursorId };
+  }
   const payload = {
     sessionId: agentSessionId,
     channelId: agentChannelId,
     apiUrl: deriveApiUrl(),
     writtenAt: new Date().toISOString(),
     pid: process.pid, // KBT-F717 — liveness check for staleSessionFileCleanup(); NOT an identity key
+    cursors,
   };
   try {
     fs.writeFileSync(sessionFilePath(), JSON.stringify(payload, null, 2), { encoding: 'utf8' });
@@ -1095,6 +1161,28 @@ async function sendHeartbeat() {
 
 // --- room subscriptions -----------------------------------------------------
 
+// KBT-F719 — resume without a gap or a replay after a proxy restart. The session file
+// (KBT-F717, keyed by CLAUDE_CODE_SESSION_ID so it is STABLE across a crash-respawn of
+// the same logical Claude Code session, not per proxy-process) already persists
+// sessionId/channelId; this reads back whatever cursor a PREVIOUS instance of this same
+// session last wrote for `channelId`, before falling back to "now" for a genuinely new
+// subscription. Never throws — a missing/corrupt/mismatched file just means "no
+// persisted cursor", the same as before this feature existed.
+function loadPersistedCursor(channelId) {
+  try {
+    const raw = fs.readFileSync(sessionFilePath(), { encoding: 'utf8' });
+    const payload = JSON.parse(raw);
+    // Paranoia: only trust a cursor written by THIS session, matched by both ids —
+    // a stale/foreign file must never seed a wrong channel's cursor.
+    if (payload.sessionId !== agentSessionId) return null;
+    const saved = payload.cursors && payload.cursors[channelId];
+    if (!saved || typeof saved.at !== 'string') return null;
+    return { at: saved.at, id: typeof saved.id === 'string' ? saved.id : null };
+  } catch {
+    return null; // no file, unreadable, or malformed — fall back to "now"
+  }
+}
+
 function subscribeRoom(channelId, label, { home = false } = {}) {
   if (!channelId || typeof channelId !== 'string') {
     return { ok: false, reason: 'channelId is required' };
@@ -1110,13 +1198,26 @@ function subscribeRoom(channelId, label, { home = false } = {}) {
       reason: `already listening to ${MAX_ROOM_SUBSCRIPTIONS} rooms (spike cap) — leave one first`,
     };
   }
+  // KBT-F719 — resume from a persisted cursor (proxy restart, same logical session) if
+  // one exists; otherwise start at 'now' exactly as before (joining a room must never
+  // replay its backlog into context — history stays reachable on demand via
+  // get_channel_messages(before: ...)).
+  const persisted = loadPersistedCursor(channelId);
   roomSubscriptions.set(channelId, {
-    // Start at 'now': joining a room must never replay its backlog into context.
-    // History stays reachable on demand via get_channel_messages(before: ...).
-    cursor: new Date().toISOString(),
+    cursorAt: persisted ? persisted.at : new Date().toISOString(),
+    cursorId: persisted ? persisted.id : null,
     label: label || (home ? 'home' : `room-${channelId.slice(0, 8)}`),
     home,
+    failCount: 0,
+    nextRetryAt: 0,
+    archived: false,
   });
+  if (persisted) {
+    process.stderr.write(
+      `[kanbantic-proxy] resuming channel ${channelId} from persisted cursor ${persisted.at} ` +
+      `(no gap, no replay across the restart)\n`
+    );
+  }
   startInboxPoll();
   return { ok: true, alreadyJoined: false, channelId, label: roomSubscriptions.get(channelId).label };
 }
@@ -1136,7 +1237,8 @@ function listRooms() {
     channelId,
     label: s.label,
     home: s.home,
-    cursor: s.cursor,
+    cursor: s.cursorAt, // wire-compat name; composite id half is internal (cursorId)
+    archived: s.archived,
   }));
 }
 
@@ -1214,33 +1316,100 @@ function injectRoomToolsIntoList(response) {
 
 async function pollInbox() {
   if (shuttingDown || roomSubscriptions.size === 0) return;
-  // Snapshot the keys: a leave_room issued while an await is in flight must not be
-  // undone by a drain that is still walking the old set.
-  for (const channelId of [...roomSubscriptions.keys()]) {
-    await pollRoom(channelId);
+  // KBT-F719 — overlap guard: a single tick must never start a second wave of
+  // get_channel_messages calls while a previous tick (any one call of which can take up to
+  // 120s — see callInternalTool/forward's timeout) is still in flight. Without this, the 1s
+  // setInterval firing on schedule regardless of in-flight work is exactly what caused
+  // duplicate delivery of the SAME message via overlapping polls.
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
+    // Snapshot the keys: a leave_room issued while an await is in flight must not be
+    // undone by a drain that is still walking the old set.
+    for (const channelId of [...roomSubscriptions.keys()]) {
+      await pollRoom(channelId);
+    }
+  } finally {
+    pollInFlight = false;
   }
 }
 
 async function pollRoom(channelId) {
-  if (shuttingDown || !roomSubscriptions.has(channelId)) return;
+  const sub = roomSubscriptions.get(channelId);
+  if (shuttingDown || !sub) return;
+  if (sub.archived) return; // KBT-F719 — permanently ended channel (end_agent_session
+  // archives it server-side, KBT-F721 finding); retrying forever would just burn a poll
+  // slot and eventually re-log the same terminal error every tick.
+  if (sub.nextRetryAt && Date.now() < sub.nextRetryAt) return; // backing off from a prior failure
 
   try {
     const result = await callInternalTool('get_channel_messages', {
       channelId,
-      after: roomSubscriptions.get(channelId).cursor,
+      after: sub.cursorAt,
+      afterId: sub.cursorId || undefined, // KBT-F719 — composite cursor tiebreak
       maxResults: 50,
     });
 
-    if (!result || !result.success) return;
+    if (!result || !result.success) {
+      // KBT-F719 — a permanently archived channel (end_agent_session already ran) is a
+      // terminal condition, not a transient failure: back off forever, once, with a clear
+      // log line, instead of retrying every tick until the process exits.
+      const msg = (result && result.errorMessage) || '';
+      if (msg.includes('AgentChannel.Archived')) {
+        sub.archived = true;
+        process.stderr.write(
+          `[kanbantic-proxy] channel ${channelId} (${sub.label}) is archived (session ended) — ` +
+          `stopping polls for this room\n`
+        );
+        return;
+      }
+      recordPollFailure(sub, `get_channel_messages returned success=false: ${msg || '(no errorMessage)'}`, channelId);
+      return;
+    }
+
+    // A successful call clears any prior backoff — the channel is reachable again.
+    sub.failCount = 0;
+    sub.nextRetryAt = 0;
+
     const messages = result.messages || [];
     if (messages.length === 0) return;
 
+    let cursorAdvanced = false;
     for (const msg of messages) {
       // Re-read every iteration: the subscription can disappear mid-drain.
-      const sub = roomSubscriptions.get(channelId);
-      if (!sub || shuttingDown) return;
+      const current = roomSubscriptions.get(channelId);
+      if (!current || shuttingDown) return;
 
-      if (msg.sentAt > sub.cursor) sub.cursor = msg.sentAt;
+      // KBT-F719 (hoofdagent-review) — composite cursor: advance unconditionally to this
+      // message, trusting the SERVER's order rather than re-deriving it here. `pollRoom`
+      // always calls get_channel_messages with `after: sub.cursorAt` set (subscribeRoom
+      // never leaves it unset), which is exclusively the ascending-(SentAt, Id) branch of
+      // AgentChannelAppService.GetMessagesAsync — so `messages` already arrives in the
+      // exact order the cursor must walk. Two comparison-based approaches were tried and
+      // rejected here:
+      //   - Comparing `sentAt` as strings (`msg.sentAt > current.cursorAt`) is fragile: the
+      //     .NET side does not guarantee fixed fractional-second precision on
+      //     serialization, so the identical instant can arrive as
+      //     "...T03:00:00Z" vs "...T03:00:00.000Z" — those compare UNEQUAL, and in the
+      //     wrong direction, as plain strings.
+      //   - Re-deriving a tiebreak from `msg.id` on the JS side does not work either: the
+      //     server's tiebreak is `Guid.CompareTo`, which does NOT sort a GUID's string
+      //     form lexicographically. Comparing id strings here can advance the cursor to a
+      //     message the server considers EARLIER in its own order, silently skipping
+      //     whatever the server considers to sit between them.
+      // Trusting iteration order sidesteps both: it never inspects sentAt's format or
+      // reimplements Guid ordering, it just walks forward exactly as far as the server
+      // already walked.
+      current.cursorAt = msg.sentAt;
+      current.cursorId = msg.id || null;
+      cursorAdvanced = true;
+
+      // KBT-F719 — dedup on message id. The overlap guard above should make this
+      // unreachable in steady state, but a message can also legitimately be re-delivered
+      // by the SERVER's own >= widening around an exact-timestamp tie (see
+      // AgentChannelAppService.GetMessagesAsync) — this is the client-side backstop that
+      // makes double-delivery impossible regardless of cause.
+      if (msg.id && !rememberMessageId(msg.id)) continue;
 
       // Skip messages authored by the same session — those are our own outbound
       // posts coming back through the channel.
@@ -1250,7 +1419,7 @@ async function pollRoom(channelId) {
       // keep several concurrent rooms apart is the whole question this spike asks, and
       // meta is not guaranteed to reach it — so for a non-home room the origin is made
       // literal. The home channel keeps its exact current wire format.
-      const content = sub.home ? msg.content : `[${sub.label}] ${msg.content}`;
+      const content = current.home ? msg.content : `[${current.label}] ${msg.content}`;
 
       __sendImpl({
         jsonrpc: '2.0',
@@ -1266,15 +1435,31 @@ async function pollRoom(channelId) {
             sent_at: msg.sentAt,
             message_id: msg.id,
             channel_id: msg.channelId,
-            room_label: sub.label,
-            room_is_home: sub.home,
+            room_label: current.label,
+            room_is_home: current.home,
           },
         },
       });
     }
+
+    // KBT-F719 — persist the advanced cursor so a proxy restart of this SAME logical
+    // session resumes here instead of at 'now' (a gap) or at the old cursor (a replay).
+    if (cursorAdvanced) writeSessionFile();
   } catch (e) {
-    process.stderr.write(`[kanbantic-proxy] inbox-poll error (${channelId}): ${e.message}\n`);
+    recordPollFailure(sub, e.message, channelId);
   }
+}
+
+// KBT-F719 — shared backoff-with-jitter bookkeeping for both the "tool call returned
+// success=false" and the "tool call threw" paths. Never disables the room outright (only
+// a confirmed AgentChannel.Archived does that) — a network blip must self-heal.
+function recordPollFailure(sub, message, channelId) {
+  sub.failCount = (sub.failCount || 0) + 1;
+  sub.nextRetryAt = Date.now() + computeBackoffMs(sub.failCount);
+  process.stderr.write(
+    `[kanbantic-proxy] inbox-poll error (${channelId}), backing off ${sub.nextRetryAt - Date.now()}ms ` +
+    `(failCount=${sub.failCount}): ${message}\n`
+  );
 }
 
 // callInternalTool: invokes a tool/call against the server WITHOUT going through
@@ -1487,4 +1672,11 @@ module.exports = {
   __setFullSessionForTest,
   __getSessionForTest,
   __getProcessTokenForTest,
+  // KBT-F719 — exported for testing overlap guard, dedup, backoff, archived-channel
+  // handling, and cursor persistence/resume.
+  pollRoom,
+  computeBackoffMs,
+  rememberMessageId,
+  loadPersistedCursor,
+  __isPollInFlightForTest: () => pollInFlight,
 };
