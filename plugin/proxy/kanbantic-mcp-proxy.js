@@ -65,6 +65,9 @@ let shuttingDown = false;
 // Agent Communication Hub state (set after register_agent_session succeeds).
 let agentSessionId = null;       // Kanbantic AgentSession.Id
 let agentChannelId = null;       // Home channel — the 1:1 AgentChannel of this session
+let agentWorkspaceId = null;     // KBT-F717 (hoofdagent-review) — the workspaceId this session was
+                                  // registered for; register_agent_session's response never echoes
+                                  // it back, so it is captured from the REQUEST arguments instead.
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
 
@@ -279,6 +282,9 @@ function postProcess(request, response) {
     if (parsed && parsed.success && parsed.sessionId && parsed.channelId) {
       agentSessionId = parsed.sessionId;
       agentChannelId = parsed.channelId;
+      // KBT-F717 (hoofdagent-review) — capture from the REQUEST, not the response: the
+      // response DTO never echoes workspaceId back.
+      agentWorkspaceId = (request.params.arguments && request.params.arguments.workspaceId) || null;
       // SPIKE (multi-room): the session's own channel is just the first subscription —
       // marked home so it keeps its unprefixed wire format and cannot be left.
       subscribeRoom(agentChannelId, 'home', { home: true });
@@ -359,13 +365,25 @@ function isRegisterAgentSessionCall(msg) {
 
 // Returns a synthesized JSON-RPC success response (answered from cache) when this
 // register call is a pure duplicate within a process that already has a confirmed
-// active session, or null when the call must be forwarded (no cached session yet,
-// or the call carries an update).
+// active session FOR THE SAME WORKSPACE, or null when the call must be forwarded
+// (no cached session yet, the call carries an update, or it targets a DIFFERENT
+// workspace than the cached session).
 function handleRegisterAgentSessionShortCircuit(msg) {
   if (!isRegisterAgentSessionCall(msg)) return null;
   if (!agentSessionId || !agentChannelId) return null; // nothing cached yet — forward normally
 
   const args = msg.params.arguments || {};
+
+  // KBT-F717 (hoofdagent-review) — MUST-FIX: a process that serves more than one
+  // workspace (or a skill that explicitly passes a different workspaceId) must never
+  // be handed back a DIFFERENT workspace's cached session — that would leak the wrong
+  // sessionId/channelId to the caller, and the server would never see this call at
+  // all. Only short-circuit when the incoming workspaceId is absent (caller doesn't
+  // care) or matches the cached session's workspace exactly.
+  if (args.workspaceId && agentWorkspaceId && args.workspaceId !== agentWorkspaceId) {
+    return null; // different workspace — must forward, never answer from this cache
+  }
+
   const carriesUpdate = REGISTER_UPDATE_FIELDS.some((k) =>
     Object.prototype.hasOwnProperty.call(args, k));
   if (carriesUpdate) return null; // let it forward so the update reaches the server
@@ -450,6 +468,7 @@ function __resetForTest() {
   autoRegisterStarted = false;
   agentSessionId = null;
   agentChannelId = null;
+  agentWorkspaceId = null; // KBT-F717
   // Re-read from process.env only (never the registry): the test controls the key,
   // so the outcome must not depend on the developer's machine (cf. KBT-B438).
   API_KEY = process.env.KANBANTIC_API_KEY;
@@ -465,8 +484,12 @@ function __setSessionForTest(id) { agentSessionId = id; }
 // KBT-F717 — test hooks: set/read BOTH session fields, and read the process token,
 // so the register short-circuit / end_agent_session-scoping / session-file tests can
 // arrange state and assert on it without a real HTTP round trip.
-function __setFullSessionForTest(sid, cid) { agentSessionId = sid; agentChannelId = cid; }
-function __getSessionForTest() { return { agentSessionId, agentChannelId }; }
+function __setFullSessionForTest(sid, cid, wsid) {
+  agentSessionId = sid;
+  agentChannelId = cid;
+  if (wsid !== undefined) agentWorkspaceId = wsid; // KBT-F717 — optional 3rd arg, backward-compatible
+}
+function __getSessionForTest() { return { agentSessionId, agentChannelId, agentWorkspaceId }; }
 function __getProcessTokenForTest() { return PROCESS_TOKEN; }
 
 async function autoRegister() {
@@ -888,6 +911,10 @@ function removeSessionFile() {
 // our point of view), the pid field is missing/malformed, or listing/reading
 // races with another process — leaves the file untouched. "Bij twijfel laten
 // staan": doubt always resolves to keeping the file, never to removing it.
+// KBT-F717 (hoofdagent-review) — PID reuse: the OS can hand the recorded pid to an unrelated,
+// currently-running process after the original writer exited, making this return `true` for a
+// process that is genuinely dead. That is the safe side of the error: it just leaves the file on
+// disk one GC cycle longer than strictly necessary, never deletes a live session's file.
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null; // unknown — never a deletion basis
   try {

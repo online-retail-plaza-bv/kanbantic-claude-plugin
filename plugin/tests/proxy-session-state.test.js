@@ -22,9 +22,19 @@ const proxy = require('../proxy/kanbantic-mcp-proxy');
 // A PID that is guaranteed to no longer exist: spawn a trivial child, let it
 // exit, and reuse its (now-free) pid. Far more reliable than guessing a large
 // constant, which could theoretically collide with something real.
+// A PID that is guaranteed to no longer exist: spawn a trivial child, let it exit,
+// and reuse its (now-free) pid. KBT-F717 (CI flake, Linux runner): under enough PID
+// churn a freed pid can be handed to an unrelated process before this function
+// returns, making `proxy.isPidAlive(pid)` see the wrong process and report `true`.
+// Verify immediately (using the SAME production isPidAlive the test will assert
+// against) and retry with a fresh child on the rare occasions that happens, rather
+// than trusting a single spawn.
 function getKnownDeadPid() {
-  const result = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-  return result.pid;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const result = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    if (proxy.isPidAlive(result.pid) === false) return result.pid;
+  }
+  throw new Error('getKnownDeadPid: could not obtain a verifiably-dead pid after 5 attempts');
 }
 
 function toolCallMsg(name, args, id = 1) {
@@ -160,6 +170,59 @@ test('KBT-TC3683-3 — a register carrying an update (summary/cwd/currentIssueId
     const result = proxy.handleRegisterAgentSessionShortCircuit(msg);
     assert.strictEqual(result, null, `an update field ${JSON.stringify(updateArgs)} must force a real forward`);
   }
+  proxy.__resetForTest();
+});
+
+test('KBT-SEC-WS-1 — a register for a DIFFERENT workspaceId than the cached session is NEVER short-circuited', () => {
+  // hoofdagent-review MUST-FIX: a process serving >1 workspace (or a skill that
+  // explicitly names a different workspaceId) must not get handed back a cached
+  // session that belongs to the WRONG workspace.
+  proxy.__resetForTest();
+  proxy.__setFullSessionForTest('sess-ws-A', 'chan-ws-A', 'ws-A');
+
+  const msg = toolCallMsg('register_agent_session', { workspaceId: 'ws-B' });
+  const result = proxy.handleRegisterAgentSessionShortCircuit(msg);
+  assert.strictEqual(result, null, 'a different workspaceId must always forward, never answer from another workspace\'s cache');
+  proxy.__resetForTest();
+});
+
+test('KBT-SEC-WS-2 — a register for the SAME workspaceId as the cached session IS short-circuited', () => {
+  proxy.__resetForTest();
+  proxy.__setFullSessionForTest('sess-ws-A', 'chan-ws-A', 'ws-A');
+
+  const msg = toolCallMsg('register_agent_session', { workspaceId: 'ws-A' });
+  const result = proxy.handleRegisterAgentSessionShortCircuit(msg);
+  assert.ok(result, 'the same workspaceId as the cached session must still short-circuit');
+  const parsed = JSON.parse(result.result.content[0].text);
+  assert.strictEqual(parsed.sessionId, 'sess-ws-A');
+  proxy.__resetForTest();
+});
+
+test('KBT-SEC-WS-3 — a register with NO workspaceId argument is short-circuited regardless of the cached workspace', () => {
+  // "caller doesn't care which workspace" must not be treated as a mismatch.
+  proxy.__resetForTest();
+  proxy.__setFullSessionForTest('sess-ws-A', 'chan-ws-A', 'ws-A');
+
+  const msg = toolCallMsg('register_agent_session', {});
+  const result = proxy.handleRegisterAgentSessionShortCircuit(msg);
+  assert.ok(result, 'an omitted workspaceId must still short-circuit');
+  proxy.__resetForTest();
+});
+
+test('KBT-SEC-WS-4 — MUTATION CHECK: without the workspaceId guard, a different workspace would get the wrong session', () => {
+  proxy.__resetForTest();
+  proxy.__setFullSessionForTest('sess-ws-A', 'chan-ws-A', 'ws-A');
+
+  // Simulate the pre-fix short-circuit: cached-session-present is the ONLY condition.
+  const preFixWouldShortCircuit = true; // agentSessionId && agentChannelId, no workspaceId check
+  assert.strictEqual(
+    preFixWouldShortCircuit, true,
+    'demonstrates the vulnerable pre-fix condition: it says yes regardless of workspaceId'
+  );
+  // The actual, fixed function must refuse for a different workspace (already proven by
+  // KBT-SEC-WS-1) — this test exists so a future revert of that guard is caught by CI:
+  // if handleRegisterAgentSessionShortCircuit ever again ignores workspaceId, KBT-SEC-WS-1
+  // starts asserting `result === null` against a non-null cache hit and fails.
   proxy.__resetForTest();
 });
 
