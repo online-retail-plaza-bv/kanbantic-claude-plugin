@@ -90,12 +90,15 @@ Prepare-dialogen zijn vaak lang-lopende, multi-turn sessies — precies het soor
 ```
 register_agent_session ─▶ set_current_issue
       │
-      ├─ doorlopend, tijdens de dialoog: heartbeat (periodiek)
       ├─ mijlpaal (bv. Epic-fase 5E.1–5E.9 doorlopen, of Feature-requirements klaar): report_status + add_discussion_entry
-      └─ einde: end_agent_session
+      └─ einde van DIT issue: report_status(status: "Idle") + set_current_issue(null)
 ```
 
-Dit is aanvullend op de bestaande Decision-entries uit Step 6/6a — het board-statussignaal (`register_agent_session`/`heartbeat`/`report_status`) is zichtbaar buiten de discussion-timeline en laat zien dat de sessie nog leeft tijdens een lange requirements-dialoog.
+Dit is aanvullend op de bestaande Decision-entries uit Step 6/6a — het board-statussignaal (`register_agent_session`/`report_status`) is zichtbaar buiten de discussion-timeline en laat zien dat de sessie nog leeft tijdens een lange requirements-dialoog.
+
+**KBT-F717 — een issue voorbereiden beëindigt de sessie niet.** Roep aan het einde van deze skill **geen** `end_agent_session` aan: het issue is klaar, het proces niet — er kan een volgend issue in dezelfde doorlopende run volgen (`kanbantic-issue-execute` bijvoorbeeld), of een mens blijft chatten. Meld afronding met `report_status(status: "Idle")` + `set_current_issue(issueId: null)`. Alleen echte procesbeëindiging (proxy-niveau, SIGINT/SIGTERM/stdin-end) of een expliciete gebruikersactie sluit de sessie.
+
+**Heartbeat is automatisch.** De proxy vernieuwt zelf elke 90s de `LastSeen` van de sessie zolang het proces verbonden blijft (KBT-B470) — een periodieke `heartbeat`-aanroep vanuit deze skill was dubbel werk en is verwijderd.
 
 ## Step 0: Ensure Repository Access
 

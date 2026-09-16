@@ -31,8 +31,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { URL } = require('url');
 const { execSync } = require('child_process');
+const sessionFileHelpers = require('./session-file'); // KBT-F717
 
 // Claude Desktop and Cowork launch the proxy as a child of a GUI process that
 // inherits its environment from explorer.exe at sign-in. User env vars added
@@ -63,6 +65,9 @@ let shuttingDown = false;
 // Agent Communication Hub state (set after register_agent_session succeeds).
 let agentSessionId = null;       // Kanbantic AgentSession.Id
 let agentChannelId = null;       // Home channel — the 1:1 AgentChannel of this session
+let agentWorkspaceId = null;     // KBT-F717 (hoofdagent-review) — the workspaceId this session was
+                                  // registered for; register_agent_session's response never echoes
+                                  // it back, so it is captured from the REQUEST arguments instead.
 let inboxPollTimer = null;
 const INBOX_POLL_INTERVAL_MS = 1000;
 
@@ -92,6 +97,14 @@ const HEARTBEAT_INTERVAL_MS = 90_000;
 // KBT-E102 F2 — idempotency guard for the startup auto-register side-effect.
 let autoRegisterStarted = false;
 
+// KBT-F717 — stable per-process identifier, generated once at module load and
+// attached to every outgoing register_agent_session call. Lets the SERVER
+// (AgentSessionAppService.RegisterAsync) recognise a second registration from
+// this same proxy process even when the client-side short-circuit below is
+// bypassed (e.g. a non-proxy MCP client, or a call that carries an update).
+// Reset only in tests via __resetForTest so each test gets process isolation.
+let PROCESS_TOKEN = crypto.randomUUID();
+
 // ---------------------------------------------------------------------------
 // stdio: read newline-delimited JSON-RPC from stdin, write to stdout
 // Messages are queued and processed sequentially to ensure session state
@@ -106,6 +119,7 @@ let processing = false;
 // require()'d (e.g. by unit tests for the pure helpers below) these side effects
 // must not fire. Runtime behavior as a CLI is unchanged.
 if (require.main === module) {
+  staleSessionFileCleanup(); // KBT-F717 — best-effort, never blocks startup
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => {
     buf += chunk;
@@ -187,6 +201,27 @@ async function dispatch(line) {
     return;
   }
 
+  // KBT-F717 — a second register_agent_session within a process that already has a
+  // confirmed active session is answered from the cache, with zero network round trip,
+  // instead of asking the server to create a second AgentSession + AgentChannel. Falls
+  // through to a normal forward (with processToken attached below) when the call carries
+  // an update (summary/cwd/currentIssueId) — that case must still reach the server so the
+  // update persists (server applies it idempotently via processToken, KBT-SR621).
+  const registerShortCircuit = handleRegisterAgentSessionShortCircuit(msg);
+  if (registerShortCircuit) {
+    if (msg.id != null) send(registerShortCircuit);
+    return;
+  }
+
+  // KBT-F717 — attach the stable per-process token to every register_agent_session
+  // call this proxy forwards, so the server can recognise a duplicate registration
+  // from this process even when the client-side short-circuit above does not apply.
+  // Returns true when it mutated msg.params.arguments — that must feed the same
+  // "forward the re-serialized message, not the raw line" decision as the filePath
+  // substitution below, or the attached token is silently dropped (KBT-GTCH149-style
+  // trap: a mutation that never reaches the forwarded body).
+  const tokenAttached = attachProcessTokenToRegisterCall(msg);
+
   // KBT-F464: resolve a filePath argument into content before forwarding. On an
   // ambiguity / unreadable-file error, respond with a JSON-RPC error and do NOT
   // forward. On success, the message's arguments are mutated in place and the
@@ -200,7 +235,7 @@ async function dispatch(line) {
     }
     return;
   }
-  const bodyToForward = fp.mutated ? JSON.stringify(msg) : line;
+  const bodyToForward = (fp.mutated || tokenAttached) ? JSON.stringify(msg) : line;
 
   try {
     const responses = await forward(bodyToForward);
@@ -247,6 +282,9 @@ function postProcess(request, response) {
     if (parsed && parsed.success && parsed.sessionId && parsed.channelId) {
       agentSessionId = parsed.sessionId;
       agentChannelId = parsed.channelId;
+      // KBT-F717 (hoofdagent-review) — capture from the REQUEST, not the response: the
+      // response DTO never echoes workspaceId back.
+      agentWorkspaceId = (request.params.arguments && request.params.arguments.workspaceId) || null;
       // SPIKE (multi-room): the session's own channel is just the first subscription —
       // marked home so it keeps its unprefixed wire format and cannot be left.
       subscribeRoom(agentChannelId, 'home', { home: true });
@@ -259,15 +297,39 @@ function postProcess(request, response) {
     }
   }
 
-  // 3. Reset state on end_agent_session so a graceful end stops the poll-loop.
+  // 3. KBT-F717 / KBT-RL259 — reset local state on end_agent_session ONLY when the
+  //    call targeted THIS process's own session AND actually succeeded. Previously
+  //    this reset unconditionally on every end_agent_session tools/call, so a call
+  //    for a different sessionId (or one that failed — network blip, server error)
+  //    still went deaf: it stopped this process's own poll/heartbeat/session-file
+  //    even though nothing had actually ended server-side.
   if (request.method === 'tools/call' &&
       request.params && request.params.name === 'end_agent_session') {
-    stopInboxPoll();
-    stopHeartbeat(); // KBT-B470
-    removeSessionFile();
-    agentSessionId = null;
-    agentChannelId = null;
-    roomSubscriptions.clear(); // SPIKE (multi-room)
+    const args = request.params.arguments || {};
+    const targetSessionId = args.sessionId;
+    // No explicit sessionId in the call → the tool ends the caller's own session,
+    // which — from this proxy's perspective — is whatever it has cached.
+    const isOwnSession = !targetSessionId || targetSessionId === agentSessionId;
+    const parsed = parseToolResult(response);
+    const succeeded = !!parsed && parsed.success === true;
+
+    if (isOwnSession && succeeded) {
+      stopInboxPoll();
+      stopHeartbeat(); // KBT-B470
+      removeSessionFile();
+      agentSessionId = null;
+      agentChannelId = null;
+      roomSubscriptions.clear(); // SPIKE (multi-room)
+    } else if (!isOwnSession) {
+      process.stderr.write(
+        `[kanbantic-proxy] end_agent_session targeted ${targetSessionId}, not this ` +
+        `process's session (${agentSessionId}) — local state untouched\n`
+      );
+    } else {
+      process.stderr.write(
+        '[kanbantic-proxy] end_agent_session did not succeed — keeping poll/heartbeat/session-file alive\n'
+      );
+    }
   }
 
   // 4. KBT-F464: advertise `filePath` as an optional alternative to each tool's
@@ -276,6 +338,89 @@ function postProcess(request, response) {
     augmentToolsListResponse(response);
     injectRoomToolsIntoList(response); // SPIKE (multi-room) — advertise the local tools
   }
+}
+
+// ---------------------------------------------------------------------------
+// KBT-F717 — client-side register_agent_session idempotency.
+//
+// Two layers, per the chosen design (KBT-SR620 + KBT-SR621):
+//   - This proxy short-circuits a pure-duplicate register within its own process
+//     (no new summary/cwd/currentIssueId) — zero network round trip.
+//   - Every register call that DOES reach the server carries `processToken`, a
+//     stable per-process id, so AgentSessionAppService.RegisterAsync can also
+//     recognise a duplicate registration from this same process (defense in
+//     depth against any caller that bypasses the short-circuit, e.g. a register
+//     call carrying an update, or a non-proxy MCP client).
+// ---------------------------------------------------------------------------
+
+// Fields that represent a real UPDATE to the session, not a bare re-register.
+// A call carrying any of these must still reach the server so the update
+// persists — the local cache alone cannot answer it truthfully.
+const REGISTER_UPDATE_FIELDS = ['summary', 'cwd', 'currentIssueId'];
+
+function isRegisterAgentSessionCall(msg) {
+  return !!msg && msg.method === 'tools/call' &&
+    !!msg.params && msg.params.name === 'register_agent_session';
+}
+
+// Returns a synthesized JSON-RPC success response (answered from cache) when this
+// register call is a pure duplicate within a process that already has a confirmed
+// active session FOR THE SAME WORKSPACE, or null when the call must be forwarded
+// (no cached session yet, the call carries an update, or it targets a DIFFERENT
+// workspace than the cached session).
+function handleRegisterAgentSessionShortCircuit(msg) {
+  if (!isRegisterAgentSessionCall(msg)) return null;
+  if (!agentSessionId || !agentChannelId) return null; // nothing cached yet — forward normally
+
+  const args = msg.params.arguments || {};
+
+  // KBT-F717 (hoofdagent-review) — MUST-FIX: a process that serves more than one
+  // workspace (or a skill that explicitly passes a different workspaceId) must never
+  // be handed back a DIFFERENT workspace's cached session — that would leak the wrong
+  // sessionId/channelId to the caller, and the server would never see this call at
+  // all. Only short-circuit when the incoming workspaceId is absent (caller doesn't
+  // care) or matches the cached session's workspace exactly.
+  if (args.workspaceId && agentWorkspaceId && args.workspaceId !== agentWorkspaceId) {
+    return null; // different workspace — must forward, never answer from this cache
+  }
+
+  const carriesUpdate = REGISTER_UPDATE_FIELDS.some((k) =>
+    Object.prototype.hasOwnProperty.call(args, k));
+  if (carriesUpdate) return null; // let it forward so the update reaches the server
+
+  process.stderr.write(
+    `[kanbantic-proxy] register_agent_session short-circuited — process already has ` +
+    `session ${agentSessionId}, no server round trip\n`
+  );
+  return {
+    jsonrpc: '2.0',
+    id: msg.id,
+    result: {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          sessionId: agentSessionId,
+          channelId: agentChannelId,
+          alreadyRegistered: true,
+        }),
+      }],
+    },
+  };
+}
+
+// Mutates msg.params.arguments in place to add processToken when this is a
+// register_agent_session call being forwarded (i.e. it survived the short-circuit
+// above). Returns true iff it mutated the message — callers must forward the
+// re-serialized message, not the original raw line, when this is true.
+function attachProcessTokenToRegisterCall(msg) {
+  if (!isRegisterAgentSessionCall(msg)) return false;
+  if (!msg.params.arguments || typeof msg.params.arguments !== 'object') {
+    msg.params.arguments = {};
+  }
+  if (msg.params.arguments.processToken) return false; // caller already set one — don't clobber
+  msg.params.arguments.processToken = PROCESS_TOKEN;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +468,7 @@ function __resetForTest() {
   autoRegisterStarted = false;
   agentSessionId = null;
   agentChannelId = null;
+  agentWorkspaceId = null; // KBT-F717
   // Re-read from process.env only (never the registry): the test controls the key,
   // so the outcome must not depend on the developer's machine (cf. KBT-B438).
   API_KEY = process.env.KANBANTIC_API_KEY;
@@ -330,10 +476,21 @@ function __resetForTest() {
   stopHeartbeat(); // KBT-B470
   roomSubscriptions.clear(); // SPIKE (multi-room)
   __sendImpl = send;
+  PROCESS_TOKEN = crypto.randomUUID(); // KBT-F717 — fresh per-process token per test
 }
 
 // KBT-B470 — test hook: set the active session id so sendHeartbeat() can be exercised in isolation.
 function __setSessionForTest(id) { agentSessionId = id; }
+// KBT-F717 — test hooks: set/read BOTH session fields, and read the process token,
+// so the register short-circuit / end_agent_session-scoping / session-file tests can
+// arrange state and assert on it without a real HTTP round trip.
+function __setFullSessionForTest(sid, cid, wsid) {
+  agentSessionId = sid;
+  agentChannelId = cid;
+  if (wsid !== undefined) agentWorkspaceId = wsid; // KBT-F717 — optional 3rd arg, backward-compatible
+}
+function __getSessionForTest() { return { agentSessionId, agentChannelId, agentWorkspaceId }; }
+function __getProcessTokenForTest() { return PROCESS_TOKEN; }
 
 async function autoRegister() {
   if (!shouldAutoRegister()) return;
@@ -347,6 +504,13 @@ async function autoRegister() {
   };
   if (env.workstationId) args.workstationId = env.workstationId;
   if (env.spawnCommandId) args.spawnCommandId = env.spawnCommandId;
+  // KBT-F717 — the idempotency key is ALWAYS processToken, never spawnCommandId.
+  // spawnCommandId identifies the daemon's spawn REQUEST, which is deliberately
+  // reused across a crash-respawn (KBT-F550) — matching on it there would wrongly
+  // reattach the freshly-spawned replacement process to its dead predecessor's
+  // session. processToken identifies THIS proxy PROCESS and is regenerated on every
+  // process start (including a crash-respawn), so it is the correct idempotency key.
+  args.processToken = PROCESS_TOKEN;
 
   const request = {
     jsonrpc: '2.0',
@@ -692,12 +856,20 @@ function augmentToolsListResponse(response) {
 // (UserPromptSubmit / PreToolUse / PostToolUse / Stop) to discover the active
 // AgentChannel + API URL. Hooks run as separate subprocesses and don't share
 // memory with the proxy — the file is the IPC mechanism.
-// Path: ~/.claude-kanbantic-session.json (single-session per user, last register
-// wins for multi-Claude-session-per-workstation scenarios — see KBT-E046 P4 README).
+//
+// KBT-F717 — per-SESSION, not global. Path:
+//   ~/.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json
+// (PID-based fallback — ~/.claude-kanbantic-session-pid-<pid>.json — only when
+// CLAUDE_CODE_SESSION_ID is absent, e.g. an older Claude Code build). Naming
+// scheme lives in session-file.js so the writer (here) and the reader
+// (hooks/stop-version-summary.js) cannot drift apart. Each process writes and
+// removes ONLY its own file — see the end_agent_session scoping fix above and
+// staleSessionFileCleanup() below for the two ways a stray file could
+// otherwise accumulate.
 // ---------------------------------------------------------------------------
 
 function sessionFilePath() {
-  return path.join(os.homedir(), '.claude-kanbantic-session.json');
+  return sessionFileHelpers.sessionFilePath(os.homedir());
 }
 
 function writeSessionFile() {
@@ -707,6 +879,7 @@ function writeSessionFile() {
     channelId: agentChannelId,
     apiUrl: deriveApiUrl(),
     writtenAt: new Date().toISOString(),
+    pid: process.pid, // KBT-F717 — liveness check for staleSessionFileCleanup(); NOT an identity key
   };
   try {
     fs.writeFileSync(sessionFilePath(), JSON.stringify(payload, null, 2), { encoding: 'utf8' });
@@ -720,6 +893,70 @@ function removeSessionFile() {
     fs.unlinkSync(sessionFilePath());
   } catch {
     // file may not exist; ignore.
+  }
+}
+
+// KBT-F717 — best-effort startup GC for session files left behind by a process
+// that never got to run its own cleanup (crash, kill -9, power loss). Never
+// touches the CURRENT process's own file (computed fresh, excluded by name) and
+// never throws — a GC failure must not block startup.
+//
+// Hoofdagent-review: mtime alone is NOT proof of death. writeSessionFile() runs
+// once, at register time — a long-running but perfectly healthy overnight
+// session's file can be many hours old without ever being rewritten. Age can
+// therefore never be the deletion criterion on its own. The only thing this GC
+// deletes on is a DEMONSTRABLY dead writer: the PID recorded in the file no
+// longer exists (process.kill(pid, 0) → ESRCH). Any other outcome — the
+// process is alive, we're not permitted to probe it (EPERM, still alive from
+// our point of view), the pid field is missing/malformed, or listing/reading
+// races with another process — leaves the file untouched. "Bij twijfel laten
+// staan": doubt always resolves to keeping the file, never to removing it.
+// KBT-F717 (hoofdagent-review) — PID reuse: the OS can hand the recorded pid to an unrelated,
+// currently-running process after the original writer exited, making this return `true` for a
+// process that is genuinely dead. That is the safe side of the error: it just leaves the file on
+// disk one GC cycle longer than strictly necessary, never deletes a live session's file.
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null; // unknown — never a deletion basis
+  try {
+    process.kill(pid, 0); // signal 0: probe only, sends nothing
+    return true; // no throw → the OS confirms the process exists
+  } catch (e) {
+    if (e && e.code === 'ESRCH') return false; // no such process — definitively dead
+    if (e && e.code === 'EPERM') return true; // exists, we just can't signal it — treat as alive
+    return null; // any other failure — unknown, not a deletion basis
+  }
+}
+
+function staleSessionFileCleanup() {
+  const home = os.homedir();
+  const ownPath = sessionFilePath();
+  let candidates;
+  try {
+    candidates = sessionFileHelpers.listSessionFiles(home);
+  } catch {
+    return; // best-effort — a listing failure is not fatal
+  }
+  for (const name of candidates) {
+    const full = path.join(home, name);
+    if (full === ownPath) continue;
+    let payload;
+    try {
+      payload = JSON.parse(fs.readFileSync(full, 'utf8'));
+    } catch {
+      continue; // unreadable/unparseable — doubt → leave it
+    }
+    if (isPidAlive(payload && payload.pid) === false) {
+      try {
+        fs.unlinkSync(full);
+        process.stderr.write(
+          `[kanbantic-proxy] removed stale session file ${name} (writer pid ${payload.pid} no longer exists)\n`
+        );
+      } catch {
+        // Raced with another process removing/replacing it, or a permission blip — ignore.
+      }
+    }
+    // isPidAlive() returning true or null → leave the file. A file with no
+    // recorded pid at all (e.g. written by a future/older format) is also left.
   }
 }
 
@@ -1237,4 +1474,17 @@ module.exports = {
   pollInbox,
   setSendForTest,
   MAX_ROOM_SUBSCRIPTIONS,
+  // KBT-F717 — exported for testing register-idempotency + end_agent_session scoping
+  // + the per-session session-file.
+  postProcess,
+  handleRegisterAgentSessionShortCircuit,
+  attachProcessTokenToRegisterCall,
+  sessionFilePath,
+  writeSessionFile,
+  removeSessionFile,
+  staleSessionFileCleanup,
+  isPidAlive,
+  __setFullSessionForTest,
+  __getSessionForTest,
+  __getProcessTokenForTest,
 };

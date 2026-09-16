@@ -1,10 +1,40 @@
 #requires -Version 5.1
 # Shared helper: read the Kanbantic-session-file written by the stdio proxy and
 # POST a transcript-event to the Kanbantic API. Hooks dot-source this file.
+#
+# KBT-F717 — one session file PER Claude session
+# (.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json), not one global
+# file. This hook is a separate subprocess from the proxy and cannot learn the
+# proxy's PID, so resolution mirrors plugin/proxy/session-file.js's
+# resolveExistingSessionFile — kept in sync BY HAND (PowerShell cannot
+# require() the JS module):
+#   - CLAUDE_CODE_SESSION_ID set  -> that exact file.
+#   - unset, exactly 1 file found -> that file (single-session case).
+#   - unset, 0 or >=2 files found -> $null. NEVER pick "the newest" -- with two
+#     concurrent sessions that is precisely the cross-session bug this
+#     Feature fixes.
+
+function Get-KanbanticSessionFilePath {
+    $prefix = ".claude-kanbantic-session-"
+    $suffix = ".json"
+
+    if ($env:CLAUDE_CODE_SESSION_ID) {
+        return (Join-Path $env:USERPROFILE "$prefix$($env:CLAUDE_CODE_SESSION_ID)$suffix")
+    }
+
+    $candidates = @(Get-ChildItem -Path $env:USERPROFILE -Filter "$prefix*$suffix" -File -ErrorAction SilentlyContinue)
+    if ($candidates.Count -eq 1) {
+        return $candidates[0].FullName
+    }
+    if ($candidates.Count -ge 2) {
+        Write-Warning "[kanbantic-hook] multiple session files found and CLAUDE_CODE_SESSION_ID is not set -- cannot tell which session is ours. Skipping rather than guessing."
+    }
+    return $null
+}
 
 function Get-KanbanticSession {
-    $sessionFile = Join-Path $env:USERPROFILE ".claude-kanbantic-session.json"
-    if (-not (Test-Path $sessionFile)) {
+    $sessionFile = Get-KanbanticSessionFilePath
+    if (-not $sessionFile -or -not (Test-Path $sessionFile)) {
         return $null
     }
     try {

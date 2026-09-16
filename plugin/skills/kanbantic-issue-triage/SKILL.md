@@ -64,10 +64,12 @@ Triage is expliciet genoemd in de tabel ("status-updates, triage") — dit is **
 Ook al is een triage-run kort, het board-signaal hoort er toch bij zodat gelijktijdige triage-runs op andere issues zichtbaar blijven:
 
 ```
-register_agent_session ─▶ set_current_issue ─▶ [dialoog + metadata-update] ─▶ end_agent_session
+register_agent_session ─▶ set_current_issue ─▶ [dialoog + metadata-update] ─▶ report_status(Idle) + set_current_issue(null)
 ```
 
-`heartbeat`/`report_status` zijn hier meestal overbodig gezien de korte duur — gebruik ze alleen als de go/no-go-dialoog onverwacht lang op gebruikersinput wacht (`report_status(status: "WaitingForInput")`).
+`heartbeat` is hier overbodig (de proxy vernieuwt zelf elke 90s de `LastSeen`, KBT-B470) en `report_status` meestal ook gezien de korte duur — gebruik `report_status` alleen als de go/no-go-dialoog onverwacht lang op gebruikersinput wacht (`report_status(status: "WaitingForInput")`).
+
+**KBT-F717 — nooit `end_agent_session` aan het einde van triage.** Dit issue is klaar; het proces niet — er volgt vaak meteen `kanbantic-issue-prepare` in dezelfde run. `end_agent_session` zou de chat van de rest van de run afsluiten. Meld afronding met `report_status(status: "Idle")` + `set_current_issue(issueId: null)`.
 
 ## Checklist
 

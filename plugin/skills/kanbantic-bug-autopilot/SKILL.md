@@ -52,7 +52,7 @@ Improvising a lane looks faster and is not: each lane-skill carries gates that e
 2. **Step 1** — For each bug: determine entry point in the workflow (skip completed lanes)
 3. **Step 2** — Drive the bug lane by lane by **invoking each lane-skill**, with status updates and heartbeats
 4. **Step 3** — Assess Library documentation needs after the execute phase
-5. **Step 4** — Close session; report per-bug result + token breakdown
+5. **Step 4** — Report batch completion (KBT-F717: not a session close) + per-bug result + token breakdown
 
 ## Step 0: Bootstrap (ALWAYS FIRST — NO EXCEPTIONS)
 
@@ -66,7 +66,7 @@ Step 0 must complete fully before any workflow processing begins. Skipping any s
 MCP: mcp__kanbantic__register_agent_session(workspaceId: <see 0b>, host: <hostname>, cwd: <working directory>)
 ```
 
-Save the returned `sessionId` — used for heartbeats and session close.
+Save the returned `sessionId` — used for `report_status` calls (KBT-F717: no explicit heartbeat, no `end_agent_session` at batch-close, see Step 4).
 
 ### Step 0b: Determine Workspace
 
@@ -179,10 +179,12 @@ Invoke the skill; do not paraphrase its steps into your own. Every lane-skill an
 - Update the issue status in Kanbantic **before** beginning a new lane
 - Add a Discussion entry for every significant decision or finding
 
-**Send heartbeats** during long-running tasks (at minimum every 60 seconds):
+**Heartbeat is automatic (KBT-F717 / KBT-B470)** — the proxy refreshes the session's `LastSeen` every 90s on its own for as long as the process stays connected. Do not call `heartbeat` from this skill; the previous instruction to do so every 60s was redundant duplication.
+
+Instead, report progress between bugs with `report_status`:
 
 ```
-MCP: mcp__kanbantic__heartbeat(sessionId: <sessionId>)
+MCP: mcp__kanbantic__report_status(sessionId: <sessionId>, status: "Working", summary: "<1-2 sentence progress note>")
 ```
 
 <HARD-GATE>
@@ -211,11 +213,16 @@ MCP: mcp__kanbantic__publish_library_document(...)  // always publish after writ
 
 ---
 
-## Step 4: Close Session + Final Report
+## Step 4: Report Batch Completion + Final Report
+
+**KBT-F717 — do not call `end_agent_session` here.** Finishing this batch is not the same as ending the process: a human may keep chatting afterward, or another batch may follow in the same run. Signal completion instead:
 
 ```
-MCP: mcp__kanbantic__end_agent_session(sessionId: <sessionId>)
+MCP: mcp__kanbantic__report_status(sessionId: <sessionId>, status: "Idle", summary: "<batch summary — N bugs processed>")
+MCP: mcp__kanbantic__set_current_issue(sessionId: <sessionId>, issueId: null)
 ```
+
+The session, its inbox-poll and its heartbeat stay alive. Real process termination (SIGINT/SIGTERM/stdin-end, handled by the proxy itself) or an explicit user action is what actually ends the session.
 
 Report a **per-bug summary** to the user:
 
@@ -248,7 +255,7 @@ Track token counts by accumulating the `usage` fields after each API call (`inpu
 - **Never perform a lane's work yourself instead of invoking its lane-skill** — that is how gates like the test-policy (Regel E / KBT-F442) and the worktree HARD-GATE (KBT-TRUL004) get skipped
 - Never hardcode the workflow — always fetch it
 - Never use a heavier model when a lighter one suffices
-- Never close the session without `end_agent_session`
+- **Never call `end_agent_session` at batch-close (KBT-F717)** — report completion via `report_status(status: "Idle")` + `set_current_issue(null)` instead; the session outlives the batch
 - Never push commits without passing tests (unless the Toolkit explicitly permits it)
 
 ## Key Principles

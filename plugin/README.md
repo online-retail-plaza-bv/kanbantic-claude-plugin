@@ -147,6 +147,18 @@ Om een gespawnde agent betrouwbaar in `/agent-sessions` te laten verschijnen, wa
 
 Gevolg voor onboarding: verschijnt een gespawnde agent níet in `/agent-sessions`, controleer dan of de daemon een geldige `AgentApiKey` (met workspace-lidmaatschap + `AgentSessions.Create`) injecteert — de daemon-README (sectie *"Making agent-sessions appear"*) en de F4-diagnostiek (spawn-log + spawn-watchdog + de teller op `/workstations`) wijzen de oorzaak aan.
 
+## Eén sessie per proces, chat blijft aan (KBT-F717)
+
+Vóór deze Feature zette élke `end_agent_session`-aanroep de hele proxy doof — lane-skills riepen hem aan zodra ze een issue afrondden, waarna de rest van de run (en elk vervolgissue in dezelfde sessie) geen berichten meer ontving. Een tweede `register_agent_session` binnen hetzelfde proces creëerde daarnaast een tweede sessie + channel bovenop de auto-register.
+
+**Idempotentie, aan beide kanten:**
+- **Proxy (snelste pad).** Een `register_agent_session`-aanroep binnen een proces dat al een actieve sessie heeft, wordt onderschept en beantwoord vanuit de cache — geen tweede server-aanroep, tenzij de aanroep een update draagt (`summary`/`cwd`/`currentIssueId`), die altijd wél doorgaat zodat de wijziging persisteert.
+- **Server (defense-in-depth).** Elke aanroep die wél naar de server gaat draagt een `processToken` (stabiel, één keer gegenereerd per proxy-proces) of, bij een daemon-spawn, `spawnCommandId`. `AgentSessionAppService.RegisterAsync` herkent een tweede registratie met hetzelfde token en geeft de bestaande sessie terug in plaats van een nieuwe aan te maken.
+
+**`end_agent_session` reset alleen de eigen sessie, en alleen bij succes.** De proxy vergelijkt het `sessionId`-argument (of, indien afwezig, de eigen gecachte sessie) met wat hij zelf beheert, én controleert of de aanroep slaagde, vóórdat hij de inbox-poll, heartbeat en het sessiebestand opruimt. Lane-skills (`kanbantic-issue-execute`, `-prepare`, `-triage`, `kanbantic-orchestrate`, `kanbantic-bug-autopilot`) roepen `end_agent_session` niet langer aan wanneer ze een issue of batch afronden — ze melden dat met `report_status(status: "Idle")` + `set_current_issue(null)`. Alleen echte procesbeëindiging (SIGINT/SIGTERM/stdin-end) of een expliciete gebruikersactie sluit de sessie nog.
+
+**Sessiebestand per Claude-sessie, niet globaal.** `~/.claude-kanbantic-session.json` is vervangen door `~/.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json` — de env-var die Claude Code op zichzelf zet en die elk kind-proces overerft (de proxy én elke hook, onafhankelijk van elkaar, geverifieerd empirisch: zie `plugin/proxy/session-file.js`). Twee gelijktijdige Claude-processen op één werkstation houden zo elk hun eigen sessie en inbox; het beëindigen van de ene raakt de andere niet. Hooks die de env-var niet zien (oudere Claude Code-build) gebruiken hun bestand alleen als er precies één sessiebestand op schijf staat — bij twijfel (0 of ≥2 kandidaten) doen ze niets; nooit het "nieuwste bestand" raden.
+
 ## Toolkit-mirrors syncen bij sessiestart (KBT-F637)
 
 Sinds de relaxatie van **KBT-TRUL014** zijn `.claude/commands/` en `.claude/agents/` **gegenereerde, gitignorede mirrors** van de Toolkit-items van de workspace. Een verse clone heeft dus geen commands en geen subagents tot er een sync gedraaid heeft. Daarom levert de plugin die sync zelf mee, als tweede `SessionStart`-hook naast `check-update.sh`.
