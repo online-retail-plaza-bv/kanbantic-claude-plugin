@@ -8,12 +8,12 @@
   the Agent Communication Hub requires and seeds the session with a
   `/kanbantic-orchestrate` invocation for the given workspace + initiative.
 
-  This is a deliberate BRIDGE, not the end state. The full
-  Workstation-Daemon `SpawnCommand` / Agent-Sessions integration (a daemon that
-  spawns and supervises orchestrator sessions automatically) is intentionally
-  DEFERRED until the v0.14.0 line is mature — see KBT-BD151 / KBT-BD154. Until
-  then, an operator runs this script by hand on each workstation that should
-  participate in an autonomous run.
+  This is a deliberate manual BRIDGE, not a stand-in for missing functionality
+  (KBT-F726 correction — this used to claim the Workstation-Daemon `SpawnCommand`
+  / Agent-Sessions integration was DEFERRED; it is live today:
+  SpawnCommandPollingService spawns+supervises orchestrator sessions under
+  supervision, see KBT-B465 / KBT-F722 / KBT-F724). An operator runs this script
+  by hand on each workstation for a one-off run outside that daemon-managed flow.
 
 .PARAMETER Workspace
   Workspace slug (e.g. "kanbantic"). Required.
@@ -147,8 +147,15 @@ if (-not [string]::IsNullOrWhiteSpace($Repos)) {
 
 # The Agent Communication Hub channels are experimental — Claude Code needs this
 # flag to accept channel push-notifications (see plugin/README.md).
+#
+# KBT-B976 / KBT-SR632 — MUST be the equals-form, ONE argument. The space-form
+# (flag, value as separate argv entries) makes the CLI parser swallow every
+# following argument as an untagged channel entry until the next flag token —
+# with $prompt positional right after, Claude Code rejects it with
+# "--dangerously-load-development-channels entries must be tagged: <prompt>"
+# and exits 1 (KBT-B242). The equals-form is safe in both cases.
 $claudeArgs = @(
-  '--dangerously-load-development-channels', 'server:kanbantic',
+  '--dangerously-load-development-channels=plugin:kanbantic-claude-plugin@kanbantic',
   $prompt
 )
 

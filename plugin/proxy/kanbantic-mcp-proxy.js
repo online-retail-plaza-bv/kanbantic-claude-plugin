@@ -965,10 +965,15 @@ function augmentToolsListResponse(response) {
 }
 
 // ---------------------------------------------------------------------------
-// Session-file: persistent metadata read by Claude Code hook scripts
-// (UserPromptSubmit / PreToolUse / PostToolUse / Stop) to discover the active
-// AgentChannel + API URL. Hooks run as separate subprocesses and don't share
-// memory with the proxy — the file is the IPC mechanism.
+// Session-file: persistent metadata read by Claude Code hook scripts to
+// discover the active AgentChannel + API URL. Hooks run as separate
+// subprocesses and don't share memory with the proxy — the file is the IPC
+// mechanism. The only registered reader today is hooks/stop-version-summary.js
+// (Stop hook, see hooks.json). KBT-F726 removed the four PowerShell hooks
+// (UserPromptSubmit/PreToolUse/PostToolUse/Stop.ps1) that used to read this
+// file — they were never registered in hooks.json and so never ran; see
+// KBT-BD242 for why the daemon-side transcript-ingest producer they backed
+// stays out of scope for this cleanup.
 //
 // KBT-F717 — per-SESSION, not global. Path:
 //   ~/.claude-kanbantic-session-<CLAUDE_CODE_SESSION_ID>.json
@@ -1419,6 +1424,17 @@ async function pollRoom(channelId) {
       // KBT-F719 — a permanently archived channel (end_agent_session already ran) is a
       // terminal condition, not a transient failure: back off forever, once, with a clear
       // log line, instead of retrying every tick until the process exits.
+      //
+      // KBT-F726 (dead-code finding, KBT-T4610 cancelled) — as of today this branch is
+      // UNREACHABLE against the real server: AgentChannelAppService.GetMessagesAsync (the
+      // handler behind get_channel_messages) never checks channel.IsArchived and so never
+      // raises `AgentChannel.Archived` — only the WRITE side (PostMessageAsync) does, as
+      // part of the working Stale/Done archival distinction KBT-F722 built (do not remove
+      // that). Reading a poll on an archived channel today just returns whatever messages
+      // exist (or an empty page), never this error. Kept as defensive handling in case the
+      // read side ever grows the same check — see KBT-T4610 for why that fix was not made
+      // now — and covered by a unit test that exercises it via a mocked response, not a
+      // real server round-trip.
       const msg = (result && result.errorMessage) || '';
       if (msg.includes('AgentChannel.Archived')) {
         sub.archived = true;
