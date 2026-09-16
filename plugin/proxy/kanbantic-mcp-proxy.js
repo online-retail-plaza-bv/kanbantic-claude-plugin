@@ -276,6 +276,10 @@ async function dispatch(line) {
   // trap: a mutation that never reaches the forwarded body).
   const tokenAttached = attachProcessTokenToRegisterCall(msg);
 
+  // KBT-F722 — same contract as tokenAttached immediately above: must feed bodyToForward
+  // below or the attached CLI session id is silently dropped (KBT-GTCH149-style trap).
+  const cliSessionIdAttached = attachClaudeCliSessionIdToRegisterCall(msg);
+
   // KBT-F718 fast-follow — inject this session's own id into an outbound send_message
   // call so the server uses F718's explicit-sender path instead of its guessing fallback.
   // Must feed the same "forward the re-serialized message" decision as the other
@@ -295,7 +299,7 @@ async function dispatch(line) {
     }
     return;
   }
-  const bodyToForward = (fp.mutated || tokenAttached || fromSessionIdAttached) ? JSON.stringify(msg) : line;
+  const bodyToForward = (fp.mutated || tokenAttached || cliSessionIdAttached || fromSessionIdAttached) ? JSON.stringify(msg) : line;
 
   try {
     const responses = await forward(bodyToForward);
@@ -483,6 +487,24 @@ function attachProcessTokenToRegisterCall(msg) {
   return true;
 }
 
+// KBT-F722 — attach the Claude Code CLI's own session id (env var CLAUDE_CODE_SESSION_ID) to
+// every register_agent_session call this proxy forwards, mirroring attachProcessTokenToRegisterCall
+// exactly. A `claude --resume <id>` re-spawn is a NEW OS process (new PROCESS_TOKEN) but keeps this
+// SAME env var — it is the field the server matches on FIRST (KBT-SR624) so a resumed registration
+// reattaches to the existing AgentSession instead of creating a new one. Same
+// "must feed bodyToForward" contract as attachProcessTokenToRegisterCall — see the KBT-GTCH149-style
+// trap noted at the call site in dispatch().
+function attachClaudeCliSessionIdToRegisterCall(msg) {
+  if (!isRegisterAgentSessionCall(msg)) return false;
+  if (!process.env.CLAUDE_CODE_SESSION_ID) return false; // nothing to attach
+  if (!msg.params.arguments || typeof msg.params.arguments !== 'object') {
+    msg.params.arguments = {};
+  }
+  if (msg.params.arguments.claudeCliSessionId) return false; // caller already set one — don't clobber
+  msg.params.arguments.claudeCliSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  return true;
+}
+
 // KBT-F718 fast-follow — send_message's explicit-sender path (fromSessionId) only helps if
 // something actually populates it. Before this, EVERY call fell back to the server's
 // heuristic (AgentChannelAppService.ResolveAgentSessionIdAsync's "most recently seen
@@ -596,6 +618,12 @@ async function autoRegister() {
   // session. processToken identifies THIS proxy PROCESS and is regenerated on every
   // process start (including a crash-respawn), so it is the correct idempotency key.
   args.processToken = PROCESS_TOKEN;
+  // KBT-F722 — same idempotency-key upgrade as processToken, but for the resume scenario:
+  // CLAUDE_CODE_SESSION_ID survives a `claude --resume <id>` re-spawn (a new OS process, new
+  // PROCESS_TOKEN) so the server can reattach to the existing AgentSession instead of creating a
+  // new one (KBT-SR624). Absent for a proxy build/launch that has no such env var (older claude,
+  // or a context where it isn't set) — omitted rather than sent as an empty string.
+  if (process.env.CLAUDE_CODE_SESSION_ID) args.claudeCliSessionId = process.env.CLAUDE_CODE_SESSION_ID;
 
   const request = {
     jsonrpc: '2.0',
@@ -971,6 +999,10 @@ function writeSessionFile() {
   const payload = {
     sessionId: agentSessionId,
     channelId: agentChannelId,
+    // KBT-F722 — explicit field, not just implicit via the filename (sessionFilePath() already
+    // keys the file by CLAUDE_CODE_SESSION_ID when available, see session-file.js). Writing it
+    // into the body too lets a reader verify/correlate it without re-deriving the filename logic.
+    claudeCliSessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
     apiUrl: deriveApiUrl(),
     writtenAt: new Date().toISOString(),
     pid: process.pid, // KBT-F717 — liveness check for staleSessionFileCleanup(); NOT an identity key
@@ -1675,6 +1707,11 @@ module.exports = {
   // KBT-F551 — exported for testing the startup auto-register.
   shouldAutoRegister,
   autoRegister,
+  // KBT-F722 — exported so a test can drive a real dispatch() call and inspect the ACTUAL
+  // forwarded body, proving a mutation (e.g. attachClaudeCliSessionIdToRegisterCall) really
+  // reaches bodyToForward instead of only exercising the attach-function in isolation
+  // (the KBT-GTCH149-style trap: a mutation computed but never OR'd into bodyToForward).
+  dispatch,
   setForwardForTest,
   __resetForTest,
   stopInboxPoll,
@@ -1697,6 +1734,8 @@ module.exports = {
   postProcess,
   handleRegisterAgentSessionShortCircuit,
   attachProcessTokenToRegisterCall,
+  // KBT-F722 — exported for testing the automatic ClaudeCliSessionId injection (resume-reattach).
+  attachClaudeCliSessionIdToRegisterCall,
   // KBT-F718 fast-follow — exported for testing the automatic fromSessionId injection.
   attachFromSessionIdToSendMessageCall,
   sessionFilePath,
