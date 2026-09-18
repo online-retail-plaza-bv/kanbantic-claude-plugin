@@ -1404,6 +1404,19 @@ async function pollInbox() {
   }
 }
 
+// KBT-B1012 — Claude Code's notifications/claude/channel schema is `meta: Record<string, string>`.
+// A null, boolean, number or nested value is "Invalid params" to Claude Code >= 2.1.277, and the
+// error handler there closes the MCP connection. Keys are left as-is (identifiers already); values
+// that are null/undefined are dropped rather than sent as "null", everything else becomes a string.
+function channelMeta(fields) {
+  const meta = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === null || value === undefined) continue;
+    meta[key] = typeof value === 'string' ? value : String(value);
+  }
+  return meta;
+}
+
 async function pollRoom(channelId) {
   const sub = roomSubscriptions.get(channelId);
   if (shuttingDown || !sub) return;
@@ -1516,9 +1529,16 @@ async function pollRoom(channelId) {
           method: 'notifications/claude/channel',
           params: {
             content,
-            meta: {
-              from_session: msg.authorAgentSessionId || null,
-              from_user: msg.authorUserId || null,
+            // KBT-B1012 — meta is Record<string, string> in Claude Code's channel schema
+            // (channels-reference "Notification format"). Claude Code 2.1.277 validates that and
+            // rejects the whole notification — then DROPS THE MCP CONNECTION — on any other value.
+            // Measured on Kanbantic-Dev-03: "Invalid params ... meta.from_user: Invalid input,
+            // meta.room_is_home: Invalid input" (a null and a boolean), after which the agent had
+            // no Kanbantic tools at all. Older Claude versions let it through, which is why this
+            // surfaced only now. channelMeta() drops null/undefined and stringifies the rest.
+            meta: channelMeta({
+              from_session: msg.authorAgentSessionId,
+              from_user: msg.authorUserId,
               from_display_name: msg.authorDisplayName || 'Unknown',
               author_type: msg.authorType,
               message_type: msg.messageType,
@@ -1527,7 +1547,7 @@ async function pollRoom(channelId) {
               channel_id: msg.channelId,
               room_label: current.label,
               room_is_home: current.home,
-            },
+            }),
           },
         });
         // KBT-F723 — only the HOME channel is this session's OWN channel; the server
@@ -1749,6 +1769,7 @@ if (require.main === module) {
 // Exported for unit testing of the pure helpers (no runtime side effects on
 // require — see the `require.main === module` guards above). KBT-F464.
 module.exports = {
+  channelMeta, // KBT-B1012
   resolveFilePathArgument,
   augmentToolsListResponse,
   parseToolResult,
