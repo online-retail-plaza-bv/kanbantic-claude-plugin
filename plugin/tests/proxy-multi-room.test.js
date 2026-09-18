@@ -137,7 +137,8 @@ test('pollInbox: labels non-home rooms in the content, leaves the home channel v
 
   const byId = Object.fromEntries(sent.map((s) => [s.params.meta.message_id, s.params]));
   assert.equal(byId.h1.content, 'from the operator', 'home keeps its exact wire format');
-  assert.equal(byId.h1.meta.room_is_home, true);
+  // KBT-B1012 — meta is Record<string, string>; Claude Code 2.1.277 rejects a boolean here.
+  assert.equal(byId.h1.meta.room_is_home, 'true');
   assert.equal(byId.g1.content, '[KBT-B123] build is red', 'a room announces itself in-band');
   assert.equal(byId.g1.meta.room_label, 'KBT-B123');
   assert.equal(byId.g1.meta.from_display_name, 'Reviewer');
