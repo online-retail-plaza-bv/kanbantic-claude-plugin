@@ -106,6 +106,7 @@ const tool = (name, required) => ({
 test('param-drift: positive — create_version requires applicationId → exit 0', async () => {
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
+    tool('report_tool_activity', ['sessionId', 'toolUseId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -129,6 +130,7 @@ test('param-drift: negative — create_version drops applicationId → exit 1', 
   const stub = await startStub([
     // applicationId intentionally removed from required
     tool('create_version', ['workspaceId', 'name']),
+    tool('report_tool_activity', ['sessionId', 'toolUseId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {

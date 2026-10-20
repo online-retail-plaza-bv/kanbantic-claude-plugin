@@ -443,11 +443,11 @@ test('hooks.json registers the session-state hooks with the agreed matchers and 
   const perm = (h.PermissionRequest || []).find((e) => cmdsOf(e).some((c) => /permission-request-router\.js/.test(c)));
   assert.ok(perm, 'PermissionRequest entry missing');
 
-  const pre = (h.PreToolUse || []).find((e) => cmdsOf(e).some((c) => /tool-activity\.js --pre/.test(c)));
+  const pre = (h.PreToolUse || []).find((e) => cmdsOf(e).some((c) => /tool-activity\.js"? --pre/.test(c)));
   assert.ok(pre, 'PreToolUse tool-activity entry missing');
   assert.ok(!pre.matcher || pre.matcher === '.*' || pre.matcher === '*', 'tool-activity must see all tools');
 
-  const post = (h.PostToolUse || []).find((e) => cmdsOf(e).some((c) => /tool-activity\.js --post/.test(c)));
+  const post = (h.PostToolUse || []).find((e) => cmdsOf(e).some((c) => /tool-activity\.js"? --post/.test(c)));
   assert.ok(post, 'PostToolUse entry missing');
 
   const ups = (h.UserPromptSubmit || []).find((e) => cmdsOf(e).some((c) => /turn-start\.js/.test(c)));
