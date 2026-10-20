@@ -113,6 +113,8 @@ test('param-drift: positive — create_version requires applicationId → exit 0
     // KBT-F743 — the contract grew again; a positive stub must expose every contract tool.
     tool('get_fleet_digest', ['workspaceId']),
     tool('get_fleet_overview', ['workspaceId']),
+    // KBT-F745 — model policy joined the contract.
+    tool('get_model_policy', ['workspaceId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -222,6 +224,7 @@ test('param-drift: positive — the F742 decision tools satisfy the contract →
     ...F742_CONTRACT_TOOLS,
     tool('get_fleet_digest', ['workspaceId']),
     tool('get_fleet_overview', ['workspaceId']),
+    tool('get_model_policy', ['workspaceId']),
   ]);
   try {
     const result = await runScript(stub.port);
@@ -284,6 +287,8 @@ const F743_CONTRACT_TOOLS = [
   ...F742_CONTRACT_TOOLS,
   tool('get_fleet_digest', ['workspaceId']),
   tool('get_fleet_overview', ['workspaceId']),
+  // KBT-F745 — get_model_policy joined the contract; every positive stub exposes it.
+  tool('get_model_policy', ['workspaceId']),
 ];
 
 test('param-drift: positive — the F743 fleet tools satisfy the contract → exit 0', async () => {
@@ -319,6 +324,50 @@ test('param-drift: negative — get_fleet_overview missing entirely (KBT-F743) �
     const result = await runScript(stub.port);
     assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
     assert.match(result.stderr, /get_fleet_overview/);
+    assert.match(result.stderr, /not exposed by the live registry/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+// ── KBT-F745 / KBT-SR652 §MCP — get_model_policy in the required-parameter contract ──
+//
+//   get_model_policy → ["workspaceId"]  (read-only; orchestrator + /epic mod)
+
+const F745_CONTRACT_TOOLS = F743_CONTRACT_TOOLS;
+
+test('param-drift: positive — get_model_policy satisfies the contract → exit 0', async () => {
+  const stub = await startStub(F745_CONTRACT_TOOLS);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 0, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stdout, /get_model_policy/, 'the report names get_model_policy as a checked tool');
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_model_policy drops workspaceId (KBT-F745) → exit 1', async () => {
+  const stub = await startStub([
+    ...F745_CONTRACT_TOOLS.filter((t) => t.name !== 'get_model_policy'),
+    tool('get_model_policy', []),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_model_policy/);
+    assert.match(result.stderr, /workspaceId/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_model_policy missing entirely (KBT-F745) → exit 1', async () => {
+  const stub = await startStub(F745_CONTRACT_TOOLS.filter((t) => t.name !== 'get_model_policy'));
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_model_policy/);
     assert.match(result.stderr, /not exposed by the live registry/);
   } finally {
     stub.server.close();
