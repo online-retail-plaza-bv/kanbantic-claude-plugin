@@ -52,6 +52,9 @@ const REQUIRED_PARAMS = {
   // KBT-F742 / KBT-SR643 — Beslisbak: the router and the skills lean on these shapes.
   request_decision: ['workspaceId', 'question', 'optionsJson', 'recipientRole'],
   answer_decision: ['decisionRequestId', 'optionKey'],
+  // KBT-F743 / KBT-SR648 — Vloot: the orchestrate-SKILL hand-over and the /epic mod call these.
+  get_fleet_digest: ['workspaceId'],
+  get_fleet_overview: ['workspaceId'],
 };
 
 function fatal(code, msg) {

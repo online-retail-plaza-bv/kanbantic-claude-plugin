@@ -110,6 +110,9 @@ test('param-drift: positive — create_version requires applicationId → exit 0
     // KBT-F742 — the contract grew; a positive stub must expose every contract tool.
     tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
     tool('answer_decision', ['decisionRequestId', 'optionKey']),
+    // KBT-F743 — the contract grew again; a positive stub must expose every contract tool.
+    tool('get_fleet_digest', ['workspaceId']),
+    tool('get_fleet_overview', ['workspaceId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -214,7 +217,12 @@ const F742_CONTRACT_TOOLS = [
 ];
 
 test('param-drift: positive — the F742 decision tools satisfy the contract → exit 0', async () => {
-  const stub = await startStub(F742_CONTRACT_TOOLS);
+  // KBT-F743 — the fleet tools joined the contract; a positive stub exposes them too.
+  const stub = await startStub([
+    ...F742_CONTRACT_TOOLS,
+    tool('get_fleet_digest', ['workspaceId']),
+    tool('get_fleet_overview', ['workspaceId']),
+  ]);
   try {
     const result = await runScript(stub.port);
     assert.strictEqual(result.code, 0, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
@@ -261,6 +269,56 @@ test('param-drift: negative — request_decision missing entirely (KBT-F742) →
     const result = await runScript(stub.port);
     assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
     assert.match(result.stderr, /request_decision/);
+    assert.match(result.stderr, /not exposed by the live registry/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+// ── KBT-F743 / KBT-SR648 §REST en MCP — fleet tools in the required-parameter contract ──
+//
+//   get_fleet_digest   → ["workspaceId"]
+//   get_fleet_overview → ["workspaceId"]
+
+const F743_CONTRACT_TOOLS = [
+  ...F742_CONTRACT_TOOLS,
+  tool('get_fleet_digest', ['workspaceId']),
+  tool('get_fleet_overview', ['workspaceId']),
+];
+
+test('param-drift: positive — the F743 fleet tools satisfy the contract → exit 0', async () => {
+  const stub = await startStub(F743_CONTRACT_TOOLS);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 0, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stdout, /get_fleet_digest/, 'the report names get_fleet_digest as a checked tool');
+    assert.match(result.stdout, /get_fleet_overview/, 'the report names get_fleet_overview as a checked tool');
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_fleet_digest drops workspaceId (KBT-F743) → exit 1', async () => {
+  const stub = await startStub([
+    ...F743_CONTRACT_TOOLS.filter((t) => t.name !== 'get_fleet_digest'),
+    tool('get_fleet_digest', ['window']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_fleet_digest/);
+    assert.match(result.stderr, /workspaceId/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_fleet_overview missing entirely (KBT-F743) → exit 1', async () => {
+  const stub = await startStub(F743_CONTRACT_TOOLS.filter((t) => t.name !== 'get_fleet_overview'));
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_fleet_overview/);
     assert.match(result.stderr, /not exposed by the live registry/);
   } finally {
     stub.server.close();

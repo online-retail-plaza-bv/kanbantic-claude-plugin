@@ -131,3 +131,13 @@ test('KBT-F742 — snapshot lists request_decision, answer_decision, list_decisi
   const sorted = [...snapshot.tools].sort();
   assert.deepStrictEqual(snapshot.tools, sorted, 'tools must stay alphabetical');
 });
+
+// KBT-F743 / KBT-SR648 — the two read-only fleet tools exist live and are name-only in the snapshot.
+test('KBT-F743 — snapshot lists get_fleet_digest and get_fleet_overview (alphabetical, not curated out)', () => {
+  for (const name of ['get_fleet_digest', 'get_fleet_overview']) {
+    assert.ok(tools.has(name), `snapshot must contain ${name}`);
+    assert.ok(!snapshot.curatedOut.includes(name), `${name} must not be curated out`);
+  }
+  const sorted = [...snapshot.tools].sort();
+  assert.deepStrictEqual(snapshot.tools, sorted, 'tools must stay alphabetical');
+});

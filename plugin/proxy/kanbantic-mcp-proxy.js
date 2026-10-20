@@ -289,6 +289,11 @@ async function dispatch(line) {
   // mutations here, or the attached id is silently dropped (KBT-GTCH149-style trap).
   const fromSessionIdAttached = attachFromSessionIdToSendMessageCall(msg);
 
+  // KBT-F743 — attach the model id the session runs on (settings.json `model` /
+  // ANTHROPIC_MODEL) to a forwarded register_agent_session call. Same "must feed
+  // bodyToForward" contract as the three mutations above.
+  const modelIdAttached = attachModelIdToRegisterCall(msg);
+
   // KBT-F464: resolve a filePath argument into content before forwarding. On an
   // ambiguity / unreadable-file error, respond with a JSON-RPC error and do NOT
   // forward. On success, the message's arguments are mutated in place and the
@@ -302,7 +307,7 @@ async function dispatch(line) {
     }
     return;
   }
-  const bodyToForward = (fp.mutated || tokenAttached || cliSessionIdAttached || fromSessionIdAttached) ? JSON.stringify(msg) : line;
+  const bodyToForward = (fp.mutated || tokenAttached || cliSessionIdAttached || fromSessionIdAttached || modelIdAttached) ? JSON.stringify(msg) : line;
 
   try {
     const responses = await forward(bodyToForward);
@@ -526,6 +531,62 @@ function attachClaudeCliSessionIdToRegisterCall(msg) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// KBT-F743 / KBT-SR646 — AgentSession.ModelId (source Settings).
+//
+// The Vloot page shows per agent which model it runs on. The proxy is the one
+// place that can read it at registration time without the model's cooperation:
+// `model` in Claude Code's settings files, in the order the F743 contract fixes:
+//
+//   1. $CLAUDE_CONFIG_DIR/settings.json   (per-account config dir, KBT-F753)
+//   2. ~/.claude/settings.json            (user)
+//   3. <cwd>/.claude/settings.local.json  (project, personal)
+//   4. <cwd>/.claude/settings.json        (project, shared)
+//   5. env ANTHROPIC_MODEL
+//
+// The first file whose `model` is a non-empty string wins. Nothing found → the
+// argument is OMITTED (never an empty string): the server then records
+// ModelSource Unknown and KBT-F745 may later fill it from the transcript.
+// A `modelId` the caller already set is never clobbered.
+// ---------------------------------------------------------------------------
+const MODEL_ID_ARGUMENT = 'modelId';
+
+function readModelFromSettingsFile(file) {
+  try {
+    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (json && typeof json.model === 'string' && json.model.trim()) return json.model.trim();
+  } catch {
+    // Absent, unreadable or not JSON — the next candidate decides.
+  }
+  return undefined;
+}
+
+function readConfiguredModelId() {
+  const candidates = [];
+  if (process.env.CLAUDE_CONFIG_DIR) candidates.push(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'));
+  candidates.push(path.join(os.homedir(), '.claude', 'settings.json'));
+  candidates.push(path.join(process.cwd(), '.claude', 'settings.local.json'));
+  candidates.push(path.join(process.cwd(), '.claude', 'settings.json'));
+  for (const file of candidates) {
+    const model = readModelFromSettingsFile(file);
+    if (model) return model;
+  }
+  const fromEnv = process.env.ANTHROPIC_MODEL;
+  return fromEnv && fromEnv.trim() ? fromEnv.trim() : undefined;
+}
+
+function attachModelIdToRegisterCall(msg) {
+  if (!isRegisterAgentSessionCall(msg)) return false;
+  if (!msg.params.arguments || typeof msg.params.arguments !== 'object') {
+    msg.params.arguments = {};
+  }
+  if (msg.params.arguments[MODEL_ID_ARGUMENT]) return false; // caller already set one — don't clobber
+  const modelId = readConfiguredModelId();
+  if (!modelId) return false; // nothing found — omit rather than send ''
+  msg.params.arguments[MODEL_ID_ARGUMENT] = modelId;
+  return true;
+}
+
 // KBT-F718 fast-follow — send_message's explicit-sender path (fromSessionId) only helps if
 // something actually populates it. Before this, EVERY call fell back to the server's
 // heuristic (AgentChannelAppService.ResolveAgentSessionIdAsync's "most recently seen
@@ -652,6 +713,9 @@ async function autoRegister() {
   // new one (KBT-SR624). Absent for a proxy build/launch that has no such env var (older claude,
   // or a context where it isn't set) — omitted rather than sent as an empty string.
   if (process.env.CLAUDE_CODE_SESSION_ID) args.claudeCliSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  // KBT-F743 — the model id from settings.json / ANTHROPIC_MODEL, omitted when unknown.
+  const configuredModelId = readConfiguredModelId();
+  if (configuredModelId) args[MODEL_ID_ARGUMENT] = configuredModelId;
 
   const request = {
     jsonrpc: '2.0',
@@ -1865,6 +1929,9 @@ module.exports = {
   attachProcessTokenToRegisterCall,
   // KBT-F722 — exported for testing the automatic ClaudeCliSessionId injection (resume-reattach).
   attachClaudeCliSessionIdToRegisterCall,
+  // KBT-F743 — exported for testing the modelId lookup order + injection.
+  readConfiguredModelId,
+  attachModelIdToRegisterCall,
   // KBT-F718 fast-follow — exported for testing the automatic fromSessionId injection
   // (KBT-F742: also on request_decision).
   attachFromSessionIdToSendMessageCall,

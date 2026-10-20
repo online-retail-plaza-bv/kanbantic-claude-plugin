@@ -144,12 +144,17 @@ Dit is **optioneel** en vervangt de bestaande status-/Comment-gebaseerde coördi
 
 ## Checklist
 
+0. **Overdracht uit het product (KBT-F743)** — `get_fleet_digest(window: "night")` + `get_fleet_overview` lezen vóór je kiest wat je oppakt.
 1. **Resolve parameters** — `{workspace, initiative, repos}` (HARD GATE on workspace + initiative).
 2. **Load knowledge** — call `bootstrap_agent` / `get_context` so ClaudeMd + patterns are in context (the lane-skills assume this).
 3. **Select issues** — list the initiative's issues, filter to actionable, order by priority + lane.
 4. **Sequence** — for each issue, route to the next lane-skill, wait for hand-off, re-route until terminal.
 5. **Log** — record a Comment per issue-completion and a run-summary at the end.
 5.5. **Record reusable knowledge (v3 §5.7, optional)** — consistentie-check, then AI Toolkit (not local memory) for any orchestration-level pattern/gotcha/rule discovered this run
+
+## Step 0: Overdracht uit het product (KBT-F743)
+
+Bij elke (her)start lees je eerst de overdracht uit Kanbantic in plaats van uit een laptop-logboek: `mcp__kanbantic__get_fleet_digest(workspaceId, window: "night")` geeft als Markdown wat er sinds de vorige dag gebeurd is — gemerged, gedeployed, besluiten (ook de onder mandaat genomen), wie op wat wacht, stilstand en incidenten, elke regel mét bewijs (PR-URL, deployment-code + sha, beslis-code, sessie-id; KBT-RL276 §5: een claim zonder bewijs staat er niet in en telt niet) — en `mcp__kanbantic__get_fleet_overview(workspaceId, onlyAttention: true)` geeft welke agents nú aandacht nodig hebben (`isAttention`, `signal`, `waitingMinutes`). Gebruik beide om in Step 3 te kiezen: eerst wat wacht op jou of op een mens (beslisverzoeken, `WaitingForInput`), dan wat vastzit, dan nieuw werk; raak niets aan wat in de overview al bij een werkende agent staat. Dit is alleen de aanroep plus deze keuze-regel — de vaste briefing in vijf blokken komt in KBT-F752. Overdag mag `window: "day"`; `get_fleet_overview` is de verrijkte vorm van `list_agents`, dat blijft bestaan.
 
 ## Step 1: Resolve parameters
 

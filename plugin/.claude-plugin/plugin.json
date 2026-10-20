@@ -4,5 +4,35 @@
   "description": "Drives the Kanbantic issue lifecycle from Claude Code: intake skills (bug / feature / epic), lane-skills for triage, prepare, execute and review, an autopilot and an orchestrator, plus a bundled MCP proxy and workflow hooks. Every artifact lives in Kanbantic — no local file output. Per-release details: RELEASE_NOTES_v*.md in the repository.",
   "author": {
     "name": "Kanbantic"
+  },
+  "userConfig": {
+    "defaultEpic": {
+      "type": "string",
+      "title": "Standaard-epic voor /epic",
+      "description": "Epic-code (bijv. KBT-E144) die het paneel kanbantic-epic-pane bij sessiestart toont; leeg = alleen via /epic KBT-E###.",
+      "default": ""
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Ververs-interval (s)",
+      "description": "Hoe vaak het /epic-paneel get_epic_children, get_fleet_overview en list_decisions opnieuw ophaalt.",
+      "default": 60,
+      "min": 10,
+      "max": 3600
+    },
+    "stillAfterMinutes": {
+      "type": "number",
+      "title": "Stilstand-drempel (min)",
+      "description": "Wachttijd waarboven een feature-/agentrij in het /epic-paneel rood wordt (naast isAttention / WaitingForInput).",
+      "default": 10,
+      "min": 1,
+      "max": 1440
+    },
+    "workspace": {
+      "type": "string",
+      "title": "Workspace voor het /epic-paneel",
+      "description": "Workspace-slug of -GUID voor get_fleet_overview en list_decisions; leeg = KANBANTIC_WORKSPACE_ID uit de omgeving, anders 'kanbantic'.",
+      "default": "kanbantic"
+    }
   }
 }
