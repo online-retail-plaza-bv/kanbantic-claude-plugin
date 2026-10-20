@@ -656,6 +656,51 @@ De gekozen optie wordt als terminal-input naar de sessie gerelayed. Mislukt de
 aanmaak (niet-2xx, 5 s time-out, geen workspace), dan geldt het oude pad:
 `wait-for-user` `[permission] …` + kanaalbericht. Nooit `allow`.
 
+### Overdracht uit het product (get_fleet_digest / get_fleet_overview) (KBT-F743)
+
+Wat er gisteren gebeurd is en wie nu waarmee bezig is, staat in Kanbantic —
+niet in een laptop-logboek, een chatgeschiedenis of je eigen geheugen. Twee
+read-only tools (KBT-SR648) leveren de overdracht; ze vragen beide alleen
+`workspaceId` (slug of GUID) en staan in `known-mcp-tools.json` en het
+param-drift-contract.
+
+| Tool | Geeft | Wanneer |
+|---|---|---|
+| `get_fleet_digest(workspaceId, window: "night" \| "day" \| "yesterday" \| "custom", from?, to?, format: "markdown" \| "json")` | `{ success, window: { kind, from, to, timeZone }, markdown?, digest?, errorMessage }` — secties *gemerged*, *gedeployed*, *besluiten* (onder mandaat apart gemarkeerd), *wacht op wie*, *stilstand*, *incidenten*; lege sectie = "— niets —" | Bij (her)start van een orchestrator-run (`kanbantic-orchestrate` Step 0), bij een hand-off tussen agents, en voor de PO die 's ochtends wil weten wat er 's nachts gebeurd is |
+| `get_fleet_overview(workspaceId, onlyAttention?, role?, epicId?, maxResults?)` | `{ success, generatedAt, totals { working, silent, waitingForHuman, blocked, idle, total }, agents[], truncated }` — per agent `agentName`, `role`, `modelId`, `status`, `signal`, `signalReason`, `isAttention`, `currentIssueCode`, `lastToolName`, `lastToolActivityAt`, `waitingMinutes`, `openDecisions`, `health` | Vóór je een issue claimt (staat het al bij een werkende agent?), bij "wie wacht op wie", en als `list_agents` te mager is — `list_agents` blijft bestaan, `get_fleet_overview` is de verrijkte vorm |
+
+**Lees de digest als bewijsstuk, niet als verhaal.** Elke regel draagt een
+`evidence`-veld (PR-URL, deployment-code + sha, beslis-code, sessie-id). Een
+"✅ gemerged" dat in het kanaal of op het issue staat maar níet in de digest,
+is geen gemergede PR (KBT-RL276): controleer dan `get_issue` → `pullRequest`
+voordat je erop voortbouwt. Omgekeerd: zet zelf geen afrondingsclaim op een
+issue zonder de PR-URL of de deployment-code erbij, anders haalt de digest hem
+niet op.
+
+**Venster en tijdzone.** `night` = gisteren 19:00 tot vandaag 07:00, `day` =
+vandaag 07:00–19:00, in de tijdzone van het gebruikersprofiel (val terug op
+`Fleet:DefaultTimeZone`, standaard Europe/Amsterdam); een venster ligt nooit in
+de toekomst. Een ongeldig venster geeft `Kanbantic:Fleet.InvalidWindow`; zonder
+`Issues.View` + `AgentSessions.View` `Kanbantic:Fleet.Forbidden`. De digest is
+rate-gelimiteerd (12/min per principal, 429): vraag hem één keer per (her)start,
+niet in een lus.
+
+**Het model dat je draait, meldt de proxy zelf.** Bij `register_agent_session`
+voegt de proxy `modelId` toe uit `model` in Claude Code's `settings.json`
+(volgorde: `$CLAUDE_CONFIG_DIR/settings.json` → `~/.claude/settings.json` →
+`<cwd>/.claude/settings.local.json` → `<cwd>/.claude/settings.json` →
+`ANTHROPIC_MODEL`); niets gevonden → geen `modelId` (de server zet dan
+`ModelSource = Unknown`). Een `modelId` die je zelf meegeeft blijft staan. De
+Vloot-pagina en `get_fleet_overview` tonen het als `modelId` / `modelSource`.
+
+**Claude Code-paneel.** Op een laptop met Claude Code ≥ 2.1.287 toont de mod
+`kanbantic-epic-pane` (`/epic KBT-E###`) dezelfde data als paneel naast de
+chat: voortgang per status, feature-tabel met agent, laatste activiteit en
+wachttijd (rood bij `isAttention` of wachttijd > `stillAfterMinutes`), "Wacht op
+jou" met de open beslisverzoeken (knoppen roepen `answer_decision` aan) en de
+vloot. Alles loopt via dezelfde MCP-proxy; op een `-p`-run of een door de
+daemon gespawnde VM-sessie tekent de mod niets en start hij geen timer.
+
 ## Herkomst
 
 Samengesteld in **KBT-F623** (F7 van KBT-E114) uit 17 gotchas van de

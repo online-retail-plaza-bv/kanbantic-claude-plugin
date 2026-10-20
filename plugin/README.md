@@ -99,6 +99,15 @@ KBT-E045 — Older Epic (pre-v2.4.0)
 
 `kanbantic-issue-execute` auto-detects which shape each Phase uses and walks accordingly — no operator input, no flag.
 
+## Mods — het `/epic`-paneel (KBT-F743, Claude Code ≥ 2.1.287)
+
+Naast skills, hooks en de MCP-proxy levert de plugin één **mod**: `hooks/epic-pane.js`, geladen via `"modules": ["./epic-pane.js"]` in `hooks/hooks.json` (de bestaande settings-hooks staan in hetzelfde bestand). Een mod is JavaScript dat ín Claude Code draait en de interface mag tekenen; deze mod registreert het commando `/epic [KBT-E###]` en opent een paneel naast de chat met de epic-voortgang (`get_epic_children`: balk `██████░░░░ 5/13 Done` + uitsplitsing per status), de feature-tabel (status, agent, laatste echte activiteit, wachttijd — rood bij `isAttention`/`WaitingForInput` of wachttijd > `stillAfterMinutes`), het blok **Wacht op jou** (open beslisverzoeken uit `list_decisions`; de optieknoppen roepen `answer_decision` aan) en de vloot (`get_fleet_overview`: agent, rol, model, status, huidig issue). Elke `refreshSeconds` ververst het paneel; na elke verversing staat één statusregel onder de prompt en krijgt de spinner het suffix `· E144 5/13 · 2 wachten op PO`. Zonder argument gebruikt `/epic` de laatst gekozen epic (`$.store`) of `defaultEpic`.
+
+- **Instellingen** (`/plugin configure`, of `pluginConfigs` in `settings.json`): `defaultEpic`, `refreshSeconds` (60), `stillAfterMinutes` (10), `workspace` (`kanbantic`; leeg → `KANBANTIC_WORKSPACE_ID`).
+- **Geen sleutel in de mod.** Alles loopt via `$.mcp.call('kanbantic', …)` over dezelfde proxy; een mislukte aanroep toont "niet bereikbaar" en start nooit een beurt.
+- **Alleen interactief.** Terminal, Desktop-app en VS Code tekenen; een `-p`-run of een door de Workstation Daemon gespawnde VM-sessie (`KANBANTIC_SPAWN_COMMAND_ID`) krijgt geen timers en geen paneel. Een ongevraagd geopend paneel verschijnt pas vanaf 144 kolommen (110 na een eerdere `/epic`); daaronder opent `/epic` het altijd.
+- **Controle.** `/plugin` toont `1 mod active · kanbantic-claude-plugin`; `claude plugin validate plugin/` leest het manifest en de module; `claude plugin test plugin/` draait `hooks/epic-pane.test.ts` met gestubde MCP-antwoorden (geen netwerk).
+
 ## Architecture
 
 Since **v1.11.0**, the plugin connects to the Kanbantic MCP server through a local **stdio proxy** (`proxy/kanbantic-mcp-proxy.js`) instead of Claude's built‑in HTTP MCP transport.

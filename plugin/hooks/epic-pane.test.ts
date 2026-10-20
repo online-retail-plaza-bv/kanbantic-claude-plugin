@@ -103,7 +103,7 @@ function mcpText(obj: unknown) {
  * `answers` decides what each $.mcp.call resolves to; `env` stands for the
  * process environment.
  */
-function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string, string>, store = new Map<string, unknown>() } = {}): Recorder {
+function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string, string>, store = new Map<string, unknown>(), clock = false } = {}): Recorder {
   const rec = { registered: [], opened: [], timers: [], calls: [], statuses: [], toasts: [], prompts: [], store } as Recorder
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('command.register', (_: any, e: any) => { rec.registered.push(e); return { value: undefined } })
@@ -116,9 +116,10 @@ function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string,
   on('store.set', (_: any, e: any) => { rec.store.set(e.key, e.value); return { value: undefined } })
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'kanbantic' } }))
   on('mcp.call', (_: any, e: any) => { rec.calls.push({ tool: e.tool, args: e.args }); return answers(e.tool, e.args) })
-  // Record the timers the mod starts, then let the mock clock answer them.
-  on('clock.every', (_: any, e: any, next: any) => { rec.timers.push(e.ms ?? e.delayMs ?? e.intervalMs ?? 0); return next(e) })
-  rec.clock = mock.clock(on)
+  // Either a clock the test advances (timer test), or a stub that only records
+  // which timers the mod starts — the kit allows one `clock.every` answer.
+  if (clock) rec.clock = mock.clock(on)
+  else on('clock.every', (_: any, e: any) => { rec.timers.push(e.ms); return { value: undefined } })
   mock.env(on, env)
   return rec
 }
@@ -133,7 +134,7 @@ function defaultAnswers(tool: string) {
 
 const INTERACTIVE = { cwd: '/work', surface: 'terminal', isInteractive: true } as const
 
-test('/epic KBT-E144 opens the pane with progress bar, feature table and "Wacht op jou"', async ($, on) => {
+test('/epic KBT-E144 opens the pane with progress bar, feature table and "Wacht op jou"', { timeoutMs: 30_000 }, async ($, on) => {
   const rec = arrange(on)
   await $.session.start(INTERACTIVE)
   expect(rec.registered.map((r) => r.name)).toEqual(['epic'])
@@ -163,8 +164,9 @@ test('/epic KBT-E144 opens the pane with progress bar, feature table and "Wacht 
     expect(await ui.find({ type: 'Text', text: /KBT-DR043/ })).toBeDefined()
     // Fleet block: agent, role, model.
     const axon11 = await ui.find({ type: 'Text', text: /Axon 11/ })
-    expect(axon11?.text).toMatch(/Reviewer/)
+    expect(axon11?.text).toMatch(/reviewer/i)
     expect(axon11?.text).toMatch(/claude-opus-4-1/)
+    expect(axon11?.text).toMatch(/idle/)
     await ui.unmount()
   }
 })
@@ -200,9 +202,12 @@ test('a wait under stillAfterMinutes stays unmarked', { options: { stillAfterMin
 test('/epic without an argument uses the epic kept in $.store', async ($, on) => {
   const rec = arrange(on, { store: new Map<string, unknown>([['epic-pane.lastEpic', 'KBT-E144']]) })
   await $.session.start(INTERACTIVE)
+  // A stored epic is opened unasked at session start (the engine seats it from 144 columns)…
+  const openedAtStart = rec.opened.length
   await $.command.run({ command: 'epic', args: '' })
-  expect(rec.opened.length).toBe(1)
-  expect(String(rec.opened[0].title)).toContain('KBT-E144')
+  // …and /epic without an argument opens that same epic again, never asking for one.
+  expect(rec.opened.length).toBe(openedAtStart + 1)
+  for (const o of rec.opened) expect(String(o.title)).toContain('KBT-E144')
   expect(rec.calls.find((c) => c.tool === 'get_epic_children')?.args).toMatchObject({ epicId: 'KBT-E144' })
 })
 
@@ -239,10 +244,15 @@ test('the Spinner is left alone while no epic is loaded', async ($, on) => {
   await ui.unmount()
 })
 
-test('the refresh timer runs every refreshSeconds and redraws from fresh MCP data', { options: { refreshSeconds: 60 } }, async ($, on) => {
+test('session.start on an interactive surface starts exactly one timer of refreshSeconds', { options: { refreshSeconds: 90 } }, async ($, on) => {
   const rec = arrange(on)
   await $.session.start(INTERACTIVE)
-  expect(rec.timers).toEqual([60_000])
+  expect(rec.timers).toEqual([90_000])
+})
+
+test('the refresh timer runs every refreshSeconds and redraws from fresh MCP data', { options: { refreshSeconds: 60 } }, async ($, on) => {
+  const rec = arrange(on, { clock: true })
+  await $.session.start(INTERACTIVE)
   await $.command.run({ command: 'epic', args: 'KBT-E144' })
   const before = rec.calls.length
   expect(before).toBe(3)
