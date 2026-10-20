@@ -91,11 +91,11 @@ const MUTANT = path.join(__dirname, 'helpers', 'router-mutant.js');
 const routerScript = () => (process.env.ROUTER_MUTATION === 'always-allow' ? MUTANT : 'permission-request-router.js');
 
 /** Run the router with `rules` in the allow-list cache. Returns result + recorded API calls. */
-async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra = {}, script = routerScript(), cwd } = {}) {
+async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra = {}, sessionExtra = {}, script = routerScript(), cwd } = {}) {
   const dir = mkTmp();
   const stub = await startApiStub(stubResponder);
   try {
-    writeSessionFile(dir);
+    writeSessionFile(dir, sessionExtra);
     const allowFile = path.join(dir, 'allow.json');
     if (rules !== null) {
       fs.writeFileSync(allowFile, JSON.stringify({ allowList: rules.map(TR), allowListFetchedAt: new Date().toISOString() }));
@@ -1511,4 +1511,210 @@ test('sync: the report goes through session-api (5 s deadline, fail-open), never
   assert.match(src, /lib\/session-api\.js/);
   assert.match(src, /postQuietly/);
   assert.match(src, /redactText/);
+});
+
+// ── KBT-F742 / KBT-T5197 / KBT-TC4207 (a) — Permission decision request ─────
+//
+// With no allow-match the router FIRST creates a `Permission` decision request
+// (POST /api/app/decision-request, spec KBT-SR642 §koppeling) so the operator
+// sees it in the Beslisbak and can answer it from there (the answer is relayed
+// as terminal input). Then the existing wait-for-user follows, now with prompt
+// "Permissieverzoek <code>". When the create fails (non-2xx, time-out, no
+// workspace) the router falls back to the KBT-SR638 channel message. In every
+// case: never `allow`.
+//
+
+const DECISION_ROUTE = '/api/app/decision-request';
+
+/** Stub responder: the decision-create succeeds with a code; everything else 200. */
+const decisionOk = (over = {}) => (call) =>
+  (call.url === DECISION_ROUTE ? { status: 200, body: { id: 'f742-0000-dr', code: 'KBT-DR042', status: 0, ...over } } : undefined);
+
+const WS = { workspaceId: '3a24-ws-0001', currentIssueId: '3a24-issue-0001', priority: 2 };
+
+const EXPECTED_OPTIONS = [
+  { key: 'allow-once', title: 'Eenmalig toestaan', consequence: 'De tool draait nu één keer.', terminalInput: 'y\n' },
+  { key: 'allow-always', title: 'Altijd toestaan (regel toevoegen)', consequence: 'Voegt een allow-regel toe aan het permission-allow-item.', terminalInput: 'y\n' },
+  { key: 'deny', title: 'Weigeren', consequence: 'De tool draait niet; de agent kiest een andere weg.', terminalInput: 'n\n' },
+];
+
+test('decision: no match → POST /api/app/decision-request with the contract payload, BEFORE wait-for-user', async () => {
+  const before = Date.now();
+  const r = await route(['Bash(npm *)'], bash('git push origin main'), { stubResponder: decisionOk(), sessionExtra: WS });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), '', 'never a decision on stdout');
+
+  const idx = urls(r).indexOf(DECISION_ROUTE);
+  assert.ok(idx >= 0, `decision-request expected, got ${urls(r)}`);
+  const waitIdx = urls(r).findIndex((u) => u.endsWith('/wait-for-user'));
+  assert.ok(waitIdx > idx, 'the decision request must be created before the session is marked waiting');
+
+  const dr = r.calls[idx];
+  assert.equal(dr.method, 'POST');
+  assert.equal(dr.headers['x-api-key'], 'test');
+  const b = dr.body;
+  assert.equal(b.workspaceId, WS.workspaceId);
+  assert.equal(b.kind, 2, 'DecisionRequestKind.Permission');
+  assert.equal(b.recipientRole, 4, 'DecisionRecipientRole.Operator');
+  assert.equal(b.question, 'Permissie voor Bash?');
+  assert.equal(b.context, 'git push origin main');
+  assert.equal(b.issueId, WS.currentIssueId);
+  assert.deepEqual(b.options, EXPECTED_OPTIONS);
+  assert.equal(b.recommendedOptionKey, 'allow-once');
+  assert.equal(b.rationale, 'Bash: git push origin main');
+  assert.equal(b.priority, 2, 'the session priority');
+  assert.equal(b.fromSessionId, 'SESS-1');
+  assert.equal(b.defaultOptionKey, undefined, 'no default choice: a permission is never auto-answered');
+  assert.equal(b.mandateRef, undefined);
+  const deadline = Date.parse(b.deadlineAt);
+  assert.ok(Number.isFinite(deadline), `deadlineAt must be an ISO timestamp, got ${b.deadlineAt}`);
+  assert.ok(/Z$/.test(b.deadlineAt), 'deadlineAt is UTC');
+  const expected = 120 * 60_000;
+  assert.ok(Math.abs(deadline - before - expected) < 60_000, `deadline ≈ now + 120 min, got ${(deadline - before) / 60_000} min`);
+
+  const wait = r.calls[waitIdx];
+  assert.equal(wait.body.prompt, 'Permissieverzoek KBT-DR042');
+  assert.ok(!r.calls.some((c) => c.url.includes('/api/app/agent-channel/')),
+    'the decision request IS the question — no duplicate channel message when the create succeeded');
+  assert.ok(!r.calls.some((c) => c.body && c.body.permissionDecision), 'no allow may be recorded');
+});
+
+test('decision: PERMISSION_DEADLINE_MINUTES overrides the 120-minute default', async () => {
+  const before = Date.now();
+  const r = await route([], bash('ls'), { stubResponder: decisionOk(), sessionExtra: WS, extraEnv: { PERMISSION_DEADLINE_MINUTES: '30' } });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.ok(Math.abs(Date.parse(dr.body.deadlineAt) - before - 30 * 60_000) < 60_000);
+});
+
+test('decision: priority defaults to Medium (1) and issueId is omitted when the session file has none', async () => {
+  const r = await route([], bash('ls'), { stubResponder: decisionOk(), sessionExtra: { workspaceId: WS.workspaceId } });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.equal(dr.body.priority, 1);
+  assert.ok(!('issueId' in dr.body) || dr.body.issueId == null, 'no current issue → no issueId');
+});
+
+test('decision: workspaceId falls back to KANBANTIC_WORKSPACE_ID when the session file has none', async () => {
+  const r = await route([], bash('ls'), { stubResponder: decisionOk(), extraEnv: { KANBANTIC_WORKSPACE_ID: 'ws-from-env' } });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.equal(dr.body.workspaceId, 'ws-from-env');
+});
+
+test('decision: no workspace known at all → no create, the KBT-SR638 fallback (wait-for-user + channel message)', async () => {
+  const r = await route([], bash('ls'), { stubResponder: decisionOk() });
+  assert.equal(r.stdout.trim(), '');
+  assert.ok(!urls(r).includes(DECISION_ROUTE), 'cannot create a decision request without a workspace');
+  const wait = r.calls.find((c) => c.url.endsWith('/wait-for-user'));
+  assert.equal(wait.body.prompt, '[permission] Bash: ls');
+  assert.ok(r.calls.some((c) => c.url === '/api/app/agent-channel/message/CHAN-1'));
+});
+
+test('decision: context and rationale are redacted — no secret value reaches the API (SEC064 §4)', async () => {
+  const r = await route([], bash('curl -H "Authorization: Bearer abc123xyz" --password hunter2 https://example.test/x'), { stubResponder: decisionOk(), sessionExtra: WS });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.ok(!dr.raw.includes('abc123xyz'), 'bearer token leaked');
+  assert.ok(!dr.raw.includes('hunter2'), 'password leaked');
+  assert.ok(dr.body.context.includes('***'));
+  assert.ok(dr.body.rationale.includes('***'));
+  assert.ok(!r.calls.some((c) => c.raw.includes('hunter2') || c.raw.includes('abc123xyz')), 'secret leaked to the API');
+});
+
+test('decision: sensitive keys of a non-Bash tool_input are masked in context/rationale', async () => {
+  const r = await route([], { tool_name: 'mcp__x__call', tool_input: { apiKey: 'zzz-secret-value', token: 'tok-1', note: 'hello' } }, { stubResponder: decisionOk(), sessionExtra: WS });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.ok(!dr.raw.includes('zzz-secret-value') && !dr.raw.includes('tok-1'));
+  assert.ok(dr.body.context.includes('hello'));
+  assert.equal(dr.body.question, 'Permissie voor mcp__x__call?');
+  // The body is JSON-in-JSON; every value under a sensitive key name must be the mask.
+  for (const m of dr.raw.matchAll(/\\"(apiKey|token)\\":\\"([^"\\]*)\\"/g)) assert.equal(m[2], '***', m[0]);
+});
+
+test('decision: context is capped at 2000 chars, rationale too; the wait-for-user prompt still names the code', async () => {
+  const r = await route([], bash(`echo ${'y'.repeat(6000)}`), { stubResponder: decisionOk(), sessionExtra: WS });
+  const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+  assert.ok(dr, `decision-request expected, got ${urls(r)}`);
+  assert.ok(dr.body.context.length <= 2000, `context length ${dr.body.context.length}`);
+  assert.ok(dr.body.rationale.length <= 2000, `rationale length ${dr.body.rationale.length}`);
+  assert.ok(dr.body.context.startsWith('echo yyy'));
+  const wait = r.calls.find((c) => c.url.endsWith('/wait-for-user'));
+  assert.equal(wait.body.prompt, 'Permissieverzoek KBT-DR042');
+});
+
+test('decision: create returns 500 → fallback to wait-for-user "[permission] …" + channel message; never allow', async () => {
+  const r = await route(['Bash(npm *)'], bash('git status'), {
+    stubResponder: (call) => (call.url === DECISION_ROUTE ? { status: 500, body: { error: { code: 'boom' } } } : undefined),
+    sessionExtra: WS,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), '');
+  assert.ok(urls(r).includes(DECISION_ROUTE), 'the create was attempted');
+  const wait = r.calls.find((c) => c.url.endsWith('/wait-for-user'));
+  assert.ok(wait, `wait-for-user expected, got ${urls(r)}`);
+  assert.equal(wait.body.prompt, '[permission] Bash: git status');
+  const msg = r.calls.find((c) => c.url === '/api/app/agent-channel/message/CHAN-1');
+  assert.ok(msg, 'the KBT-SR638 channel message is the fallback');
+  assert.deepEqual(msg.body, { content: '[permission] Bash: git status', fromSessionId: 'SESS-1' });
+});
+
+test('decision: create returns 400 (validation) → same fallback, never allow', async () => {
+  const r = await route([], bash('git status'), {
+    stubResponder: (call) => (call.url === DECISION_ROUTE ? { status: 400, body: { error: { code: 'Kanbantic:DecisionRequest.OptionsRequired' } } } : undefined),
+    sessionExtra: WS,
+  });
+  assert.equal(r.stdout.trim(), '');
+  assert.ok(r.calls.some((c) => c.url.endsWith('/wait-for-user') && c.body.prompt === '[permission] Bash: git status'));
+  assert.ok(r.calls.some((c) => c.url === '/api/app/agent-channel/message/CHAN-1'));
+});
+
+test('decision: create hangs → 5 s time-out, then the fallback; the hook never wedges', { timeout: 30000 }, async () => {
+  const started = Date.now();
+  const r = await route([], bash('git status'), {
+    stubResponder: (call) => (call.url === DECISION_ROUTE ? { hang: true } : undefined),
+    sessionExtra: WS,
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), '');
+  assert.ok(elapsed >= 4500 && elapsed < 15000, `expected ≈5 s time-out, took ${elapsed} ms`);
+  assert.ok(r.calls.some((c) => c.url.endsWith('/wait-for-user') && c.body.prompt === '[permission] Bash: git status'), `fallback wait expected, got ${urls(r)}`);
+  assert.ok(r.calls.some((c) => c.url === '/api/app/agent-channel/message/CHAN-1'));
+});
+
+test('decision: a 2xx without a code still marks the session waiting (prompt falls back to the tool prompt)', async () => {
+  const r = await route([], bash('git status'), {
+    stubResponder: (call) => (call.url === DECISION_ROUTE ? { status: 200, body: {} } : undefined),
+    sessionExtra: WS,
+  });
+  assert.equal(r.stdout.trim(), '');
+  const wait = r.calls.find((c) => c.url.endsWith('/wait-for-user'));
+  assert.ok(wait, 'wait-for-user expected');
+  assert.equal(wait.body.prompt, '[permission] Bash: git status');
+});
+
+test('decision: an allow-list match never creates a decision request', async () => {
+  const r = await route(['Bash(git *)'], bash('git status'), { stubResponder: decisionOk(), sessionExtra: WS });
+  assert.deepEqual(decisionOf(r), ALLOW_JSON);
+  assert.ok(!urls(r).includes(DECISION_ROUTE));
+});
+
+test('decision: every negative case creates a decision request, and none of them allows', async () => {
+  for (const [name, rules, tool] of NEGATIVE_CASES) {
+    const r = await route(rules, tool, { stubResponder: decisionOk(), sessionExtra: WS });
+    assert.equal(r.stdout.trim(), '', `${name}: router must stay silent, got ${r.stdout}`);
+    const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
+    assert.ok(dr, `${name}: decision-request expected, got ${urls(r)}`);
+    assert.equal(dr.body.kind, 2);
+    assert.equal(dr.body.question, `Permissie voor ${tool.tool_name}?`);
+    assert.ok(r.calls.some((c) => c.url.endsWith('/wait-for-user') && c.body.prompt === 'Permissieverzoek KBT-DR042'), name);
+  }
+});
+
+test('decision: the always-allow mutant (router-mutant.js, the F741 decide seam) flips a decision case to allow (so the decision cases are sensitive)', async () => {
+  const r = await route(['Bash(npm *)'], bash('git push --force'), { stubResponder: decisionOk(), sessionExtra: WS, script: MUTANT });
+  assert.deepEqual(decisionOf(r), ALLOW_JSON);
+  assert.ok(!urls(r).includes(DECISION_ROUTE));
 });

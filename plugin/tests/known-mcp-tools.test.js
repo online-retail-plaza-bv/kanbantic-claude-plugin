@@ -121,3 +121,13 @@ test('KBT-F741 — snapshot lists report_tool_activity and report_turn_start (al
   const sorted = [...snapshot.tools].sort();
   assert.deepStrictEqual(snapshot.tools, sorted, 'tools must stay alphabetical');
 });
+
+// KBT-F742 / KBT-SR643 — the four decision tools exist live and are name-only in the snapshot.
+test('KBT-F742 — snapshot lists request_decision, answer_decision, list_decisions, withdraw_decision (not curated out)', () => {
+  for (const name of ['request_decision', 'answer_decision', 'list_decisions', 'withdraw_decision']) {
+    assert.ok(tools.has(name), `snapshot must contain ${name}`);
+    assert.ok(!snapshot.curatedOut.includes(name), `${name} must not be curated out`);
+  }
+  const sorted = [...snapshot.tools].sort();
+  assert.deepStrictEqual(snapshot.tools, sorted, 'tools must stay alphabetical');
+});
