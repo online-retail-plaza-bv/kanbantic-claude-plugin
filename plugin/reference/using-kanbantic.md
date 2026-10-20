@@ -533,7 +533,7 @@ is het model — en dus de proxy — niet aanspreekbaar.
 | Event | Script | Meldt |
 |---|---|---|
 | `Notification` (`permission_prompt\|idle_prompt\|agent_needs_input`) | `notification-session-state.js` | `wait-for-user` met `[<type>] <titel>: <bericht>` (max 2000) |
-| `PermissionRequest` | `permission-request-router.js` | allow-list-match → `allow` + tool-activity; anders `wait-for-user` + kanaalbericht, **geen** beslissing |
+| `PermissionRequest` | `permission-request-router.js` | allow-list-match → `allow` + tool-activity; anders eerst een `Permission`-beslisverzoek (KBT-F742, zie de sectie hierna) + `wait-for-user` `Permissieverzoek <code>`; mislukt dat → `wait-for-user` + kanaalbericht; **geen** beslissing |
 | `PreToolUse` / `PostToolUse` | `tool-activity.js --pre` / `--post` | `tool-activity` `{toolName, toolUseId, startedAt}` / `{toolUseId, endedAt}` |
 | `UserPromptSubmit` | `turn-start.js` | `turn-start` `{at}` |
 | `Stop` | `stop-session-idle.js` | `heartbeat` `{status: Idle, summary (300, geredigeerd), activeBackgroundTasks}` |
@@ -595,6 +595,66 @@ die cache — geen netwerk op het hete pad — en neemt de nieuwste van beide.
 > Het `timeout`-veld in `hooks.json` is volgens de Claude Code-docs in
 > **seconden**; de bestaande hooks gebruiken `8000`/`20000` — de scripts begrenzen
 > zichzelf (HTTP 5 s, stdin 3 s), dus de waarde is geen werkende bovengrens.
+
+### Vraag een keuze met `request_decision`, niet met `wait_for_user` (KBT-F742)
+
+Een vraag aan een mens **mét opties** is een beslisverzoek, geen vrije vraag.
+`wait_for_user` blijft uitsluitend voor een vrije vraag zonder opties
+(KBT-RL275 §5); een keuze, een akkoord of een permissie gaat via
+`request_decision`, zodat hij met aanbeveling en onderbouwing in de Beslisbak
+(en via Telegram/e-mail) bij de juiste rol landt. "Wat wil je?" zonder voorstel
+weigert de API (`Kanbantic:DecisionRequest.RecommendationRequired` /
+`.RationaleRequired`; minstens twee opties, `.OptionsRequired`).
+
+| Situatie | Wat je gebruikt |
+|---|---|
+| Keuze tussen ≥ 2 opties, akkoord op een voorstel, informatie-besluit | `request_decision` (`kind`: `Choice` / `Approval` / `Information`) |
+| Permissievraag van Claude Code (tool zonder allow-regel) | niets — de router maakt zelf een `Permission`-verzoek (hieronder) |
+| Vrije vraag zonder opties ("hoe heet de klant?") | `wait_for_user` |
+
+**Signature.** `request_decision(workspaceId, question, optionsJson,
+recipientRole, recommendedOptionKey, rationale, kind?, issueId?, context?,
+deadlineAt?, defaultOptionKey?, mandateRef?, priority?)` →
+`{ success, decisionRequestId, code: "KBT-DR###", status, deadlineAt, inboxUrl }`.
+`optionsJson` is een JSON-string van `[{ key, title, consequence, costOrRisk? }]`;
+`recipientRole` is `ProductOwner | Developer | Designer | Tester | Operator`;
+`issueId` accepteert GUID of code. `fromSessionId` hoef je niet mee te geven —
+de proxy vult je eigen sessie in (zoals bij `send_message`). Een
+`defaultOptionKey` (automatisch antwoord bij verlopen) kan alleen mét
+`mandateRef`.
+
+**Werkwijze.**
+
+1. Post de vraag **niet** eerst in het kanaal: het verzoek ís de vraag.
+2. `request_decision(...)` → noteer `code`.
+3. `wait_for_user(sessionId, prompt: "Beslisverzoek <code>")` en beëindig je
+   beurt (onbemand: KBT-TRUL041).
+4. Het antwoord komt als `DecisionAnswer`-bericht in je **eigen** kanaal
+   (`**Besluit op <code>** — … Gekozen: **<titel>** (<key>)`); de proxy zet
+   `decisionRequestId`, `code`, `optionKey` en `via` in de meta van de
+   notificatie, dus parsen hoeft niet. Het antwoord zet je sessie zelf weer op
+   `Working` — geen `resume_working` nodig. Verloopt het verzoek zonder
+   antwoord, dan komt een `DecisionExpired`-bericht en blijft de sessie
+   `WaitingForInput`.
+5. `list_decisions(workspaceId, status: "Open", onlyMine: true)` toont wat nog
+   openstaat; `withdraw_decision(decisionRequestId, reason)` (≥ 10 tekens)
+   trekt een achterhaalde vraag in. Andermans verzoek beantwoord je met
+   `answer_decision(decisionRequestId, optionKey, note?)` — nooit je eigen
+   (`.SelfAnswer`, 403), en afwijken van de aanbeveling vereist een notitie.
+
+**Permissievragen gaan vanzelf.** Vraagt Claude Code om permissie voor een tool
+die niet onder de allow-list valt, dan maakt `permission-request-router.js`
+zelf een `Permission`-verzoek voor rol `Operator`:
+`Permissie voor <tool_name>?`, context = de geredigeerde, ingekorte
+tool-input (max 2000 tekens), opties `allow-once` (`y⏎`), `allow-always`
+(`y⏎` + regel in het `permission-allow`-item) en `deny` (`n⏎`), aanbeveling
+`allow-once`, deadline nu + `PERMISSION_DEADLINE_MINUTES` (env, standaard 120),
+zonder standaardkeuze. `workspaceId` komt uit het sessiebestand (de proxy
+schrijft het na `register_agent_session`) of uit `KANBANTIC_WORKSPACE_ID`;
+`issueId` uit `currentIssueId` in het sessiebestand (`set_current_issue`).
+De gekozen optie wordt als terminal-input naar de sessie gerelayed. Mislukt de
+aanmaak (niet-2xx, 5 s time-out, geen workspace), dan geldt het oude pad:
+`wait-for-user` `[permission] …` + kanaalbericht. Nooit `allow`.
 
 ## Herkomst
 

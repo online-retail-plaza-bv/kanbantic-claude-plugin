@@ -107,6 +107,9 @@ test('param-drift: positive — create_version requires applicationId → exit 0
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
     tool('report_tool_activity', ['sessionId', 'toolUseId']),
+    // KBT-F742 — the contract grew; a positive stub must expose every contract tool.
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -131,6 +134,8 @@ test('param-drift: negative — create_version drops applicationId → exit 1', 
     // applicationId intentionally removed from required
     tool('create_version', ['workspaceId', 'name']),
     tool('report_tool_activity', ['sessionId', 'toolUseId']),
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -172,6 +177,8 @@ test('param-drift: negative — report_tool_activity drops toolUseId (KBT-F741) 
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
     tool('report_tool_activity', ['sessionId']),
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
   ]);
   try {
     const result = await runScript(stub.port);

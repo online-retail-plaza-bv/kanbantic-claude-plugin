@@ -11,8 +11,15 @@
 //         "decision":{"behavior":"allow"}}}
 //       and a tool-activity row with permissionDecision "allow-list: <rule>"
 //   no match                           → NO decision on stdout (the user decides),
-//       wait-for-user "[permission] <tool_name>: <input, redacted, ≤500>" and the
-//       same text as a message in the session's own channel
+//       first a `Permission` decision request (KBT-F742, POST
+//       /api/app/decision-request: kind Permission, recipient Operator, options
+//       allow-once / allow-always / deny with terminalInput, recommended
+//       allow-once) so the operator answers it from the Beslisbak and the answer
+//       is relayed as terminal input; then wait-for-user "Permissieverzoek <code>".
+//       When the create fails (non-2xx, 5 s time-out, no workspace known) the
+//       KBT-SR638 fallback applies: wait-for-user "[permission] <tool_name>:
+//       <input, redacted, ≤500>" and the same text as a message in the session's
+//       own channel.
 //
 // It NEVER emits `deny`, and NEVER emits `allow` unless a validated rule from
 // the cache matched locally. API failures change nothing about the decision:
@@ -42,6 +49,15 @@ const { decide } = require('./lib/permission-allow.js');
 const { loadAllowList } = require('./lib/allow-cache.js');
 
 const MAX_INPUT = 500;
+const MAX_DECISION_TEXT = 2000; // CreateDecisionRequestInput: context ≤ 8000, rationale ≤ 2000 — both kept short
+
+const DECISION_KIND_PERMISSION = 2;   // DecisionRequestKind.Permission
+const DECISION_ROLE_OPERATOR = 4;     // DecisionRecipientRole.Operator
+const DECISION_OPTIONS = [
+  { key: 'allow-once', title: 'Eenmalig toestaan', consequence: 'De tool draait nu één keer.', terminalInput: 'y\n' },
+  { key: 'allow-always', title: 'Altijd toestaan (regel toevoegen)', consequence: 'Voegt een allow-regel toe aan het permission-allow-item.', terminalInput: 'y\n' },
+  { key: 'deny', title: 'Weigeren', consequence: 'De tool draait niet; de agent kiest een andere weg.', terminalInput: 'n\n' },
+];
 
 const ALLOW_OUTPUT = {
   hookSpecificOutput: {
@@ -77,13 +93,63 @@ async function reportAllow(payload, ctx, rule) {
   }, 'tool-activity (allow)');
 }
 
+/**
+ * The Permission decision request for this tool call (KBT-SR642 §koppeling).
+ * Redaction happens inside summarizeToolInput, BEFORE truncation (SEC064 §4):
+ * the request carries only tool_name and the shortened, redacted input.
+ */
+function buildDecisionRequest(payload, ctx, env = process.env) {
+  const workspaceId = api.workspaceIdOf(ctx, env);
+  if (!workspaceId) return null;
+  const input = api.summarizeToolInput(payload.tool_name, payload.tool_input, MAX_DECISION_TEXT);
+  const body = {
+    workspaceId,
+    kind: DECISION_KIND_PERMISSION,
+    recipientRole: DECISION_ROLE_OPERATOR,
+    question: `Permissie voor ${payload.tool_name}?`,
+    context: input,
+    options: DECISION_OPTIONS,
+    recommendedOptionKey: 'allow-once',
+    rationale: api.truncate(`${payload.tool_name}: ${input}`, MAX_DECISION_TEXT),
+    priority: api.priorityOf(ctx),
+    deadlineAt: new Date(Date.now() + api.permissionDeadlineMinutes(env) * 60_000).toISOString(),
+    fromSessionId: ctx.sessionId,
+  };
+  const issueId = api.currentIssueIdOf(ctx);
+  if (issueId) body.issueId = issueId;
+  return body;
+}
+
+/** Resolves the created request's code (or null when the create did not succeed). */
+async function createPermissionDecision(payload, ctx) {
+  const input = buildDecisionRequest(payload, ctx);
+  if (!input) {
+    api.debug('no workspaceId in the session file or KANBANTIC_WORKSPACE_ID — no decision request, channel fallback');
+    return null;
+  }
+  try {
+    const dto = await api.createDecisionRequest(ctx, input);
+    const code = dto && typeof dto.code === 'string' && dto.code ? dto.code : null;
+    if (!code) api.debug('decision-request created but the response carries no code — using the tool prompt');
+    return code;
+  } catch (err) {
+    api.debug('decision-request failed — channel fallback', err);
+    return null;
+  }
+}
+
 async function reportWaiting(payload, ctx) {
-  const prompt = buildPrompt(payload);
+  // 1. The decision request IS the question (KBT-F742). Sequential on purpose:
+  //    the wait-for-user prompt names the code it returns.
+  const code = await createPermissionDecision(payload, ctx);
+  // 2. Session state. With a code there is no separate channel message — the
+  //    answer comes back as a DecisionAnswer message in this channel anyway.
+  const prompt = code ? `Permissieverzoek ${code}` : buildPrompt(payload);
   state.markPermissionReported(process.env, api.claudeSessionId(payload) || ctx.sessionId);
   const posts = [api.postQuietly(ctx, api.sessionRoute(ctx, 'wait-for-user'), { prompt }, 'wait-for-user')];
-  if (ctx.channelId) {
+  if (!code && ctx.channelId) {
     posts.push(api.postQuietly(ctx, api.channelMessageRoute(ctx), { content: prompt, fromSessionId: ctx.sessionId }, 'channel message'));
-  } else {
+  } else if (!code) {
     api.debug('session file has no channelId — skipping the channel message');
   }
   await Promise.all(posts);
@@ -119,4 +185,4 @@ if (require.main === module) {
   main().catch((err) => { api.debug('unexpected error', err); process.exit(0); });
 }
 
-module.exports = { buildPrompt };
+module.exports = { buildPrompt, buildDecisionRequest, DECISION_OPTIONS };

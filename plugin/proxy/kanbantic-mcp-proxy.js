@@ -65,6 +65,9 @@ let shuttingDown = false;
 // Agent Communication Hub state (set after register_agent_session succeeds).
 let agentSessionId = null;       // Kanbantic AgentSession.Id
 let agentChannelId = null;       // Home channel — the 1:1 AgentChannel of this session
+let agentCurrentIssueId = null;  // KBT-F742 — the issue set via set_current_issue / register (currentIssueId),
+                                 // written to the session file so the permission router can link a
+                                 // Permission decision request to the issue the session is working on.
 let agentWorkspaceId = null;     // KBT-F717 (hoofdagent-review) — the workspaceId this session was
                                   // registered for; register_agent_session's response never echoes
                                   // it back, so it is captured from the REQUEST arguments instead.
@@ -338,6 +341,20 @@ function postProcess(request, response) {
     if (shouldAutoRegister()) autoRegister().catch(() => {});
   }
 
+  // 1b. KBT-F742 — remember the current issue (set_current_issue) in the session file so
+  //     the permission router can link a Permission decision request to it. Only on a
+  //     confirmed success; `issueId: null` clears it (issue finished, KBT-F717).
+  if (request.method === 'tools/call' &&
+      request.params && request.params.name === 'set_current_issue' &&
+      response.result && response.result.content) {
+    const parsed = parseToolResult(response);
+    if (parsed && parsed.success) {
+      const args = request.params.arguments || {};
+      agentCurrentIssueId = typeof args.issueId === 'string' && args.issueId ? args.issueId : null;
+      writeSessionFile();
+    }
+  }
+
   // 2. Capture sessionId + channelId from register_agent_session response.
   if (request.method === 'tools/call' &&
       request.params && request.params.name === 'register_agent_session' &&
@@ -349,6 +366,10 @@ function postProcess(request, response) {
       // KBT-F717 (hoofdagent-review) — capture from the REQUEST, not the response: the
       // response DTO never echoes workspaceId back.
       agentWorkspaceId = (request.params.arguments && request.params.arguments.workspaceId) || null;
+      // KBT-F742 — a register call may carry the issue it starts on.
+      if (request.params.arguments && typeof request.params.arguments.currentIssueId === 'string') {
+        agentCurrentIssueId = request.params.arguments.currentIssueId || null;
+      }
       // SPIKE (multi-room): the session's own channel is just the first subscription —
       // marked home so it keeps its unprefixed wire format and cannot be left.
       subscribeRoom(agentChannelId, 'home', { home: true });
@@ -515,8 +536,14 @@ function attachClaudeCliSessionIdToRegisterCall(msg) {
 // time, KBT-F717), so it injects it automatically: the model never has to know this
 // parameter exists, and an explicit override the caller DID set (rare, but not this proxy's
 // call to forbid) is never clobbered.
+// KBT-F742 — request_decision has the same explicit-sender parameter: the server records it
+// as RequestedBySessionId, which is the channel the DecisionAnswer message comes back to.
+// answer_decision / list_decisions / withdraw_decision deliberately NOT: only the requester
+// is attributed, and an answer must come from a different principal anyway (SEC064 §3).
+const FROM_SESSION_ID_TOOLS = new Set(['send_message', 'request_decision']);
+
 function attachFromSessionIdToSendMessageCall(msg) {
-  if (!msg || msg.method !== 'tools/call' || !msg.params || msg.params.name !== 'send_message') {
+  if (!msg || msg.method !== 'tools/call' || !msg.params || !FROM_SESSION_ID_TOOLS.has(msg.params.name)) {
     return false;
   }
   if (!agentSessionId) return false; // not registered yet — nothing to inject, forward as-is
@@ -574,6 +601,7 @@ function __resetForTest() {
   agentSessionId = null;
   agentChannelId = null;
   agentWorkspaceId = null; // KBT-F717
+  agentCurrentIssueId = null; // KBT-F742
   // Re-read from process.env only (never the registry): the test controls the key,
   // so the outcome must not depend on the developer's machine (cf. KBT-B438).
   API_KEY = process.env.KANBANTIC_API_KEY;
@@ -1008,6 +1036,10 @@ function writeSessionFile() {
     // keys the file by CLAUDE_CODE_SESSION_ID when available, see session-file.js). Writing it
     // into the body too lets a reader verify/correlate it without re-deriving the filename logic.
     claudeCliSessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
+    // KBT-F742 — read by hooks/permission-request-router.js: a Permission decision request
+    // needs the workspace (required) and links to the current issue (optional).
+    workspaceId: agentWorkspaceId,
+    currentIssueId: agentCurrentIssueId,
     apiUrl: deriveApiUrl(),
     writtenAt: new Date().toISOString(),
     pid: process.pid, // KBT-F717 — liveness check for staleSessionFileCleanup(); NOT an identity key
@@ -1417,6 +1449,29 @@ function channelMeta(fields) {
   return meta;
 }
 
+// KBT-F742 / KBT-SR643 — a DecisionAnswer (6) or DecisionExpired (7) channel message carries
+// a JSON `payload` { decisionRequestId, code, optionKey?, via }. Lift those four fields into
+// the notification meta so the agent never has to parse the Markdown body. MCP responses
+// serialise the enum as a string, REST as a number — both spellings are accepted. Only
+// decision message types are lifted; a Chat message with a decision-shaped payload is not.
+// An unparseable payload yields no decision meta but never drops the message.
+const DECISION_MESSAGE_TYPES = new Set(['DecisionAnswer', 6, '6', 'DecisionExpired', 7, '7']);
+const DECISION_META_FIELDS = ['decisionRequestId', 'code', 'optionKey', 'via'];
+
+function decisionMeta(msg) {
+  if (!msg || !DECISION_MESSAGE_TYPES.has(msg.messageType)) return {};
+  let payload = msg.payload;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch { return {}; }
+  }
+  if (!payload || typeof payload !== 'object') return {};
+  const meta = {};
+  for (const f of DECISION_META_FIELDS) {
+    if (payload[f] !== undefined && payload[f] !== null && payload[f] !== '') meta[f] = String(payload[f]);
+  }
+  return meta;
+}
+
 async function pollRoom(channelId) {
   const sub = roomSubscriptions.get(channelId);
   if (shuttingDown || !sub) return;
@@ -1547,6 +1602,7 @@ async function pollRoom(channelId) {
               channel_id: msg.channelId,
               room_label: current.label,
               room_is_home: current.home,
+              ...decisionMeta(msg), // KBT-F742 — decisionRequestId / code / optionKey / via
             }),
           },
         });
@@ -1809,8 +1865,10 @@ module.exports = {
   attachProcessTokenToRegisterCall,
   // KBT-F722 — exported for testing the automatic ClaudeCliSessionId injection (resume-reattach).
   attachClaudeCliSessionIdToRegisterCall,
-  // KBT-F718 fast-follow — exported for testing the automatic fromSessionId injection.
+  // KBT-F718 fast-follow — exported for testing the automatic fromSessionId injection
+  // (KBT-F742: also on request_decision).
   attachFromSessionIdToSendMessageCall,
+  decisionMeta,
   sessionFilePath,
   writeSessionFile,
   removeSessionFile,

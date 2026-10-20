@@ -49,6 +49,9 @@ const REQUIRED_PARAMS = {
   create_version: ['applicationId'], // KBT-B392 / PR #242 — app-scoped Versions
   // KBT-F741 — session-state reporting: the hooks pair PreToolUse/PostToolUse on toolUseId.
   report_tool_activity: ['sessionId', 'toolUseId'],
+  // KBT-F742 / KBT-SR643 — Beslisbak: the router and the skills lean on these shapes.
+  request_decision: ['workspaceId', 'question', 'optionsJson', 'recipientRole'],
+  answer_decision: ['decisionRequestId', 'optionKey'],
 };
 
 function fatal(code, msg) {
@@ -189,10 +192,11 @@ async function main() {
       process.exit(1);
     }
 
-    const contractCount = Object.keys(REQUIRED_PARAMS).length;
+    const contractTools = Object.keys(REQUIRED_PARAMS);
     process.stdout.write(
       `OK: required-parameter contract satisfied ` +
-        `(${contractCount} tool(s) checked, ${tools.length} total exposed at ${MCP_URL})\n`
+        `(${contractTools.length} tool(s) checked: ${contractTools.join(', ')}; ` +
+        `${tools.length} total exposed at ${MCP_URL})\n`
     );
     process.exit(0);
   } catch (e) {

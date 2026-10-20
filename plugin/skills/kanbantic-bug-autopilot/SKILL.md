@@ -194,7 +194,7 @@ Never skip a lane or step based on assumption — even if the current issue cont
 
 ### Human input during an unattended run — use the channel, not the terminal (KBT-F720)
 
-This skill is designed to run **unattended** — nobody is necessarily watching the terminal. If a lane-skill genuinely needs a human decision mid-batch (an ambiguous no-go, a conflicting spec, anything that would otherwise leave the run just sitting on `report_status("WaitingForInput")` with no one to see it), do not rely on the terminal to be watched:
+This skill is designed to run **unattended** — nobody is necessarily watching the terminal. If a lane-skill genuinely needs a human decision mid-batch (an ambiguous no-go, a conflicting spec, anything that would otherwise leave the run just sitting on `report_status("WaitingForInput")` with no one to see it), do not rely on the terminal to be watched. **Is it a choice with options?** Then it is a decision request (KBT-F742 / KBT-RL275): `request_decision(workspaceId, question, optionsJson, recipientRole, recommendedOptionKey, rationale, issueId)` instead of step 1, then `wait_for_user(sessionId, prompt: "Beslisverzoek <code>")`, end your turn; the answer arrives as a `DecisionAnswer` message in your own channel and puts the session back on `Working`. For a free-form question without options:
 
 1. Post the actual question in your own channel: `send_message(channelId: <own channelId>, content: "<question>")`.
 2. Call `wait_for_user(sessionId, prompt: "<short version>")` — this only sets status for `/agent-sessions`, it does not post anything itself (step 1 is not optional).

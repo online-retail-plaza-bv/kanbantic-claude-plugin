@@ -164,9 +164,10 @@ const channelMessageRoute = (ctx) =>
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 /**
- * POST JSON to `ctx.baseUrl + route`. Resolves `{ status }` for 2xx; rejects for
- * anything else (network, timeout, non-2xx). The error message never contains
- * the API key or the body.
+ * POST JSON to `ctx.baseUrl + route`. Resolves `{ status, body }` for 2xx (body
+ * = the parsed JSON response, or null when there is none / it is not JSON);
+ * rejects for anything else (network, timeout, non-2xx). The error message never
+ * contains the API key or the body.
  */
 function postJson(ctx, route, body, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
@@ -197,10 +198,16 @@ function postJson(ctx, route, body, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
         },
       },
       (res) => {
-        res.resume();
+        let raw = '';
+        res.setEncoding('utf8');
+        // Cap what we keep: a response is never more than a small DTO for us.
+        res.on('data', (c) => { if (raw.length < 65536) raw += c; });
         res.on('end', () => {
-          if (res.statusCode >= 200 && res.statusCode < 300) settle(resolve, { status: res.statusCode });
-          else settle(reject, new Error(`HTTP ${res.statusCode}`));
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            let body = null;
+            try { body = raw ? JSON.parse(raw) : null; } catch (_) { body = null; }
+            settle(resolve, { status: res.statusCode, body });
+          } else settle(reject, new Error(`HTTP ${res.statusCode}`));
         });
         res.on('error', (e) => settle(reject, e));
       }
@@ -293,6 +300,51 @@ function summarizeToolInput(toolName, input, max = 500) {
   return truncate(redactText(json), max);
 }
 
+// ── decision requests (KBT-F742 / KBT-SR642 §koppeling) ─────────────────────
+
+const DECISION_REQUEST_ROUTE = '/api/app/decision-request';
+const DEFAULT_PERMISSION_DEADLINE_MINUTES = 120;
+const PRIORITY_MEDIUM = 1; // Domain.Shared Priority { Low=0, Medium=1, High=2, Critical=3 }
+const PRIORITY_BY_NAME = { low: 0, medium: 1, high: 2, critical: 3 };
+
+/** The workspace this session belongs to: session file first, then the daemon's env. */
+function workspaceIdOf(ctx, env = process.env) {
+  const s = ctx && ctx.session;
+  if (s && typeof s.workspaceId === 'string' && s.workspaceId) return s.workspaceId;
+  if (typeof env.KANBANTIC_WORKSPACE_ID === 'string' && env.KANBANTIC_WORKSPACE_ID) return env.KANBANTIC_WORKSPACE_ID;
+  return null;
+}
+
+/** The issue this session is working on, as recorded by the proxy (set_current_issue). */
+function currentIssueIdOf(ctx) {
+  const s = ctx && ctx.session;
+  return s && typeof s.currentIssueId === 'string' && s.currentIssueId ? s.currentIssueId : null;
+}
+
+/** The session's priority as a Priority enum value; Medium when unknown. */
+function priorityOf(ctx) {
+  const p = ctx && ctx.session ? ctx.session.priority : undefined;
+  if (Number.isInteger(p) && p >= 0 && p <= 3) return p;
+  if (typeof p === 'string' && PRIORITY_BY_NAME[p.toLowerCase()] !== undefined) return PRIORITY_BY_NAME[p.toLowerCase()];
+  return PRIORITY_MEDIUM;
+}
+
+/** `PERMISSION_DEADLINE_MINUTES` (env), default 120. */
+function permissionDeadlineMinutes(env = process.env) {
+  const n = Number.parseInt(env.PERMISSION_DEADLINE_MINUTES, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PERMISSION_DEADLINE_MINUTES;
+}
+
+/**
+ * Create a decision request. Resolves the response DTO (`{ id, code, … }`, or
+ * null when the API sent no JSON) on 2xx; rejects on anything else — the caller
+ * decides what the fallback is. Same 5 s deadline as every other hook post.
+ */
+async function createDecisionRequest(ctx, input) {
+  const { body } = await postJson(ctx, DECISION_REQUEST_ROUTE, input);
+  return body && typeof body === 'object' ? body : null;
+}
+
 // ── hook runner ─────────────────────────────────────────────────────────────
 
 function exit0() { process.exit(0); }
@@ -349,4 +401,12 @@ module.exports = {
   truncate,
   summarizeToolInput,
   runHook,
+  // KBT-F742
+  DECISION_REQUEST_ROUTE,
+  DEFAULT_PERMISSION_DEADLINE_MINUTES,
+  workspaceIdOf,
+  currentIssueIdOf,
+  priorityOf,
+  permissionDeadlineMinutes,
+  createDecisionRequest,
 };
