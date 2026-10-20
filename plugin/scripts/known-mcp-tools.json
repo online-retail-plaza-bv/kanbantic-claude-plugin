@@ -16,6 +16,7 @@
     "add_issue_attachment",
     "add_task",
     "add_wireframe_version_files",
+    "answer_decision",
     "app_version_at_date",
     "approve_phase",
     "approve_review",
@@ -129,6 +130,7 @@
     "link_wireframe_to_issue",
     "list_agents",
     "list_applications",
+    "list_decisions",
     "list_deployment_gates",
     "list_deployments",
     "list_discussion_entries",
@@ -182,6 +184,7 @@
     "report_status",
     "report_tool_activity",
     "report_turn_start",
+    "request_decision",
     "resolve_issue_elsewhere",
     "resolve_specification_conflict",
     "restore_document_version",
@@ -229,6 +232,7 @@
     "update_wireframe_version",
     "validate_repository_credential",
     "version_audit_timeline",
-    "wait_for_user"
+    "wait_for_user",
+    "withdraw_decision"
   ]
 }
