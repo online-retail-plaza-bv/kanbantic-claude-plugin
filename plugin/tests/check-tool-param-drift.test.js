@@ -266,3 +266,53 @@ test('param-drift: negative — request_decision missing entirely (KBT-F742) →
     stub.server.close();
   }
 });
+
+// ── KBT-F743 / KBT-SR648 §REST en MCP — fleet tools in the required-parameter contract ──
+//
+//   get_fleet_digest   → ["workspaceId"]
+//   get_fleet_overview → ["workspaceId"]
+
+const F743_CONTRACT_TOOLS = [
+  ...F742_CONTRACT_TOOLS,
+  tool('get_fleet_digest', ['workspaceId']),
+  tool('get_fleet_overview', ['workspaceId']),
+];
+
+test('param-drift: positive — the F743 fleet tools satisfy the contract → exit 0', async () => {
+  const stub = await startStub(F743_CONTRACT_TOOLS);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 0, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stdout, /get_fleet_digest/, 'the report names get_fleet_digest as a checked tool');
+    assert.match(result.stdout, /get_fleet_overview/, 'the report names get_fleet_overview as a checked tool');
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_fleet_digest drops workspaceId (KBT-F743) → exit 1', async () => {
+  const stub = await startStub([
+    ...F743_CONTRACT_TOOLS.filter((t) => t.name !== 'get_fleet_digest'),
+    tool('get_fleet_digest', ['window']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_fleet_digest/);
+    assert.match(result.stderr, /workspaceId/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — get_fleet_overview missing entirely (KBT-F743) → exit 1', async () => {
+  const stub = await startStub(F743_CONTRACT_TOOLS.filter((t) => t.name !== 'get_fleet_overview'));
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /get_fleet_overview/);
+    assert.match(result.stderr, /not exposed by the live registry/);
+  } finally {
+    stub.server.close();
+  }
+});
