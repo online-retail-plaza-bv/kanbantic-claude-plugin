@@ -1091,7 +1091,7 @@ Report:
 
 **Next step:** Invoke `kanbantic-issue-review` to run code review, merge, close, and extract final knowledge."
 
-Do **not** merge, do **not** set the issue to Done, do **not** create a PR — those are `kanbantic-issue-review`'s responsibilities.
+Do **not** merge, do **not** set the issue to Done, do **not** create a PR — those are `kanbantic-issue-review`'s responsibilities. Leave the issue worktree in place at `Review`: it is removed in the review lane right after the merge (`kanbantic-issue-review` Step 7, `scripts/remove-issue-worktree.js`, KBT-F745) — the reviewer still needs the checkout, and a worktree removed from inside itself leaves an orphan directory (KBT-GTCH142).
 
 ## Blocked / OnHold — Issue side-states during InProgress (KBT-F561)
 

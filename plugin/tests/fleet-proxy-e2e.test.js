@@ -329,6 +329,9 @@ const CONTRACT_TOOLS = [
   tool('answer_decision', ['decisionRequestId', 'optionKey']),
   tool('get_fleet_digest', ['workspaceId']),
   tool('get_fleet_overview', ['workspaceId']),
+  // KBT-F745 — get_model_policy joined the required-parameter contract (KBT-SR652 §MCP);
+  // every positive stub must expose it or the drift script reports it as missing.
+  tool('get_model_policy', ['workspaceId']),
 ];
 
 test('KBT-TC4214 (a) — check-tool-param-drift.js holds get_fleet_digest/get_fleet_overview to ["workspaceId"]', { timeout: 60000 }, async () => {

@@ -550,6 +550,21 @@ git branch -d <feature-branch>           # local delete (blocking if it fails)
 git push origin --delete <feature-branch> # remote delete (warning on failure, not blocker)
 ```
 
+**Worktree verwijderen (KBT-F745, KBT-RL277 §8).** A merged issue's worktree is cleaned up *here*, right after the branch delete — not by the executing agent at `Review` and not left for the daemon's nightly hygiene run. Run this from the **main checkout** (or any worktree other than the one being removed):
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/remove-issue-worktree.js" --branch <feature-branch>
+# → {"removed":true,"path":"<repo>/.claude/worktrees/<name>","reason":null,"detached":[]}
+```
+
+The script looks the branch up in `git worktree list --porcelain`, detaches every junction/symlink directly under `<worktree>/**/node_modules` first (KBT-GTCH187: on Windows `git worktree remove --force` would otherwise follow a `node_modules` junction and empty its target — the main checkout's `node_modules`), then runs `git worktree remove --force` and `git worktree prune`. It is **fail-open**: exit code is always 0 and the outcome is the JSON on stdout (`{ removed, path, reason }`), with a warning on stderr. Read the `reason`:
+
+- `cwd-inside-worktree` — you are standing inside the worktree you are trying to remove (KBT-GTCH142: removing from inside fails and leaves an orphan directory). `cd` to the main checkout and run it again; the worktree was not touched.
+- `no-worktree` — the branch had no worktree (normal for a repo that was worked on in the main checkout). Nothing to do.
+- `git-worktree-remove-failed` / `error` — log the warning as a Comment on the issue and proceed; the daemon's hygiene run (KBT-SR653) picks the worktree up once the issue is `Done`. Never let a cleanup failure block Step 7.5 / Step 8.
+
+The local branch is **not** deleted by the script — `git branch -d` above is the proof that the merge landed and stays this skill's job. For a multi-repo Epic run it once per touched repo.
+
 **Foutgevallen:**
 - **Merge-conflict** → skill stops, lists the conflicting files, adds a Comment discussion entry to the issue explaining which files conflicted and that the issue stays on `Review`. The implementer resolves conflicts manually on the feature branch, pushes, and re-runs `kanbantic-issue-review`.
 - **Push rejection** (branch protection, non-fast-forward, permissions) → skill reports the exact git error, adds a Comment discussion entry, and does **not** transition the issue to Done. No status change until merge + push both succeed.

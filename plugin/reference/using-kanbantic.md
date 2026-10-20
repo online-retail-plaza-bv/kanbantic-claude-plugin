@@ -701,6 +701,58 @@ jou" met de open beslisverzoeken (knoppen roepen `answer_decision` aan) en de
 vloot. Alles loopt via dezelfde MCP-proxy; op een `-p`-run of een door de
 daemon gespawnde VM-sessie tekent de mod niets en start hij geen timer.
 
+### Modelbeleid en preflight (KBT-F745)
+
+Het model dat een agent mag draaien is geen afspraak in een briefing maar
+beleid per workspace en per rol (`WorkspaceModelPolicy`, KBT-SR652): standaard
+Orchestrator en Reviewer op Opus 5.5, Developer/Tester/Designer/Operator op
+Sonnet 5.5, en **Fable voor geen enkele rol** — ook niet voor `Unspecified`
+(KBT-RL277 §5). Lees het met `get_model_policy(workspaceId)` (read-only; een
+schrijf-tool is er bewust niet — bewerken gaat via Instellingen → Modelbeleid,
+alleen voor workspace-admins). De daemon start elke spawn met `--model`
+volgens dat beleid; jij hoeft het model dus niet zelf te kiezen, wel de rol
+mee te geven.
+
+**Een sessie die `Blocked` staat met reden `model-policy: verwacht <X>,
+gevonden <Y> (Settings|Transcript)`** is geen vastgelopen issue en geen
+externe blokkade: de server heeft het model dat de sessie meldt (bij
+`register_agent_session` uit `settings.json`, daarna elke minuut uit het
+transcript door de daemon) vergeleken met het beleid voor de rol van de agent
+en een afwijking gezien. Herstel is het model terugzetten — `model` in
+`settings.json`/`settings.local.json` of `ANTHROPIC_MODEL` weghalen of op het
+vereiste id zetten, of de sessie herstarten met `--model <vereist id>`. Zodra
+een conform model gemeld wordt, zet de server de sessie **vanzelf** weer op
+`Working` (de blokkade wordt alleen opgeheven als de reden met
+`model-policy:` begint; een `Blocked` om een andere reden blijft staan). Roep
+dus niet `resume_working` aan om eromheen te werken, en zet het issue niet
+op `Blocked`/`OnHold` — het issue is niet geblokkeerd, de sessie is dat. De
+bron tussen haakjes zegt waar het afwijkende id vandaan kwam: `Settings` is
+een config-bestand, `Transcript` is het model waarmee de sessie daadwerkelijk
+antwoordt.
+
+**Een spawn die niet doorgaat** heeft de preflight (negen checks:
+`trust-path`, `login`, `model-policy`, `claude-version`, `plugin`,
+`credential-shim`, `disk`, `memory`, `single-daemon`; KBT-SR651) niet gehaald.
+Eén `Fail` betekent geen proces, wél een leesbare reden op het SpawnCommand
+(`preflight: <namen>`) en een **beslisverzoek in de Beslisbak** (KBT-F742,
+kind `Operator`, opties `retry` en `cancel`, deadline 24 uur). `retry` kloont
+het command als nieuw `Queued` Spawn met dezelfde cwd, briefing en rol —
+zinvol als alleen `disk`/`memory` faalde en de hygiëne-run inmiddels ruimte
+heeft gemaakt; `cancel` sluit het af. Een `Warn` (bijv. een afwijkende
+`settings.json` die `--model` toch overschrijft, of een verouderde
+pluginversie) laat de spawn doorgaan en staat alleen in de spawn-tabel van
+het werkstation. Zoek dus niet naar een crash in de logs als een agent nooit
+verschijnt: kijk in `list_decisions` naar het open verzoek en in de
+Werkstations-pagina naar de gefaalde check.
+
+**Worktrees.** Een gemergde issue-branch laat de review-skill zelf opruimen
+(`scripts/remove-issue-worktree.js`, Step 7); de daemon ruimt 's nachts
+alleen worktrees op van issues die `Done`/`Cancelled` zijn en zonder
+uncommitted wijzigingen (KBT-SR653). Een worktree van een open issue blijft
+staan — ook als het werkstation onder de schijfdrempel van 20 GB zit; dan
+weigert de preflight nieuwe spawns tot er ruimte is, en staat er een
+`disk-low`-waarschuwing op het bord.
+
 ## Herkomst
 
 Samengesteld in **KBT-F623** (F7 van KBT-E114) uit 17 gotchas van de

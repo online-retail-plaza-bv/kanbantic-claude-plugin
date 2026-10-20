@@ -55,6 +55,8 @@ const REQUIRED_PARAMS = {
   // KBT-F743 / KBT-SR648 — Vloot: the orchestrate-SKILL hand-over and the /epic mod call these.
   get_fleet_digest: ['workspaceId'],
   get_fleet_overview: ['workspaceId'],
+  // KBT-F745 / KBT-SR652 §MCP — model policy per role: the orchestrate-SKILL reads it before spawning.
+  get_model_policy: ['workspaceId'],
 };
 
 function fatal(code, msg) {
