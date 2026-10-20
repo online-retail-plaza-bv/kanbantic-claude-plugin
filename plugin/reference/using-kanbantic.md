@@ -36,7 +36,7 @@ lopen gegarandeerd uit elkaar; dat is precies de drift die KBT-F623 opruimde.
 | **execute** | [isReadyToClaim is afgeleid](#isreadytoclaim-is-afgeleid-nooit-zelf-zetten) · [Claim gaat via Ready](#claimen-kan-alleen-vanuit-ready-niet-vanuit-triaged) · [Worktree in een subagent](#enterworktree-werkt-niet-in-een-subagent) |
 | **review** | [Gate-overzicht](#welke-gate-blokkeert-wat) · [InDeployment ≠ Done](#indeployment-is-niet-done) · [Self-approve werkt](#approve_review-checkt-alleen-dat-er-een-rij-bestaat) · [Merge-step worktree](#de-merge-step-heeft-een-eigen-worktree-nodig) |
 | **specialists** | [De agent is de executor](#bij-een-specialist-run-ben-jij-de-executor) |
-| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Weglaten is veilig](#weglaten-is-veilig--stuur-niet-meer-terug-dan-je-wilt-wijzigen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) |
+| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Weglaten is veilig](#weglaten-is-veilig--stuur-niet-meer-terug-dan-je-wilt-wijzigen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) · [Hangdetectie-hooks](#hangdetectie-en-permissie-afhandeling-via-hooks-kbt-f741) |
 
 ---
 
@@ -521,6 +521,80 @@ Wat op dit moment geldt in de Kanbantic-monorepo:
 De algemene les: een groene CI betekent "de checks die draaiden zijn geslaagd",
 niet "alles is getest". Kijk welke jobs daadwerkelijk liepen voordat je conclusies
 trekt uit het vinkje.
+
+### Hangdetectie en permissie-afhandeling via hooks (KBT-F741)
+
+De plugin meldt via Claude Code-hooks aan Kanbantic wat een sessie op dit moment
+doet, zodat een *hang* (wacht op een permissievraag, tool die nooit eindigt, stil
+na een turn) te onderscheiden is van echt werk. De hooks praten rechtstreeks met
+de REST-API (`X-Api-Key`), **niet** via de MCP-proxy: tijdens een permissievraag
+is het model — en dus de proxy — niet aanspreekbaar.
+
+| Event | Script | Meldt |
+|---|---|---|
+| `Notification` (`permission_prompt\|idle_prompt\|agent_needs_input`) | `notification-session-state.js` | `wait-for-user` met `[<type>] <titel>: <bericht>` (max 2000) |
+| `PermissionRequest` | `permission-request-router.js` | allow-list-match → `allow` + tool-activity; anders `wait-for-user` + kanaalbericht, **geen** beslissing |
+| `PreToolUse` / `PostToolUse` | `tool-activity.js --pre` / `--post` | `tool-activity` `{toolName, toolUseId, startedAt}` / `{toolUseId, endedAt}` |
+| `UserPromptSubmit` | `turn-start.js` | `turn-start` `{at}` |
+| `Stop` | `stop-session-idle.js` | `heartbeat` `{status: Idle, summary (300, geredigeerd), activeBackgroundTasks}` |
+
+Alle hooks zijn **fail-open**: geen sessiebestand, geen `KANBANTIC_API_KEY`,
+netwerkfout, niet-2xx of 5 s time-out ⇒ exit 0 en lege stdout. Nooit een `deny`,
+en bij een storing nooit een `allow`. `KANBANTIC_SYNC_DEBUG=1` schrijft de
+skip-reden naar stderr (nooit de key, het sessiebestand of de payload). Vrije
+tekst die de machine verlaat (commando's, notificatietekst, laatste
+assistentbericht) wordt eerst geredigeerd: waarden van sleutels met
+`token|secret|password|api[_-]?key|authorization|bearer` worden `***`, evenals
+`Bearer <x>`, `--password=<x>` en `token=<x>` in tekst.
+
+**De allow-list.** De workspace beheert hem als `Custom`-Toolkit-item met tag
+`permission-allow`. Alleen het fenced codeblok met taal `allow` telt (tekst
+eromheen is toelichting); lege regels en regels met `#` worden overgeslagen:
+
+````
+```allow
+# MCP-tool-glob (alleen met servernaam; mcp__* is niet toegestaan)
+mcp__kanbantic__*
+# prefix-match op het getrimde commando
+Bash(git status*)
+# glob op file_path/filePath (ook Edit, Write, Glob, Grep)
+Read(C:/GitHub/**)
+# host van tool_input.url
+WebFetch(domain:docs.anthropic.com)
+```
+````
+
+Commentaar staat op een eigen regel; een `#` achter een regel hoort bij de regel
+zelf en laat hem falen. Een `Bash`-regel zonder `*` is een exacte match. Pad-globs gebruiken `/`, `**`
+(over mappen heen) en `*`; paden worden genormaliseerd (`\` → `/`, `..` weggewerkt)
+en op Windows hoofdletterongevoelig vergeleken. Een samengesteld commando (`;`,
+`&`, `|`, `` ` ``, `$(`, `<`, `>`, newline) valt nooit onder een prefix-regel.
+
+**Wat nooit gaat** — als regel geweigerd *en* als commando, ook onder een bredere
+regel (`Bash(git push*)` staat `git push --force` niet toe): `rm` met recursieve
+vlag, `Remove-Item … -Recurse`, `rmdir`/`rd /s`, `del /s`, `git push --force`
+(`-f`, `--force-with-lease`, `+refspec`), `git reset --hard`, `git clean -f…`,
+`DROP `, `TRUNCATE `; verder `Bash(*)` / kale `Bash`, kale pad-tools en
+pad-globs op de root (`/**`, `C:/**`, `*:/**`). Een lokaal memory-pad
+(`memory-path.js`) krijgt nooit `allow`. Geweigerde regels meldt de
+SessionStart-sync als `permission-allow-rejected: <regel>`.
+
+**Waar de lijst staat.** `session-start-toolkit-sync.js` haalt het item op
+(`list_toolkit_items`, `category: "Custom"`, `includeContent: true`, selectie op
+tag) en schrijft `allowList` + `allowListFetchedAt` in het sessiebestand
+(gemerged) **én** in `~/.claude-kanbantic-allowlist-<CLAUDE_CODE_SESSION_ID>.json`.
+De dubbele plek is bewust: bij SessionStart bestaat het sessiebestand meestal nog
+niet (de proxy schrijft het pas na `register_agent_session`) en de proxy
+herschrijft het hele bestand bij elke `writeSessionFile()`. De router leest alleen
+die cache — geen netwerk op het hete pad — en neemt de nieuwste van beide.
+
+> **Valkuil.** `PermissionRequest` en `Notification(permission_prompt)` vuren
+> allebei voor dezelfde vraag, en `PermissionRequest` heeft in de payload **geen
+> `tool_use_id`**. De router haalt het id uit de bijbehorende `PreToolUse`
+> (lokale scratch-state), anders een synthetische `<session_id>:<tool>:<ts>`.
+> Het `timeout`-veld in `hooks.json` is volgens de Claude Code-docs in
+> **seconden**; de bestaande hooks gebruiken `8000`/`20000` — de scripts begrenzen
+> zichzelf (HTTP 5 s, stdin 3 s), dus de waarde is geen werkende bovengrens.
 
 ## Herkomst
 

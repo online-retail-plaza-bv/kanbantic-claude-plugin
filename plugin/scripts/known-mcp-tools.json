@@ -180,6 +180,8 @@
     "rename_wireframe_version",
     "reorder_wireframe_version",
     "report_status",
+    "report_tool_activity",
+    "report_turn_start",
     "resolve_issue_elsewhere",
     "resolve_specification_conflict",
     "restore_document_version",

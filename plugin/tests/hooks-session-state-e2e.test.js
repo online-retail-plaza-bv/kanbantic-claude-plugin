@@ -152,6 +152,12 @@ test('KBT-TC4199 — a real headless session reports allow-list, permission wait
     const allowed1 = activity.find((x) => x && typeof x.permissionDecision === 'string' && x.permissionDecision.startsWith('allow-list:'));
     assert.ok(allowed1, `no tool-activity with an allow-list: decision\n${diag()}`);
     assert.equal(allowed1.toolName, 'Read');
+    // The router attaches its decision to the SAME row the PreToolUse hook opened
+    // (PermissionRequest has no tool_use_id of its own).
+    assert.ok(
+      activity.some((x) => x && x.startedAt && x.toolUseId === allowed1.toolUseId),
+      `allow decision is not correlated with a PreToolUse tool_use_id\n${diag()}`
+    );
 
     const waits = bodies('/wait-for-user');
     assert.ok(waits.some((x) => x && /^\[permission\] Read/.test(x.prompt) && x.prompt.includes('b.txt')),
