@@ -32,65 +32,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn, spawnSync } = require('node:child_process');
-
 const { mkTmp, rmTmp, startApiStub } = require('./helpers/hook-harness.js');
+const { PLUGIN_DIR, claudeAvailable, pluginCopy, runClaude } = require('./helpers/claude-e2e.js');
 
-const PLUGIN_DIR = path.resolve(__dirname, '..');
 const NEW_COMMANDS = /notification-session-state|permission-request-router|tool-activity|turn-start|stop-session-idle/;
-
-function claudeAvailable() {
-  if (process.env.KBT_E2E_CLAUDE === '0') return 'KBT_E2E_CLAUDE=0';
-  const r = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 20000 });
-  if (r.error || r.status !== 0) return 'the `claude` CLI is not on PATH';
-  return null;
-}
 
 /** Copy of the plugin with every new hook entry removed from hooks.json. */
 function strippedPluginCopy(dest) {
-  fs.cpSync(PLUGIN_DIR, dest, {
-    recursive: true,
-    filter: (src) => !/[\\/]tests([\\/]|$)/.test(src.slice(PLUGIN_DIR.length)),
-  });
-  const file = path.join(dest, 'hooks', 'hooks.json');
-  const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-  for (const [event, entries] of Object.entries(json.hooks)) {
-    json.hooks[event] = entries
-      .map((e) => ({ ...e, hooks: e.hooks.filter((h) => !NEW_COMMANDS.test(h.command)) }))
-      .filter((e) => e.hooks.length > 0);
-    if (json.hooks[event].length === 0) delete json.hooks[event];
-  }
-  fs.writeFileSync(file, JSON.stringify(json, null, 2));
-}
-
-function runClaude({ cwd, pluginDir, prompt, env, timeoutMs }) {
-  const childEnv = { ...process.env };
-  // A nested session must not believe it is the outer one.
-  for (const k of Object.keys(childEnv)) if (/^CLAUDE(CODE|_CODE)/i.test(k)) delete childEnv[k];
-  for (const k of Object.keys(childEnv)) if (/^KANBANTIC_/.test(k)) delete childEnv[k];
-  const args = [
-    '-p', prompt,
-    '--plugin-dir', pluginDir,
-    '--setting-sources', 'project',
-    '--strict-mcp-config',
-    '--no-session-persistence',
-    '--output-format', 'json',
-    '--model', process.env.KBT_E2E_MODEL || 'haiku',
-    '--max-budget-usd', '1',
-  ];
-  return new Promise((resolve) => {
-    const child = spawn('claude', args, { cwd, env: { ...childEnv, ...env } });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (c) => { stdout += c; });
-    child.stderr.on('data', (c) => { stderr += c; });
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.on('close', (status) => { clearTimeout(timer); resolve({ status, stdout, stderr, timedOut }); });
-    child.stdin.end();
-  });
+  return pluginCopy(dest, { stripHooks: NEW_COMMANDS });
 }
 
 const skipReason = claudeAvailable();
