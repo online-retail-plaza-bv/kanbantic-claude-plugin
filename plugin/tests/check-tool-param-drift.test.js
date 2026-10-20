@@ -165,3 +165,29 @@ test('param-drift: negative — create_version missing entirely → exit 1', asy
     stub.server.close();
   }
 });
+
+test('param-drift: negative — report_tool_activity drops toolUseId (KBT-F741) → exit 1', async () => {
+  const stub = await startStub([
+    tool('create_version', ['workspaceId', 'applicationId', 'name']),
+    tool('report_tool_activity', ['sessionId']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /report_tool_activity/);
+    assert.match(result.stderr, /toolUseId/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — report_tool_activity missing entirely (KBT-F741) → exit 1', async () => {
+  const stub = await startStub([tool('create_version', ['workspaceId', 'applicationId', 'name'])]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1);
+    assert.match(result.stderr, /report_tool_activity/);
+  } finally {
+    stub.server.close();
+  }
+});
