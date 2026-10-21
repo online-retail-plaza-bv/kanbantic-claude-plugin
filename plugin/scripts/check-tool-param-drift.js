@@ -57,6 +57,8 @@ const REQUIRED_PARAMS = {
   get_fleet_overview: ['workspaceId'],
   // KBT-F745 / KBT-SR652 §MCP — model policy per role: the orchestrate-SKILL reads it before spawning.
   get_model_policy: ['workspaceId'],
+  // KBT-F753 / KBT-SR659 — accountpool: no required parameters (workspaceId is optional); presence is what is pinned.
+  get_account_pool: [],
 };
 
 function fatal(code, msg) {
