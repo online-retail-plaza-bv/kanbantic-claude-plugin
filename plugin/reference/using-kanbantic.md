@@ -703,6 +703,17 @@ De gekozen optie wordt als terminal-input naar de sessie gerelayed. Mislukt de
 aanmaak (niet-2xx, 5 s time-out, geen workspace), dan geldt het oude pad:
 `wait-for-user` `[permission] …` + kanaalbericht. Nooit `allow`.
 
+**`allow-always` voegt nooit de kale tool toe** (KBT-T5224). De router stuurt
+`proposedAllowRule` mee: de regel in de allow-list-syntax die precies déze
+aanroep dekt — `Bash(<exact commando>)`, `Read|Edit|Write|Glob|Grep(<absoluut
+pad>)`, `WebFetch(domain:<host>)` of `mcp__<server>__<tool>` — en de optie
+heet letterlijk `Altijd toestaan: <regel>`. De regel wordt alleen voorgesteld
+als `validateRule` hem accepteert, hij deze aanroep zelf zou doorlaten en
+redactie hem niet verandert; samengestelde of verboden commando's, wildcards,
+lokale memory, `.claude`/`.git`/`.mcp.json`-paden van schrijf-tools, geheimen
+en niet-ondersteunde tools (Task, MultiEdit, …) krijgen géén regel — dan
+ontbreekt `allow-always` helemaal en blijven alleen `allow-once` en `deny`.
+
 ## Herkomst
 
 Samengesteld in **KBT-F623** (F7 van KBT-E114) uit 17 gotchas van de
