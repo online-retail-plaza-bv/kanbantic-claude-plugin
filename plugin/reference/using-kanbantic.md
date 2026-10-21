@@ -574,10 +574,32 @@ en op Windows hoofdletterongevoelig vergeleken. Een samengesteld commando (`;`,
 regel (`Bash(git push*)` staat `git push --force` niet toe): `rm` met recursieve
 vlag, `Remove-Item … -Recurse`, `rmdir`/`rd /s`, `del /s`, `git push --force`
 (`-f`, `--force-with-lease`, `+refspec`), `git reset --hard`, `git clean -f…`,
-`DROP `, `TRUNCATE `; verder `Bash(*)` / kale `Bash`, kale pad-tools en
-pad-globs op de root (`/**`, `C:/**`, `*:/**`). Een lokaal memory-pad
-(`memory-path.js`) krijgt nooit `allow`. Geweigerde regels meldt de
-SessionStart-sync als `permission-allow-rejected: <regel>`.
+`DROP `, `TRUNCATE `; sinds de review van KBT-F741 (KBT-T5218) ook `git push -d`
+/ `:<ref>` (lege bron = verwijderen), `git checkout`/`switch -f`/`--force`/
+`--discard-changes`, `git branch -D`, `git -c <config-override>` en — in elk
+commando — `--delete`, `--mirror`, `--upload-pack`, `--receive-pack`,
+`--output[-dir]`, `--exec[-path]`/`-exec`. Verder `Bash(*)` / kale `Bash`, kale
+pad-tools en pad-globs op de root (`/**`, `C:/**`, `*:/**`). Een lokaal
+memory-pad (`memory-path.js`) krijgt nooit `allow`, en evenmin iets onder
+`.claude/` of `.git/` of een bestand `.mcp.json` (elke map, elk tool, ook Read
+en Bash-commando's die zo'n pad noemen); `.claude/worktrees/<naam>/…` is een
+checkout en wél gewoon toegestaan, maar niet diens eigen `.claude/` of `.git`.
+Geweigerde regels meldt de SessionStart-sync als
+`permission-allow-rejected: <regel>`.
+
+**curl.** Een `Bash(curl …)`-regel is meer dan een prefix (PO-besluit: curl
+stuurt nooit sleutels of data naar een ander adres). De regel noemt precies één
+`https://`-URL; het commando mag dan alleen door als het precies één URL heeft
+waarvan de host (`new URL()`, inclusief poort) exact gelijk is aan de host van
+de regel — geen userinfo-`@`, geen look-alike (`staging.kanbantic.com.evil.example`),
+geen tweede URL, geen `$`, `\`, `{}` of `[]` — en alleen opties van de positieve
+lijst gebruikt: `-s -S -i -I -f -v --compressed …`, `-H`, `-A`, `-m`, `-w`,
+`-e`, `-u`, `--retry*` en `-X` met uitsluitend `GET`/`HEAD`. Alles wat data
+stuurt, bestanden schrijft of het adres verlegt (`-d`/`--data*`, `--json`,
+`-T`, `-F`, `-o`/`-O`/`--output`, `-K`, `--url`, `--resolve`, `--connect-to`,
+`-x`, `-L`, `-c`, `-D`, `-k`, een `@bestand`-waarde, een `Host:`-header) en elke
+onbekende optie gaat naar de mens. Een regel die hier niet aan voldoet
+(`Bash(curl *)`, `http://`, `-X POST`) wordt bij de sync geweigerd.
 
 **Waar de lijst staat.** `session-start-toolkit-sync.js` haalt het item op
 (`list_toolkit_items`, `category: "Custom"`, `includeContent: true`, selectie op

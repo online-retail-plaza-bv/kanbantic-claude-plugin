@@ -25,15 +25,49 @@
 //
 // Everything outside an `allow` block is prose and ignored.
 //
-// ── What can never be allowed (SEC063 §2) ──────────────────────────────────
+// ── What can never be allowed (SEC063 §2, hardened in KBT-T5218) ───────────
 // Rejected as a RULE, and refused as a COMMAND even when a broader rule would
 // match it (`Bash(git push*)` does not allow `git push --force`):
 //   rm with a recursive flag, Remove-Item … -Recurse, rmdir/rd /s, del /s,
 //   git push --force / -f / --force-with-lease / +refspec, git reset --hard,
-//   git clean -f…, `DROP ` and `TRUNCATE `.
+//   git clean -f…, `DROP ` and `TRUNCATE `;
+//   git push -d / :<ref> (empty source = delete), git checkout/switch -f /
+//   --force / --discard-changes, git branch -D, git -c <config override>,
+//   and — in any command — --delete, --mirror, --upload-pack, --receive-pack,
+//   --output[-dir], --exec[-path] / -exec[dir].
 // Also rejected as a rule: Bash(*) / bare Bash, bare path tools, and path globs
 // on the root (`/**`, `C:/**`, `*:/**`, `**/x`).
-// A local-memory path (memory-path.js) never gets allow, under any rule.
+// A local-memory path (memory-path.js) never gets allow, under any rule, and
+// neither does anything under a `.claude/` or `.git/` directory or a file named
+// `.mcp.json` (settings, hooks, MCP config: the places a permission bypass or
+// a token would be planted). `.claude/worktrees/<name>/…` is a checkout root,
+// not config, and is exempt — its own `.claude/` and `.git` are not. The veto
+// covers every path field, Glob patterns, Grep file globs and Bash commands
+// that spell such a path.
+//
+// ── curl (KBT-T5218): a dedicated matcher on top of the prefix match ───────
+// PO decision: curl may never send keys or data to another address. A
+// `Bash(curl …)` rule therefore only allows a command that
+//   - names exactly ONE URL (positional argument), which `new URL()` parses as
+//     https:// without userinfo (`@`), whose host (incl. port) equals the host
+//     of the rule's URL exactly; look-alikes (`staging.kanbantic.com.evil.example`)
+//     and a second URL do not match;
+//   - contains no shell expansion (`$`), no backslash and no curl URL globbing
+//     (`{}` `[]`);
+//   - uses only options from a positive list: the read-only flags
+//     -s -S -i -I -f -v -g -N -4 -6 --compressed --fail-with-body
+//     --no-progress-meter --http1.1 --http2 --tlsv1.2 --tlsv1.3 and the value
+//     options -H/--header, -A/--user-agent, -X/--request (GET or HEAD only),
+//     -m/--max-time, --connect-timeout, -w/--write-out, -e/--referer,
+//     -u/--user, --retry, --retry-delay, --retry-max-time. A value may not
+//     start with `@` (file reference) and a header may not set `Host:`.
+//   Everything else — -d/--data*, --json, -T/--upload-file, -F/--form*,
+//   -o/-O/--output*, -K/--config, --url, --resolve, --connect-to, -x/--proxy*,
+//   -L/--location*, -c/--cookie-jar, -D/--dump-header, -k/--insecure and any
+//   option the list does not know — leaves the decision to the human.
+// The rule itself must pass the same parser (exactly one https URL with a
+// host, listed options only, GET/HEAD), so a careless rule is refused at sync
+// time. A non-curl rule (`Bash(cu*)`) never covers a curl command.
 //
 // ── Deliberate extras beyond the spec (all err towards "ask the human") ────
 // - A Bash prefix rule never matches a compound command (`;` `&` `|` backtick
@@ -65,6 +99,20 @@ const FORBIDDEN = [
   ['git reset --hard', new RegExp(`\\bgit\\b${SEG}\\breset\\b${SEG}--hard`, 'i')],
   ['git clean -f', new RegExp(`\\bgit\\b${SEG}\\bclean\\b${SEG}\\s-[a-z]*f`, 'i')],
   ['DROP / TRUNCATE', /\b(?:drop|truncate)\s/i],
+  // KBT-T5218 — destructive / code-executing git forms the reviewer reproduced
+  ['git push -d / :<ref> (delete)', new RegExp(
+    `\\bgit\\b${SEG}\\bpush\\b${SEG}(?:\\s-[a-z]*d[a-z]*(?=[\\s*]|$)|\\s:\\S)`, 'i')],
+  ['git checkout/switch -f', new RegExp(
+    `\\bgit\\b${SEG}\\b(?:checkout|switch)\\b${SEG}(?:\\s-[a-z]*f[a-z]*(?=[\\s*]|$)|\\s--(?:force|discard-changes)(?=[\\s=*]|$))`, 'i')],
+  ['git branch -D', new RegExp(`\\bgit\\b${SEG}\\bbranch\\b${SEG}\\s-[a-zA-Z]*D[a-zA-Z]*(?=[\\s*]|$)`)],
+  // `-c key=value` overrides any config (core.hooksPath, core.sshCommand, …).
+  // Case-sensitive on purpose: `git -C <dir>` is harmless and common.
+  ['git -c (config override)', new RegExp(`\\b[Gg]it\\b${SEG}\\s-c(?=\\s|$)`)],
+  ['--delete', /\s--delete(?=[\s=*]|$)/i],
+  ['--mirror', /\s--mirror(?=[\s=*]|$)/i],
+  ['--upload-pack / --receive-pack', /\s--(?:upload|receive)-pack(?=[\s=*]|$)/i],
+  ['--output', /\s--output(?:-dir)?(?=[\s=*]|$)/i],
+  ['--exec / -exec', /\s--?exec(?:dir|-path)?(?=[\s=*]|$)/i],
 ];
 
 /** Name of the forbidden pattern a command (or rule specifier) hits, or null. */
@@ -78,6 +126,142 @@ const isForbiddenCommand = (text) => forbiddenPattern(text) !== null;
 
 /** Shell constructs that chain or redirect: a prefix rule must not cover them. */
 const COMPOUND_RE = /[;&|`<>\n\r]|\$\(|\$\{/;
+
+// ── curl ────────────────────────────────────────────────────────────────────
+
+const CURL_RE = /^curl(?:\.exe)?$/i;
+const CURL_READ_METHODS = ['GET', 'HEAD'];
+
+/** Options without a value that neither send data nor change the destination. */
+const CURL_FLAGS = new Set([
+  '-s', '--silent', '-S', '--show-error', '-i', '--include', '-I', '--head', '-f', '--fail', '--fail-with-body',
+  '-v', '--verbose', '-g', '--globoff', '-N', '--no-buffer', '-4', '--ipv4', '-6', '--ipv6', '--compressed',
+  '--no-progress-meter', '--http1.1', '--http2', '--tlsv1.2', '--tlsv1.3',
+]);
+
+/** Options with a value that are still read-only towards the rule host. */
+const CURL_VALUE_OPTS = new Set([
+  '-H', '--header', '-A', '--user-agent', '-X', '--request', '-m', '--max-time', '--connect-timeout',
+  '-w', '--write-out', '-e', '--referer', '-u', '--user', '--retry', '--retry-delay', '--retry-max-time',
+]);
+
+/** Split a command into words, honouring '…' and "…"; null when a quote is left open. */
+function shellWords(cmd) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  let started = false;
+  for (const ch of cmd) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === '"' || ch === '\'') {
+      quote = ch;
+      started = true;
+    } else if (/\s/.test(ch)) {
+      if (started) { out.push(cur); cur = ''; started = false; }
+    } else {
+      cur += ch;
+      started = true;
+    }
+  }
+  if (quote) return null;
+  if (started) out.push(cur);
+  return out;
+}
+
+function curlValueError(opt, value) {
+  if (value.startsWith('@')) return `@file reference in ${opt}`;
+  if ((opt === '-X' || opt === '--request') && !CURL_READ_METHODS.includes(value.toUpperCase())) return `method ${value} is not read-only`;
+  if ((opt === '-H' || opt === '--header') && /^\s*host\s*:/i.test(value)) return 'Host header override';
+  return null;
+}
+
+/**
+ * Walk a curl invocation (words[0] is curl). Every option must be on the
+ * positive lists; everything else is a URL (positional).
+ * @returns {{urls:string[]}|{error:string}}
+ */
+function parseCurl(words) {
+  const urls = [];
+  const fail = (error) => ({ error });
+  let i = 1;
+  while (i < words.length) {
+    const w = words[i++];
+    if (w === '--') { urls.push(...words.slice(i)); break; }
+    if (w.startsWith('--')) {
+      const eq = w.indexOf('=');
+      const opt = eq === -1 ? w : w.slice(0, eq);
+      let value = eq === -1 ? undefined : w.slice(eq + 1);
+      if (CURL_FLAGS.has(opt)) {
+        if (value !== undefined) return fail(`${opt} takes no value`);
+        continue;
+      }
+      if (!CURL_VALUE_OPTS.has(opt)) return fail(`option ${opt} is not auto-allowed`);
+      if (value === undefined) {
+        if (i >= words.length) return fail(`${opt} without a value`);
+        value = words[i++];
+      }
+      const err = curlValueError(opt, value);
+      if (err) return fail(err);
+      continue;
+    }
+    if (w.startsWith('-') && w.length > 1) {
+      for (let j = 1; j < w.length; j++) { // bundled short options: -sS, -XGET, -H'…'
+        const opt = `-${w[j]}`;
+        if (CURL_FLAGS.has(opt)) continue;
+        if (!CURL_VALUE_OPTS.has(opt)) return fail(`option ${opt} is not auto-allowed`);
+        let value = w.slice(j + 1);
+        if (!value) {
+          if (i >= words.length) return fail(`${opt} without a value`);
+          value = words[i++];
+        }
+        const err = curlValueError(opt, value);
+        if (err) return fail(err);
+        break;
+      }
+      continue;
+    }
+    urls.push(w);
+  }
+  return { urls };
+}
+
+/** The host (incl. port) of an https URL without userinfo or globbing; null otherwise. */
+function curlHost(arg) {
+  if (typeof arg !== 'string' || /[\\${}[\]]/.test(arg) || !/^https:\/\//i.test(arg)) return null;
+  const authority = arg.slice(8).split(/[/?#]/)[0];
+  if (!authority || authority.includes('@')) return null;
+  let u;
+  try { u = new URL(arg); } catch (_) { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password || !u.host) return null;
+  return u.host.toLowerCase();
+}
+
+/** Parse the curl part of a rule prefix. @returns {{host:string, methods:string[]}|{error:string}} */
+function curlRule(prefix) {
+  if (/[\\$]/.test(prefix)) return { error: 'shell expansion in a curl rule' };
+  const words = shellWords(prefix);
+  if (!words || !CURL_RE.test(words[0])) return { error: 'not a curl invocation' };
+  const p = parseCurl(words);
+  if (p.error) return { error: p.error };
+  if (p.urls.length !== 1) return { error: 'needs exactly one https URL' };
+  const host = curlHost(p.urls[0]);
+  if (!host) return { error: 'needs exactly one https URL with a host (no userinfo, no http)' };
+  return { host, methods: [...CURL_READ_METHODS] };
+}
+
+const firstWord = (cmd) => cmd.trim().split(/\s+/)[0] || '';
+
+/** May this curl command run under `curl` (the rule's parsed curl part)? */
+function curlCommandAllowed(curl, cmd) {
+  if (!curl || /[\\$]/.test(cmd)) return false;
+  const words = shellWords(cmd);
+  if (!words || !CURL_RE.test(words[0])) return false;
+  const p = parseCurl(words);
+  if (p.error || p.urls.length !== 1) return false;
+  return curlHost(p.urls[0]) === curl.host;
+}
 
 // ── paths and globs ─────────────────────────────────────────────────────────
 
@@ -162,7 +346,12 @@ function validateRule(raw, { caseInsensitive = process.platform === 'win32' } = 
     const exact = stars === 0;
     const prefix = exact ? s : s.slice(0, -1);
     if (!prefix.trim()) return reject('empty Bash prefix');
-    return { ok: true, rule, parsed: { kind: 'bash', prefix, exact } };
+    let curl = null;
+    if (CURL_RE.test(firstWord(prefix))) {
+      curl = curlRule(prefix);
+      if (curl.error) return reject(`curl rule: ${curl.error}`);
+    }
+    return { ok: true, rule, parsed: { kind: 'bash', prefix, exact, curl } };
   }
 
   if (PATH_TOOLS.has(tool)) {
@@ -250,6 +439,32 @@ function touchesLocalMemory(toolName, input) {
   return false;
 }
 
+// ── protected paths: .claude/, .git/, .mcp.json (KBT-T5218) ─────────────────
+
+/** Any `.git` segment, any `.claude` segment that is not `.claude/worktrees/<name>`, or a `.mcp.json` file. */
+function isProtectedPath(p) {
+  const segs = slashPath(p).toLowerCase().split('/');
+  if (segs[segs.length - 1] === '.mcp.json') return true;
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === '.git') return true;
+    if (segs[i] !== '.claude') continue;
+    if (segs[i + 1] === 'worktrees' && segs[i + 2]) continue; // a checkout root (Claude Code worktree)
+    return true;
+  }
+  return false;
+}
+
+/** The same three, spelled inside a command line or a file glob. */
+const PROTECTED_IN_TEXT = /(^|[\s"'=/\\])(?:\.git[/\\]|\.claude[/\\](?!worktrees[/\\][^\s"'/\\]+(?:[/\\\s"']|$))|\.mcp\.json(?=$|[\s"']))/i;
+
+/** Would this call touch Claude Code / git / MCP configuration? Then it never gets allow. */
+function touchesProtected(toolName, input, cwd) {
+  if (pathFields(input).some((raw) => isProtectedPath(resolveInputPath(raw, cwd) || raw))) return true;
+  const globs = [toolName === 'Glob' ? input.pattern : null, toolName === 'Grep' ? input.glob : null];
+  if (globs.some((g) => typeof g === 'string' && PROTECTED_IN_TEXT.test(g))) return true;
+  return toolName === 'Bash' && typeof input.command === 'string' && PROTECTED_IN_TEXT.test(input.command);
+}
+
 function inputPath(toolName, input, cwd) {
   const raw = input.file_path || input.filePath || (toolName === 'Glob' || toolName === 'Grep' ? input.path || cwd : null);
   return resolveInputPath(raw, cwd);
@@ -263,7 +478,11 @@ function matches(parsed, toolName, input, cwd) {
       if (toolName !== 'Bash' || typeof input.command !== 'string') return false;
       const cmd = input.command.trim();
       if (!cmd || COMPOUND_RE.test(cmd)) return false;
-      return parsed.exact ? cmd === parsed.prefix.trim() : cmd.startsWith(parsed.prefix);
+      const hit = parsed.exact ? cmd === parsed.prefix.trim() : cmd.startsWith(parsed.prefix);
+      if (!hit) return false;
+      // curl: the prefix is not enough — host, single URL and read-only options are checked too.
+      if (parsed.curl || CURL_RE.test(firstWord(cmd))) return curlCommandAllowed(parsed.curl, cmd);
+      return true;
     }
     case 'path': {
       if (toolName !== parsed.tool) return false;
@@ -295,6 +514,7 @@ function decide(rules, payload, { caseInsensitive = process.platform === 'win32'
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : '';
 
   if (touchesLocalMemory(toolName, input)) return { allow: false, reason: 'local memory path is never auto-allowed' };
+  if (touchesProtected(toolName, input, cwd)) return { allow: false, reason: '.claude/, .git/ and .mcp.json are never auto-allowed' };
   if (toolName === 'Bash' && isForbiddenCommand(input.command)) {
     return { allow: false, reason: `forbidden command pattern: ${forbiddenPattern(input.command)}` };
   }
@@ -313,4 +533,6 @@ module.exports = {
   forbiddenPattern,
   globToRegExp,
   resolveInputPath,
+  isProtectedPath,
+  shellWords,
 };

@@ -296,7 +296,7 @@ const NEGATIVE_CASES = [
   ['Write .claude/ reached through ..', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/src/../.claude/settings.json'), null],
   ['Write the .claude/ of a worktree checkout', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/.claude/settings.local.json'), null],
   ['Write .git/ inside a worktree checkout', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/.git'), null],
-  ['Write directly under .claude/worktrees (no checkout name)', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/.claude/worktrees/x.json'), null],
+  ['Write the .claude/worktrees directory itself (no checkout name)', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/.claude/worktrees'), null],
   ['Edit .claude/commands/x.md under Edit(C:/GitHub/**)', ['Edit(C:/GitHub/**)'], edit('C:/GitHub/Kanbantic/.claude/commands/x.md'), null],
   ['Edit via filePath spelling into .claude/', ['Edit(C:/GitHub/**)'], { tool_name: 'Edit', tool_input: { filePath: 'C:/GitHub/Kanbantic/.claude/agents/a.md' } }, null],
   ['Write .claude/ with a narrow glob that names it', ['Write(C:/GitHub/Kanbantic/.claude/**)'], write('C:/GitHub/Kanbantic/.claude/settings.json'), null],
@@ -323,7 +323,9 @@ for (const [name, rules, tool] of NEGATIVE_CASES) {
   });
 }
 
-test('no decision: the router never emits deny, on any negative case', async () => {
+// Not a `no decision:` case on purpose: an always-allow mutant never says deny either,
+// so this one is not expected to go red in the mutation run.
+test('never deny: the router never emits deny, on any negative case', async () => {
   for (const [, rules, tool] of NEGATIVE_CASES) {
     const r = await route(rules, tool);
     assert.ok(!/deny/i.test(r.stdout), r.stdout);

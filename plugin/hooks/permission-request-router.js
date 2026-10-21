@@ -31,14 +31,16 @@
 // Fail-open: unparseable stdin, missing/corrupt cache, anything thrown → exit 0,
 // empty stdout. (Unlike most hooks, "open" here means "ask the user as usual".)
 //
-// ROUTER_MUTATION=always-allow: test-only mutation switch (KBT-TC4195 stap 6).
-// With it the router allows everything, so the suite can prove its negative
-// cases would catch a router that did.
+// No environment switch changes the decision (KBT-T5219): a bypass that can
+// be enabled from `.claude/settings.local.json` has no place in production
+// code. The mutation run of KBT-TC4195 stap 6 instead starts this very script
+// through `main({ decide })` with an injected decide() (tests/helpers/
+// router-mutant.js); the default is the real matcher.
 //
 
 const api = require('./lib/session-api.js');
 const state = require('./lib/tool-state.js');
-const { decide } = require('./lib/permission-allow.js');
+const permissionAllow = require('./lib/permission-allow.js');
 const { loadAllowList } = require('./lib/allow-cache.js');
 
 const MAX_INPUT = 500;
@@ -89,17 +91,19 @@ async function reportWaiting(payload, ctx) {
   await Promise.all(posts);
 }
 
-async function main() {
+/**
+ * @param {{decide?: function(string[], object): {allow:boolean, rule?:string, reason?:string}}} [deps]
+ *   Injection seam for tests; production (hooks.json) runs with the defaults.
+ */
+async function main(deps = {}) {
+  const decide = typeof deps.decide === 'function' ? deps.decide : permissionAllow.decide;
   const payload = api.parsePayload(await api.readStdin());
   if (!payload || typeof payload.tool_name !== 'string' || !payload.tool_name) {
     api.debug('empty or unparseable PermissionRequest payload');
     return process.exit(0);
   }
 
-  const mutated = process.env.ROUTER_MUTATION === 'always-allow';
-  const verdict = mutated
-    ? { allow: true, rule: 'mutation:always-allow' }
-    : decide(loadAllowList(payload), payload);
+  const verdict = decide(loadAllowList(payload), payload);
   const ctx = api.loadContext(payload);
 
   if (verdict.allow) {
@@ -119,4 +123,4 @@ if (require.main === module) {
   main().catch((err) => { api.debug('unexpected error', err); process.exit(0); });
 }
 
-module.exports = { buildPrompt };
+module.exports = { buildPrompt, main };
