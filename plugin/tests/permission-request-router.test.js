@@ -911,6 +911,16 @@ test('decide: matches on the CANONICAL path and vetoes on both raw and canonical
   // The rule glob is matched against the canonical spelling, not the raw one.
   assert.equal(decide(['Write(/r/link/**)'], { ...write('/r/link/hooks/x'), cwd: '/r' }, opts).allow, false, 'junction target is .git');
   assert.equal(decide(['Write(/r/long-name-dir/**)'], { ...write('/r/LONGNA~1/a.ts'), cwd: '/r' }, opts).allow, true, 'short name matched via its long form');
+  // The RULE prefix is canonicalised the same way (a short-name os.tmpdir() in a rule vs the long-form path realpath yields).
+  assert.equal(decide(['Write(/r/LONGNA~1/**)'], { ...write('/r/long-name-dir/a.ts'), cwd: '/r' }, opts).allow, true, 'short-name rule prefix vs long-name path');
+  assert.equal(decide(['Write(/r/LONGNA~1/**)'], { ...write('/r/LONGNA~1/a.ts'), cwd: '/r' }, opts).allow, true, 'short-name rule prefix vs short-name path');
+  assert.equal(decide(['Write(/r/link/**)'], { ...write('/r/.git/hooks/x'), cwd: '/r' }, opts).allow, false, 'a rule on a junction into .git never allows');
+  const { validateRule } = parser();
+  assert.equal(validateRule('Write(/r/LONGNA~1/**)', { realpath: fakeRealpath }).parsed.glob, '/r/long-name-dir/**');
+  assert.equal(validateRule('Write(/r/NOSUCH~1/**)', { realpath: fakeRealpath }).ok, false, 'an unexpandable short-name prefix refuses the rule (fail-closed)');
+  assert.equal(validateRule('Write(/r/eperm/**)', { realpath: fakeRealpath }).ok, false, 'a realpath error refuses the rule (fail-closed)');
+  assert.equal(validateRule('Write(/nope/**)', { realpath: () => { throw enoent('x'); } }).ok, false, 'a prefix whose chain is missing entirely refuses the rule');
+  assert.equal(validateRule('Write(/r/src/new/**)', { realpath: fakeRealpath }).parsed.glob, '/r/src/new/**', 'a not-yet-existing tail is kept');
 });
 
 // ── KBT-T5238: the real filesystem — a junction/symlink and a real 8.3 name ──
@@ -944,8 +954,13 @@ test('real fs: a junction/symlink that points into .git is vetoed; the plain tre
     const claudeShort = shortName(`${tmp}/repo/.claude`) || `${tmp}/repo/CLAUDE~1`;
     assert.equal(d(write(`${claudeShort}/settings.local.json`)).allow, false, `8.3 name of .claude (${claudeShort})`);
     const srcShort = shortName(`${tmp}/repo/source-directory`);
-    if (srcShort) assert.equal(d(write(`${srcShort}/a.ts`)).allow, true, `8.3 name of an ordinary dir expands and allows (${srcShort})`);
-    else if (WIN) console.log('# 8.3 short names not available on this volume — positive 8.3 control skipped');
+    if (srcShort) {
+      assert.equal(d(write(`${srcShort}/a.ts`)).allow, true, `8.3 name of an ordinary dir expands and allows (${srcShort})`);
+      // KBT-TC4199 scenario: the RULE is spelled with the short name (os.tmpdir() as C:\Users\ADMIN1~1\…), the path in long form.
+      const shortRule = decide([`Read(${srcShort}/**)`], { ...read(`${tmp}/repo/source-directory/a.txt`), cwd: `${tmp}/repo` });
+      assert.equal(shortRule.allow, true, `short-name rule prefix must match the long-form path (${shortRule.reason || ''})`);
+      assert.equal(decide([`Read(${srcShort}/**)`], { ...read(`${tmp}/repo/other/b.txt`), cwd: `${tmp}/repo` }).allow, false, 'and still only its own tree');
+    } else if (WIN) console.log('# 8.3 short names not available on this volume — positive 8.3 control skipped');
   } finally {
     rmTmp(tmp);
   }

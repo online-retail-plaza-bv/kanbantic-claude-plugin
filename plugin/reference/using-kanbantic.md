@@ -594,7 +594,10 @@ vóór de match gecanonicaliseerd: absoluut en `..`-vrij, dan de dichtstbijzijnd
 *bestaande* voorouder via `fs.realpathSync.native` (korte namen, symlinks en
 junctions uitgeklapt) met de niet-bestaande staart er weer achter. Het veto op
 `.claude/`, `.git/` en `.mcp.json` draait op de ruwe én de canonieke vorm, en de
-regel-glob wordt tegen de canonieke vorm gelegd. Geen beslissing (de mens
+regel-glob wordt tegen de canonieke vorm gelegd — het letterlijke mapdeel van
+de regel zelf wordt met hetzelfde algoritme gecanonicaliseerd (een regel op
+`C:/Users/ADMIN1~1/…/**` matcht de lange vorm van het pad; lukt dat niet, dan
+wordt de regel geweigerd). Geen beslissing (de mens
 beslist) bij: een `:` buiten de driveletter, een `//`-prefix (UNC, `\\?\`), een
 segment eindigend op punt/spatie, een korte naam die niet uit te klappen is, een
 ontbrekende drive of welke realpath-fout dan ook (fail-closed). Nieuw verboden,

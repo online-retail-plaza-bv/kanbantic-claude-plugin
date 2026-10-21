@@ -347,7 +347,7 @@ const reject = (reason) => ({ ok: false, reason });
  * Validate one rule line.
  * @returns {{ok:true, rule:string, parsed:object}|{ok:false, reason:string}}
  */
-function validateRule(raw, { caseInsensitive = process.platform === 'win32' } = {}) {
+function validateRule(raw, { caseInsensitive = WIN, realpath = defaultRealpath } = {}) {
   if (typeof raw !== 'string') return reject('not a string');
   const rule = raw.trim();
   const m = RULE_SHAPE.exec(rule);
@@ -382,7 +382,10 @@ function validateRule(raw, { caseInsensitive = process.platform === 'win32' } = 
     if (/(^|\/)\.\.(\/|$)/.test(glob)) return reject('path glob must not contain ..');
     if (isRootGlob(glob)) return reject('path glob on the filesystem root');
     if (glob.startsWith('//')) return reject('UNC, \\\\?\\ and \\\\.\\ paths are never an allow-tree');
-    return { ok: true, rule, parsed: { kind: 'path', tool, glob, re: globToRegExp(glob, caseInsensitive) } };
+    let canonical;
+    try { canonical = canonicalGlob(glob, realpath); } catch (_) { canonical = null; }
+    if (canonical === null) return reject('path glob prefix cannot be canonicalised (short name, stream, missing drive or realpath error)');
+    return { ok: true, rule, parsed: { kind: 'path', tool, glob: canonical, rawGlob: glob, re: globToRegExp(canonical, caseInsensitive) } };
   }
 
   if (tool === 'WebFetch') {
@@ -562,6 +565,23 @@ function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
   return canonical;
 }
 
+/**
+ * A path-rule glob with its literal directory prefix canonicalised the same
+ * way (a rule written as `C:/Users/ADMIN1~1/…/**` must match the long-form
+ * path realpath produces for the file). null when the prefix cannot be
+ * canonicalised — the rule is then refused (fail-closed). A relative prefix,
+ * or one without a directory part, is left as is.
+ */
+function canonicalGlob(glob, realpath) {
+  const literal = glob.split(/[*?[{]/)[0];
+  const cut = literal.lastIndexOf('/');
+  if (cut < 1) return glob;
+  const dir = literal.slice(0, cut);
+  if (!isAbsolutePath(dir)) return glob;
+  const canonical = canonicalizePath(dir, '', realpath);
+  return canonical === null ? null : canonical.replace(/\/$/, '') + glob.slice(cut);
+}
+
 // ── the path veto (raw + canonical) ─────────────────────────────────────────
 
 const PROTECTED_REASON = '.claude/, .git/ and .mcp.json are never auto-allowed';
@@ -707,7 +727,7 @@ function decide(rules, payload, { caseInsensitive = WIN, realpath = defaultRealp
     return { allow: false, reason: `forbidden command pattern: ${forbiddenPattern(input.command)}` };
   }
   for (const raw of Array.isArray(rules) ? rules : []) {
-    const v = validateRule(raw, { caseInsensitive });
+    const v = validateRule(raw, { caseInsensitive, realpath });
     if (v.ok && matches(v.parsed, toolName, input, cwd, realpath)) return { allow: true, rule: v.rule };
   }
   return { allow: false, reason: 'no rule matched' };
