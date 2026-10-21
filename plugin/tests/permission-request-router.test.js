@@ -676,11 +676,12 @@ function startMcpStub(items, seen) {
   })));
 }
 
-async function runSync(items, { existingSessionFile = true, extraEnv = {} } = {}) {
+async function runSync(items, { existingSessionFile = true, extraEnv = {}, apiResponder } = {}) {
   const dir = mkTmp();
   const repo = mkTmp('kbt-f741-repo-');
   const seen = [];
   const mcp = await startMcpStub(items, seen);
+  const apiStub = await startApiStub(apiResponder); // REST side: report-allow-rule-rejected (KBT-T5221)
   try {
     require('node:child_process').execFileSync('git', ['init', '-q', '.'], { cwd: repo, stdio: 'ignore' });
     if (existingSessionFile) writeSessionFile(dir, { claudeCliSessionId: 'sync-sess' });
@@ -690,6 +691,7 @@ async function runSync(items, { existingSessionFile = true, extraEnv = {} } = {}
         HOME: dir, USERPROFILE: dir,
         KANBANTIC_API_KEY: 'test', KANBANTIC_WORKSPACE_ID: 'kanbantic',
         KANBANTIC_MCP_URL: `http://127.0.0.1:${mcp.port}/mcp`,
+        KANBANTIC_API_URL: apiStub.url,
         KANBANTIC_SESSION_FILE: existingSessionFile ? path.join(dir, 'session.json') : path.join(dir, 'missing.json'),
         CLAUDE_CODE_SESSION_ID: 'sync-sess',
         ...extraEnv,
@@ -698,13 +700,17 @@ async function runSync(items, { existingSessionFile = true, extraEnv = {} } = {}
     });
     const cache = path.join(dir, '.claude-kanbantic-allowlist-sync-sess.json');
     const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null);
-    return { r, seen, session: read(path.join(dir, 'session.json')), cache: read(cache) };
+    return { r, seen, api: apiStub.calls, session: read(path.join(dir, 'session.json')), cache: read(cache) };
   } finally {
+    await apiStub.close();
     await mcp.close();
     rmTmp(dir);
     rmTmp(repo);
   }
 }
+
+const REJECT_ROUTE = '/api/app/agent-session/SESS-1/report-allow-rule-rejected';
+const rejectCalls = (api) => api.filter((c) => c.url === REJECT_ROUTE);
 
 const ALLOW_ITEM = {
   code: 'KBT-CUST001', title: 'Permission allow-list', category: 'Custom', tags: ['permission-allow'],
@@ -751,4 +757,80 @@ test('sync: fail-open — an unreachable backend still exits 0 and writes no all
   const { r, cache } = await runSync([ALLOW_ITEM], { existingSessionFile: false, extraEnv: { KANBANTIC_MCP_URL: 'http://127.0.0.1:1/mcp' } });
   assert.equal(r.status, 0);
   assert.equal(cache, null);
+});
+
+// ── SessionStart sync: rejected rules are reported to the session (KBT-T5221) ──
+
+test('sync: every rejected rule is reported once via POST …/report-allow-rule-rejected {rule, reason}, with the agent key', async () => {
+  const { r, api, cache } = await runSync([ALLOW_ITEM]);
+  assert.equal(r.status, 0, r.stderr);
+  const calls = rejectCalls(api);
+  assert.equal(calls.length, 2, `two rejected rules → two reports, got ${api.map((c) => c.url)}`);
+  for (const c of calls) {
+    assert.equal(c.method, 'POST');
+    assert.equal(c.headers['x-api-key'], 'test');
+    assert.deepEqual(Object.keys(c.body).sort(), ['reason', 'rule']);
+    assert.ok(typeof c.body.rule === 'string' && c.body.rule.length > 0 && c.body.rule.length <= 500);
+    assert.ok(typeof c.body.reason === 'string' && c.body.reason.length > 0 && c.body.reason.length <= 100);
+  }
+  assert.deepEqual(calls.map((c) => c.body.rule).sort(), ['Bash(*)', 'Bash(rm -rf *)']);
+  assert.match(calls.find((c) => c.body.rule === 'Bash(*)').body.reason, /every command/);
+  // the local SessionStart output is unchanged, and so is the cache
+  assert.match(r.stdout, /permission-allow-rejected: Bash\(\*\)/);
+  assert.deepEqual(cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+});
+
+test('sync: nothing rejected → nothing reported', async () => {
+  const { api } = await runSync([{ ...ALLOW_ITEM, content: '```allow\nBash(git *)\n```' }]);
+  assert.equal(rejectCalls(api).length, 0);
+});
+
+test('sync: the rule text is redacted before it leaves the machine', async () => {
+  const item = { ...ALLOW_ITEM, content: '```allow\nBash(curl -H "Authorization: Bearer abc123SECRET" *)\n```' };
+  const { api } = await runSync([item]);
+  const calls = rejectCalls(api);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].body.rule.includes('Bearer ***'), calls[0].body.rule);
+  assert.ok(!api.some((c) => c.raw.includes('abc123SECRET')), 'secret leaked to the API');
+});
+
+test('sync: rule is capped at 500 chars and reason at 100 (after redaction)', async () => {
+  const item = { ...ALLOW_ITEM, content: `\`\`\`allow\nBash(rm -rf ${'x'.repeat(700)} *)\n\`\`\`` };
+  const { api } = await runSync([item]);
+  const calls = rejectCalls(api);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.rule.length, 500);
+  assert.ok(calls[0].body.reason.length <= 100);
+});
+
+test('sync: no session file → no report, cache still written; API down or 500 → exit 0, cache still written', async () => {
+  const none = await runSync([ALLOW_ITEM], { existingSessionFile: false });
+  assert.equal(none.r.status, 0);
+  assert.equal(rejectCalls(none.api).length, 0);
+  assert.deepEqual(none.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+
+  const port = await closedPort();
+  const down = await runSync([ALLOW_ITEM], { extraEnv: { KANBANTIC_API_URL: `http://127.0.0.1:${port}` } });
+  assert.equal(down.r.status, 0, down.r.stderr);
+  assert.deepEqual(down.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.match(down.r.stdout, /permission-allow-rejected: Bash\(\*\)/);
+
+  const boom = await runSync([ALLOW_ITEM], { apiResponder: () => ({ status: 500 }) });
+  assert.equal(boom.r.status, 0, boom.r.stderr);
+  assert.equal(rejectCalls(boom.api).length, 2);
+  assert.deepEqual(boom.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+});
+
+test('sync: {recorded:false} (session without workstation) is not an error — nothing is retried', async () => {
+  const { r, api } = await runSync([ALLOW_ITEM], { apiResponder: () => ({ status: 200, body: { recorded: false } }) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(rejectCalls(api).length, 2);
+});
+
+test('sync: the report goes through session-api (5 s deadline, fail-open), never the MCP proxy', () => {
+  const src = fs.readFileSync(path.join(HOOKS_DIR, 'session-start-toolkit-sync.js'), 'utf8');
+  assert.match(src, /report-allow-rule-rejected/);
+  assert.match(src, /lib\/session-api\.js/);
+  assert.match(src, /postQuietly/);
+  assert.match(src, /redactText/);
 });
