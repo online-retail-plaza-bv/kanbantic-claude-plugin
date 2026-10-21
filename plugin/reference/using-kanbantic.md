@@ -584,6 +584,26 @@ memory-pad (`memory-path.js`) krijgt nooit `allow`, en evenmin iets onder
 `.claude/` of `.git/` of een bestand `.mcp.json` (elke map, elk tool, ook Read
 en Bash-commando's die zo'n pad noemen); `.claude/worktrees/<naam>/…` is een
 checkout en wél gewoon toegestaan, maar niet diens eigen `.claude/` of `.git`.
+
+**Canonicalisatie en de her-review (KBT-T5238, KBT-T5239, KBT-T5241).** Windows
+opent één bestand onder meer spellingen dan de string toont (8.3-korte namen als
+`GIT~1`, NTFS-streams als `.git::$INDEX_ALLOCATION`, een punt of spatie achter
+een segment, `\\?\`/`\\.\`-prefixen, junctions). Daarom wordt elk pad — padvelden,
+de letterlijke basis van een Glob-patroon en padwoorden in een Bash-commando —
+vóór de match gecanonicaliseerd: absoluut en `..`-vrij, dan de dichtstbijzijnde
+*bestaande* voorouder via `fs.realpathSync.native` (korte namen, symlinks en
+junctions uitgeklapt) met de niet-bestaande staart er weer achter. Het veto op
+`.claude/`, `.git/` en `.mcp.json` draait op de ruwe én de canonieke vorm, en de
+regel-glob wordt tegen de canonieke vorm gelegd. Geen beslissing (de mens
+beslist) bij: een `:` buiten de driveletter, een `//`-prefix (UNC, `\\?\`), een
+segment eindigend op punt/spatie, een korte naam die niet uit te klappen is, een
+ontbrekende drive of welke realpath-fout dan ook (fail-closed). Nieuw verboden,
+als regel én commando: `git checkout`/`restore` van de hele boom (`.`, `..`,
+`./`, `*`, `:/` — één genoemd pad mag wel), `git stash drop`/`clear`, `git reset
+--merge`/`--keep`, `git clean -x`/`--force`, `git push --prune`, `git worktree
+remove -f`/`--force` en `git branch -f`/`--force` (ook `-d -f`); een
+checkout/restore-regel die op `--` eindigt wordt geweigerd. Pad-globs op `//`
+zijn nooit een allow-boom.
 Geweigerde regels meldt de SessionStart-sync als
 `permission-allow-rejected: <regel>` én, per regel, aan de sessie via
 `POST /api/app/agent-session/{id}/report-allow-rule-rejected` (`{rule ≤500,

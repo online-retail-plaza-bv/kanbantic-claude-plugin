@@ -887,7 +887,7 @@ test('canonicalizePath: fail-closed — any realpath error, a missing chain, an 
   assert.equal(canonicalizePath('//server/share/a.ts', '', fakeRealpath), null, 'UNC');
   assert.equal(canonicalizePath('/r/src./a.ts', '', fakeRealpath), null, 'trailing dot');
   assert.equal(canonicalizePath('/r/src /a.ts', '', fakeRealpath), null, 'trailing space');
-  assert.equal(canonicalizePath('/r/../../x', '', fakeRealpath), null, 'escape');
+  assert.equal(canonicalizePath('/r/../../x', '', fakeRealpath), '/x', '.. never climbs above the root (clamped, then matched against the rule)');
   assert.equal(canonicalizePath('', '/r', fakeRealpath), null);
   assert.equal(canonicalizePath('a.ts', '', fakeRealpath), null, 'relative without cwd');
   let calls = 0;
@@ -918,7 +918,7 @@ test('decide: matches on the CANONICAL path and vetoes on both raw and canonical
 /** The 8.3 spelling of an existing path on Windows (null when unavailable or identical). */
 function shortName(p) {
   if (!WIN) return null;
-  const r = require('node:child_process').spawnSync('cmd.exe', ['/d', '/c', `for %I in ("${p.replace(/\//g, '\\')}") do @echo %~sI`], { encoding: 'utf8' });
+  const r = require('node:child_process').spawnSync('cmd.exe', ['/d', '/c', `for %I in ("${p.replace(/\//g, '\\')}") do @echo %~sI`], { encoding: 'utf8', windowsVerbatimArguments: true });
   const s = (r.stdout || '').trim();
   if (r.status !== 0 || !s || s.replace(/\\/g, '/').toLowerCase() === p.replace(/\\/g, '/').toLowerCase()) return null;
   return s.replace(/\\/g, '/');

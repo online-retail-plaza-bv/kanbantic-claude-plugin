@@ -6,8 +6,9 @@
 // The allow-list a workspace keeps in its Toolkit (Custom item, tag
 // `permission-allow`): parsing, validation and matching. Used by the
 // SessionStart sync (parse + validate + cache) and by the PermissionRequest
-// router (re-validate + match). Pure — no I/O, no network — so both sides, and
-// the tests, run the very same code.
+// router (re-validate + match). No network; the only I/O is the realpath of
+// path canonicalisation (KBT-T5238, injectable), so both sides, and the tests,
+// run the very same code.
 //
 // ── Rule format ────────────────────────────────────────────────────────────
 // A subset of Claude Code's `permissions.allow` notation, one rule per line in
@@ -29,21 +30,28 @@
 // Rejected as a RULE, and refused as a COMMAND even when a broader rule would
 // match it (`Bash(git push*)` does not allow `git push --force`):
 //   rm with a recursive flag, Remove-Item … -Recurse, rmdir/rd /s, del /s,
-//   git push --force / -f / --force-with-lease / +refspec, git reset --hard,
-//   git clean -f…, `DROP ` and `TRUNCATE `;
+//   git push --force / -f / --force-with-lease / +refspec, git reset --hard /
+//   --merge / --keep, git clean -f… / -x / --force, `DROP ` and `TRUNCATE `;
 //   git push -d / :<ref> (empty source = delete), git checkout/switch -f /
 //   --force / --discard-changes, git branch -D, git -c <config override>,
 //   and — in any command — --delete, --mirror, --upload-pack, --receive-pack,
-//   --output[-dir], --exec[-path] / -exec[dir].
-// Also rejected as a rule: Bash(*) / bare Bash, bare path tools, and path globs
-// on the root (`/**`, `C:/**`, `*:/**`, `**/x`).
+//   --output[-dir], --exec[-path] / -exec[dir];
+//   (KBT-T5239/T5241) git checkout/restore of the whole tree (a bare `.`,
+//   `..`, `./`, `*`, `:/` or `:(` target, with or without `--`; one NAMED path
+//   stays allowed), git stash drop / clear, git push --prune, git worktree
+//   remove -f / --force, git branch -f / --force (also -d -f). A rule's own
+//   trailing `*` is its wildcard, not a `*` target, but a checkout/restore
+//   rule that ends in `--` is refused (it would cover the whole tree).
+// Also rejected as a rule: Bash(*) / bare Bash, bare path tools, path globs
+// on the root (`/**`, `C:/**`, `*:/**`, `**/x`) and globs on `//` (UNC, \\?\).
 // A local-memory path (memory-path.js) never gets allow, under any rule, and
 // neither does anything under a `.claude/` or `.git/` directory or a file named
 // `.mcp.json` (settings, hooks, MCP config: the places a permission bypass or
 // a token would be planted). `.claude/worktrees/<name>/…` is a checkout root,
 // not config, and is exempt — its own `.claude/` and `.git` are not. The veto
-// covers every path field, Glob patterns, Grep file globs and Bash commands
-// that spell such a path.
+// covers every path field, Glob patterns (and their literal base), Grep file
+// globs and Bash commands that spell such a path — each in its raw spelling
+// AND canonicalised (see "canonical paths" below, KBT-T5238).
 //
 // ── curl (KBT-T5218): a dedicated matcher on top of the prefix match ───────
 // PO decision: curl may never send keys or data to another address. A
@@ -80,8 +88,11 @@
 // the decision to the user.
 //
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { isLocalMemoryPath, normalizePath: normalizeMemoryPath, PROJECT_MEMORY_DIR } = require('../../scripts/memory-path.js');
+
+const WIN = process.platform === 'win32';
 
 const PATH_TOOLS = new Set(['Read', 'Edit', 'Write', 'Glob', 'Grep']);
 
@@ -96,9 +107,18 @@ const FORBIDDEN = [
   ['del /s', new RegExp(`\\bdel\\b${SEG}\\s/s\\b`, 'i')],
   ['git push --force', new RegExp(
     `\\bgit\\b${SEG}\\bpush\\b${SEG}(?:\\s-[a-z]*f[a-z]*(?=[\\s*]|$)|\\s--force(?:-with-lease)?(?=[\\s=*]|$)|\\s\\+\\S)`, 'i')],
-  ['git reset --hard', new RegExp(`\\bgit\\b${SEG}\\breset\\b${SEG}--hard`, 'i')],
-  ['git clean -f', new RegExp(`\\bgit\\b${SEG}\\bclean\\b${SEG}\\s-[a-z]*f`, 'i')],
+  ['git reset --hard / --merge / --keep', new RegExp(`\\bgit\\b${SEG}\\breset\\b${SEG}\\s--(?:hard|merge|keep)(?=[\\s=*]|$)`, 'i')],
+  ['git clean -f / -x', new RegExp(`\\bgit\\b${SEG}\\bclean\\b${SEG}\\s(?:-[a-z]*[fx][a-z]*|--force)(?=[\\s*]|$)`, 'i')],
   ['DROP / TRUNCATE', /\b(?:drop|truncate)\s/i],
+  // KBT-T5239 / KBT-T5241 — data-loss forms from the re-review. A checkout/restore
+  // of ONE named path is fine; the whole tree (`.`, `..`, `./`, `*`, `:/`, `:(`) is not.
+  ['git checkout/restore of the whole tree', new RegExp(
+    `\\bgit\\b${SEG}\\b(?:checkout|restore)\\b${SEG}\\s(?:--\\s+)?["']?(?:\\.{1,2}/?|\\*|:/|:\\()["']?(?=\\s|$)`, 'i')],
+  ['git stash drop / clear', new RegExp(`\\bgit\\b${SEG}\\bstash\\b(?:\\s+-[^\\s;&|]+)*\\s+(?:drop|clear)\\b`, 'i')],
+  ['git push --prune', new RegExp(`\\bgit\\b${SEG}\\bpush\\b${SEG}\\s--prune(?=[\\s=*]|$)`, 'i')],
+  ['git worktree remove --force', new RegExp(
+    `\\bgit\\b${SEG}\\bworktree\\b${SEG}\\bremove\\b${SEG}\\s(?:-[a-z]*f[a-z]*|--force)(?=[\\s*]|$)`, 'i')],
+  ['git branch -f / --force', new RegExp(`\\bgit\\b${SEG}\\bbranch\\b${SEG}\\s(?:-[a-z]*f[a-z]*|--force)(?=[\\s*]|$)`, 'i')],
   // KBT-T5218 — destructive / code-executing git forms the reviewer reproduced
   ['git push -d / :<ref> (delete)', new RegExp(
     `\\bgit\\b${SEG}\\bpush\\b${SEG}(?:\\s-[a-z]*d[a-z]*(?=[\\s*]|$)|\\s:\\S)`, 'i')],
@@ -339,8 +359,10 @@ function validateRule(raw, { caseInsensitive = process.platform === 'win32' } = 
     if (spec === undefined || !spec.trim()) return reject('bare Bash would allow every command');
     let s = spec.trim().replace(/:\*$/, '*'); // legacy `Bash(git status:*)`
     if (/^\*+$/.test(s)) return reject('Bash(*) would allow every command');
-    const hit = forbiddenPattern(s);
+    // The rule's trailing `*` is its wildcard, not a literal `*` target (`git checkout -- *`).
+    const hit = forbiddenPattern(s.endsWith('*') ? s.slice(0, -1) : s);
     if (hit) return reject(`forbidden pattern: ${hit}`);
+    if (/\bgit\b.*\b(?:checkout|restore)\b.*\s--\s*\*?$/i.test(s)) return reject('a checkout/restore rule ending in -- would cover the whole tree');
     const stars = (s.match(/\*/g) || []).length;
     if (stars > 1 || (stars === 1 && !s.endsWith('*'))) return reject('only a single trailing * is supported for Bash');
     const exact = stars === 0;
@@ -359,6 +381,7 @@ function validateRule(raw, { caseInsensitive = process.platform === 'win32' } = 
     const glob = slashPath(spec);
     if (/(^|\/)\.\.(\/|$)/.test(glob)) return reject('path glob must not contain ..');
     if (isRootGlob(glob)) return reject('path glob on the filesystem root');
+    if (glob.startsWith('//')) return reject('UNC, \\\\?\\ and \\\\.\\ paths are never an allow-tree');
     return { ok: true, rule, parsed: { kind: 'path', tool, glob, re: globToRegExp(glob, caseInsensitive) } };
   }
 
@@ -441,9 +464,12 @@ function touchesLocalMemory(toolName, input) {
 
 // ── protected paths: .claude/, .git/, .mcp.json (KBT-T5218) ─────────────────
 
+/** A segment as NTFS would open it: stream suffix (`:…`) and trailing dots/spaces dropped. */
+const plainSegment = (s) => s.replace(/:.*$/, '').replace(/[. ]+$/, '');
+
 /** Any `.git` segment, any `.claude` segment that is not `.claude/worktrees/<name>`, or a `.mcp.json` file. */
 function isProtectedPath(p) {
-  const segs = slashPath(p).toLowerCase().split('/');
+  const segs = slashPath(p).toLowerCase().split('/').map(plainSegment);
   if (segs[segs.length - 1] === '.mcp.json') return true;
   for (let i = 0; i < segs.length; i++) {
     if (segs[i] === '.git') return true;
@@ -454,23 +480,184 @@ function isProtectedPath(p) {
   return false;
 }
 
-/** The same three, spelled inside a command line or a file glob. */
-const PROTECTED_IN_TEXT = /(^|[\s"'=/\\])(?:\.git[/\\]|\.claude[/\\](?!worktrees[/\\][^\s"'/\\]+(?:[/\\\s"']|$))|\.mcp\.json(?=$|[\s"']))/i;
+/** The same three, spelled inside a command line or a file glob — also with a stream suffix or trailing dots/spaces. */
+const PROTECTED_IN_TEXT = new RegExp(
+  '(^|[\\s"\'=/\\\\])(?:'
+  + '\\.git(?:[. ]*(?=[/\\\\])|:[^\\s"\'/\\\\]*)?(?:[/\\\\]|(?=[\\s"\']|$))'
+  + '|\\.claude(?:[. ]*(?=[/\\\\])|:[^\\s"\'/\\\\]*)?[/\\\\](?!worktrees[/\\\\][^\\s"\'/\\\\]+(?:[/\\\\\\s"\']|$))'
+  + '|\\.mcp\\.json(?::[^\\s"\']*)?(?=$|[\\s"\']))', 'i');
 
-/** Would this call touch Claude Code / git / MCP configuration? Then it never gets allow. */
-function touchesProtected(toolName, input, cwd) {
-  if (pathFields(input).some((raw) => isProtectedPath(resolveInputPath(raw, cwd) || raw))) return true;
-  const globs = [toolName === 'Glob' ? input.pattern : null, toolName === 'Grep' ? input.glob : null];
-  if (globs.some((g) => typeof g === 'string' && PROTECTED_IN_TEXT.test(g))) return true;
-  return toolName === 'Bash' && typeof input.command === 'string' && PROTECTED_IN_TEXT.test(input.command);
+// ── canonical paths (KBT-T5238) ─────────────────────────────────────────────
+//
+// Windows opens more spellings of one file than the string suggests: 8.3
+// short names (`GIT~1` = `.git`), NTFS streams (`.git::$INDEX_ALLOCATION` is
+// the directory itself), trailing dots/spaces (`.git.` = `.git`), `\\?\` /
+// `\\.\` prefixes, junctions and symlinks. The reviewer proved Node really
+// writes into .git\hooks through the first two. So before a path is matched
+// or vetoed it is canonicalised:
+//   1. absolute, `..` collapsed, `/` separators (resolveInputPath);
+//   2. refused (null) when it starts with `//` (UNC, \\?\, \\.\), has a `:`
+//      anywhere but the drive-letter position, or has a segment that ends in
+//      a dot or a space;
+//   3. the closest EXISTING ancestor is resolved with fs.realpathSync.native
+//      (walk up on ENOENT/ENOTDIR, never past the root) — that expands short
+//      names, junctions and symlinks — and the non-existing tail is
+//      re-appended; any other error (EPERM, ENAMETOOLONG, ELOOP, …) or a chain
+//      of which not even the root exists (unmounted drive) is null;
+//   4. a segment that still looks like a short name (`~<digit>`) could not be
+//      expanded and is null.
+// On a POSIX host a drive-letter path is not an OS path: steps 1, 2 and 4 only.
+// The protected-path veto runs on the RAW spelling (a `.git` that does not
+// exist yet) AND on the canonical one; the rule glob is matched against the
+// canonical path. null always means: no decision, the human decides.
+
+const defaultRealpath = (p) => fs.realpathSync.native(p);
+const isDrivePath = (p) => /^[a-z]:\//i.test(p);
+const isPathRoot = (p) => /^(?:[a-z]:)?\/$/i.test(p);
+const SHORT_NAME = /~\d/;
+const DOT_SPACE_SEGMENT = (s) => /[. ]$/.test(s) && !/^\.{1,2}$/.test(s);
+
+/** Why a slash-normalised path cannot be trusted as spelled; null when it is plain. */
+function pathSpellingProblem(p) {
+  if (p.startsWith('//')) return 'UNC, \\\\?\\ or \\\\.\\ path';
+  if (p.slice(isDrivePath(p) ? 2 : 0).includes(':')) return 'colon outside the drive letter (NTFS stream)';
+  if (p.split('/').some(DOT_SPACE_SEGMENT)) return 'segment ending in a dot or a space';
+  return null;
 }
 
-function inputPath(toolName, input, cwd) {
+/**
+ * The path as the OS would open it (see above), or null when it cannot be trusted.
+ * @param {string} raw  file_path as given
+ * @param {string} cwd  base for a relative path
+ * @param {(p:string)=>string} [realpath]  fs.realpathSync.native by default; injectable for tests
+ */
+function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
+  if (typeof raw !== 'string' || slashPath(raw).startsWith('//')) return null; // UNC, \\?\, \\.\ — before normalize folds the `//`
+  const resolved = resolveInputPath(raw, cwd);
+  if (resolved === null) return null;
+  const p = resolved.replace(/(.)\/$/, '$1');
+  if (pathSpellingProblem(p)) return null;
+  let canonical = p;
+  if (WIN || !isDrivePath(p)) {
+    let head = p;
+    const tail = [];
+    for (;;) {
+      let real;
+      try {
+        real = realpath(head);
+      } catch (err) {
+        if (!err || (err.code !== 'ENOENT' && err.code !== 'ENOTDIR')) return null; // EPERM, ENAMETOOLONG, ELOOP, …
+        if (isPathRoot(head)) return null; // not even the root exists (unmounted drive)
+        tail.unshift(path.posix.basename(head));
+        head = path.posix.dirname(head);
+        continue;
+      }
+      const base = resolveInputPath(String(real), '');
+      if (base === null || pathSpellingProblem(base)) return null;
+      canonical = tail.length ? [base.replace(/\/$/, ''), ...tail].join('/') : base;
+      break;
+    }
+  }
+  if (canonical.split('/').some((s) => SHORT_NAME.test(s))) return null; // an 8.3 name that did not expand
+  return canonical;
+}
+
+// ── the path veto (raw + canonical) ─────────────────────────────────────────
+
+const PROTECTED_REASON = '.claude/, .git/ and .mcp.json are never auto-allowed';
+const MEMORY_REASON = 'local memory path is never auto-allowed';
+const CANON_REASON = 'path cannot be canonicalised safely (8.3 name, NTFS stream, UNC/\\\\?\\ prefix, trailing dot/space, missing drive or realpath error)';
+
+/** Reason one path field may never be allowed, or null. */
+function vetoPath(raw, cwd, realpath) {
+  if (isProtectedPath(resolveInputPath(raw, cwd) || slashPath(raw))) return PROTECTED_REASON;
+  const canonical = canonicalizePath(raw, cwd, realpath);
+  if (canonical === null) return CANON_REASON;
+  if (isProtectedPath(canonical)) return PROTECTED_REASON;
+  if (isLocalMemoryPath(canonical)) return MEMORY_REASON;
+  return null;
+}
+
+/** The literal directory part of a Glob pattern (before the first wildcard), joined to its base. */
+function vetoGlobBase(input, cwd, realpath) {
+  const literal = slashPath(input.pattern).split(/[*?[{]/)[0];
+  const cut = literal.lastIndexOf('/');
+  if (cut === -1) return null; // no directory part spelled out
+  const dir = literal.slice(0, cut + 1);
+  const base = typeof input.path === 'string' && input.path ? slashPath(input.path).replace(/\/$/, '') : '';
+  return vetoPath(isAbsolutePath(dir) || !base ? dir : `${base}/${dir}`, cwd, realpath);
+}
+
+const URL_WORD = /^[a-z][a-z0-9+.-]*:\/\//i;
+const OPTION_VALUE = /^--?[\w-]+=(.+)$/;
+const STREAM_IN_WORD = /::|:\$/;
+
+/** Words of a command that could name a file: with a separator, a short-name marker (`~<digit>`) or a stream marker. */
+function bashPathWords(cmd) {
+  const out = [];
+  for (let w of shellWords(cmd) || cmd.trim().split(/\s+/)) {
+    const m = OPTION_VALUE.exec(w);
+    if (m) w = m[1];
+    if (!w || URL_WORD.test(w)) continue;
+    const sep = /[\\/]/.test(w);
+    if (sep || SHORT_NAME.test(w) || STREAM_IN_WORD.test(w)) out.push({ word: w, sep });
+  }
+  return out;
+}
+
+/** Reason a word of a Bash command may never be allowed, or null. */
+function vetoBashWord({ word, sep }, cwd, realpath) {
+  const s = slashPath(word);
+  if (s.startsWith('//') || STREAM_IN_WORD.test(s)) return CANON_REASON;
+  if (isDrivePath(s) ? pathSpellingProblem(s) : sep && s.split('/').some(DOT_SPACE_SEGMENT)) return CANON_REASON;
+  if (isProtectedPath(s)) return PROTECTED_REASON;
+  if (!isDrivePath(s) && s.includes(':')) return null; // host:path, HEAD:refs/… — not a local path
+  if (sep) return vetoPath(word, cwd, realpath);
+  // A bare word with `~<digit>` (HEAD~1, GIT~1): a veto only when it EXISTS and expands to a protected name.
+  const p = resolveInputPath(word, cwd);
+  if (p === null) return null;
+  let real;
+  try { real = realpath(p); } catch (_) { return null; }
+  return isProtectedPath(slashPath(String(real))) ? PROTECTED_REASON : null;
+}
+
+/**
+ * Would this call touch Claude Code / git / MCP configuration, local memory,
+ * or a path that cannot be canonicalised? Then it never gets allow. Anything
+ * thrown on the way counts as "cannot be canonicalised" (fail-closed).
+ * @returns {string|null} the reason, or null when the paths are fine
+ */
+function pathVeto(toolName, input, cwd, realpath) {
+  try {
+    for (const raw of pathFields(input)) {
+      const reason = vetoPath(raw, cwd, realpath);
+      if (reason) return reason;
+    }
+    if (toolName === 'Glob' && typeof input.pattern === 'string') {
+      if (PROTECTED_IN_TEXT.test(input.pattern)) return PROTECTED_REASON;
+      const reason = vetoGlobBase(input, cwd, realpath);
+      if (reason) return reason;
+    }
+    if (toolName === 'Grep' && typeof input.glob === 'string' && PROTECTED_IN_TEXT.test(input.glob)) return PROTECTED_REASON;
+    if (toolName === 'Bash' && typeof input.command === 'string') {
+      if (PROTECTED_IN_TEXT.test(input.command)) return PROTECTED_REASON;
+      for (const w of bashPathWords(input.command)) {
+        const reason = vetoBashWord(w, cwd, realpath);
+        if (reason) return reason;
+      }
+    }
+    return null;
+  } catch (_) {
+    return CANON_REASON;
+  }
+}
+
+function inputPath(toolName, input, cwd, realpath) {
   const raw = input.file_path || input.filePath || (toolName === 'Glob' || toolName === 'Grep' ? input.path || cwd : null);
-  return resolveInputPath(raw, cwd);
+  return canonicalizePath(raw, cwd, realpath);
 }
 
-function matches(parsed, toolName, input, cwd) {
+function matches(parsed, toolName, input, cwd, realpath) {
   switch (parsed.kind) {
     case 'tool':
       return parsed.re.test(toolName);
@@ -488,7 +675,7 @@ function matches(parsed, toolName, input, cwd) {
       if (toolName !== parsed.tool) return false;
       if (toolName === 'Glob' && typeof input.pattern === 'string' &&
           (isAbsolutePath(slashPath(input.pattern)) || /(^|[\\/])\.\.([\\/]|$)/.test(input.pattern))) return false;
-      const p = inputPath(toolName, input, cwd);
+      const p = inputPath(toolName, input, cwd, realpath); // the CANONICAL path, never the raw spelling
       return p !== null && parsed.re.test(p);
     }
     case 'domain': {
@@ -507,20 +694,21 @@ function matches(parsed, toolName, input, cwd) {
  * Re-validates every rule: a forbidden rule in the cache counts as absent.
  * @returns {{allow:true, rule:string}|{allow:false, reason:string}}
  */
-function decide(rules, payload, { caseInsensitive = process.platform === 'win32' } = {}) {
+function decide(rules, payload, { caseInsensitive = WIN, realpath = defaultRealpath } = {}) {
   const toolName = payload && payload.tool_name;
   if (typeof toolName !== 'string' || !toolName) return { allow: false, reason: 'no tool_name' };
   const input = asObject(payload.tool_input);
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : '';
 
-  if (touchesLocalMemory(toolName, input)) return { allow: false, reason: 'local memory path is never auto-allowed' };
-  if (touchesProtected(toolName, input, cwd)) return { allow: false, reason: '.claude/, .git/ and .mcp.json are never auto-allowed' };
+  if (touchesLocalMemory(toolName, input)) return { allow: false, reason: MEMORY_REASON };
+  const veto = pathVeto(toolName, input, cwd, realpath);
+  if (veto) return { allow: false, reason: veto };
   if (toolName === 'Bash' && isForbiddenCommand(input.command)) {
     return { allow: false, reason: `forbidden command pattern: ${forbiddenPattern(input.command)}` };
   }
   for (const raw of Array.isArray(rules) ? rules : []) {
     const v = validateRule(raw, { caseInsensitive });
-    if (v.ok && matches(v.parsed, toolName, input, cwd)) return { allow: true, rule: v.rule };
+    if (v.ok && matches(v.parsed, toolName, input, cwd, realpath)) return { allow: true, rule: v.rule };
   }
   return { allow: false, reason: 'no rule matched' };
 }
@@ -533,6 +721,7 @@ module.exports = {
   forbiddenPattern,
   globToRegExp,
   resolveInputPath,
+  canonicalizePath,
   isProtectedPath,
   shellWords,
 };
