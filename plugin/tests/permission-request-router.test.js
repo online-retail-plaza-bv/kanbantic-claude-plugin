@@ -56,6 +56,12 @@ const read = (file_path) => ({ tool_name: 'Read', tool_input: { file_path } });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path } });
 const edit = (file_path) => ({ tool_name: 'Edit', tool_input: { file_path } });
 
+// KBT-T5243 — this checkout (the router child inherits it as process cwd) and a
+// top-level directory on the same drive that does not exist (and is never created).
+const HERE = fs.realpathSync.native(process.cwd()).replace(/\\/g, '/');
+const NEW_TOP = `${/^[a-z]:/i.test(HERE) ? HERE.slice(0, 2) : ''}/kbt-f741-new-top-${process.pid}`;
+assert.ok(!fs.existsSync(NEW_TOP), `${NEW_TOP} must not exist`);
+
 /** The two curl rules KBT-CUST004 carries (PO: curl may never send keys or data to another address). */
 const CURL_RULES = ['Bash(curl -s https://staging.kanbantic.com*)', 'Bash(curl -sS https://staging.kanbantic.com*)'];
 
@@ -65,7 +71,7 @@ const MUTANT = path.join(__dirname, 'helpers', 'router-mutant.js');
 const routerScript = () => (process.env.ROUTER_MUTATION === 'always-allow' ? MUTANT : 'permission-request-router.js');
 
 /** Run the router with `rules` in the allow-list cache. Returns result + recorded API calls. */
-async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra = {}, script = routerScript() } = {}) {
+async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra = {}, script = routerScript(), cwd } = {}) {
   const dir = mkTmp();
   const stub = await startApiStub(stubResponder);
   try {
@@ -77,6 +83,7 @@ async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra =
     const env = hookEnv(dir, stub, { KANBANTIC_ALLOWLIST_FILE: allowFile, ...extraEnv });
     const r = await runScript(script, {
       env,
+      cwd, // the ROUTER PROCESS cwd (what a drive-relative `C:` would resolve to) — not the payload cwd
       stdin: { hook_event_name: 'PermissionRequest', session_id: 's1', cwd: dir, ...tool, ...payloadExtra },
     });
     return { ...r, calls: stub.calls, dir };
@@ -126,6 +133,9 @@ const ALLOW_CASES = [
   ['git diff HEAD~1 (a ref, not an 8.3 name)', ['Bash(git *)'], bash('git diff HEAD~1'), 'Bash(git *)'],
   ['git push origin HEAD:refs/heads/x (a refspec colon is not a stream)', ['Bash(git push*)'], bash('git push origin HEAD:refs/heads/x'), 'Bash(git push*)'],
   ['Bash cp inside the tree (relative paths spelled in the command)', ['Bash(cp *)'], bash('cp src/a.ts src/b.ts'), 'Bash(cp *)'],
+  // KBT-T5243 — a not-yet-existing directory INSIDE the allowed tree still allows (the walk ends at an existing ancestor inside the tree).
+  ['Write C:/GitHub/Kanbantic/brand-new-dir/new.cs (non-existing dir inside the tree)', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), 'Write(C:/GitHub/**)'],
+  ['Write into a rule tree whose top dir does not exist yet, matched on its own prefix', [`Write(${NEW_TOP}/**)`], write(`${NEW_TOP}/payload.txt`), `Write(${NEW_TOP}/**)`],
   // KBT-T5239 / KBT-T5241 — positive controls for the new forbidden git forms.
   ['git checkout -b of a new branch', ['Bash(git checkout*)'], bash('git checkout -b feature/y'), 'Bash(git checkout*)'],
   ['git checkout -- of one named file (not the whole tree)', ['Bash(git checkout*)'], bash('git checkout -- src/file.ts'), 'Bash(git checkout*)'],
@@ -381,6 +391,23 @@ const NEGATIVE_CASES = [
   ['Bash cat of a \\\\?\\ path', ['Bash(cat *)'], bash('cat \\\\?\\C:\\GitHub\\Kanbantic\\src\\a.ts'), null],
   ['Bash cat .mcp.json::$DATA', ['Bash(cat *)'], bash('cat .mcp.json::$DATA'), null],
   ['Bash cat of an unmounted drive (whole chain missing)', ['Bash(cat *)'], bash('cat Q:/nope/GIT~1/config'), null],
+
+  // ── KBT-T5243: a path whose TOP directory does not exist must not canonicalise to the cwd ──
+  // path.posix.dirname('C:/x') is the DRIVE-RELATIVE 'C:'; realpath('C:') is the process cwd (the repo).
+  // The router runs with its cwd inside C:/GitHub (this checkout), exactly the reviewer's reproduction.
+  ['Write C:/brand-new-top/payload.txt (top dir does not exist, outside the tree)', ['Write(C:/GitHub/**)'], write('C:/brand-new-top/payload.txt'), null],
+  ['Write C:/kbt-new/a/b.ps1 (two missing levels, outside the tree)', ['Write(C:/GitHub/**)'], write('C:/kbt-new/a/b.ps1'), null],
+  ['Write Z:/nowhere/new.cs (drive does not exist)', ['Write(C:/GitHub/**)'], write('Z:/nowhere/new.cs'), null],
+  ['Write C:/Windows/new.txt (existing dir outside the tree)', ['Write(C:/GitHub/**)'], write('C:/Windows/new.txt'), null],
+  ['Write C:/ (the drive root itself)', ['Write(C:/GitHub/**)'], write('C:/'), null],
+  ['Write C:foo/bar (drive-relative spelling)', ['Write(C:/GitHub/**)'], write('C:foo/bar'), null],
+  ['Write C: (bare drive)', ['Write(C:/GitHub/**)'], write('C:'), null],
+  ['Read Z:/x/file.txt under a rule on a non-existing drive (the rule is refused)', ['Write(C:/GitHub/**)', 'Read(Z:/x/**)'], read('Z:/x/file.txt'), null],
+  ['Read Z:/x/file.txt, rule Read(Z:/x/**) alone', ['Read(Z:/x/**)'], read('Z:/x/file.txt'), null],
+  ['Write C:/GitHub/Kanbantic/a.cs under a rule whose top dir does not exist (prefix never rewritten under the cwd)', ['Write(C:/kbt-no-such-top/**)'], write('C:/GitHub/Kanbantic/a.cs'), null],
+  [`Write ${NEW_TOP}/payload.txt (top dir of THIS checkout's drive, rule on the checkout)`, [`Write(${HERE}/**)`], write(`${NEW_TOP}/payload.txt`), null],
+  [`Write ${NEW_TOP}/a/b.ps1 (two missing levels, rule on the checkout)`, [`Write(${HERE}/**)`], write(`${NEW_TOP}/a/b.ps1`), null],
+  ['Glob with pattern C:/*.txt and no path (literal part is the drive root)', ['Glob(C:/GitHub/**)'], { tool_name: 'Glob', tool_input: { pattern: 'C:/*.txt' } }, null],
 
   // ── KBT-T5239: data-loss git forms ──────────────────────────────────────────
   ['git checkout .', ['Bash(git checkout*)'], bash('git checkout .'), null],
@@ -921,6 +948,126 @@ test('decide: matches on the CANONICAL path and vetoes on both raw and canonical
   assert.equal(validateRule('Write(/r/eperm/**)', { realpath: fakeRealpath }).ok, false, 'a realpath error refuses the rule (fail-closed)');
   assert.equal(validateRule('Write(/nope/**)', { realpath: () => { throw enoent('x'); } }).ok, false, 'a prefix whose chain is missing entirely refuses the rule');
   assert.equal(validateRule('Write(/r/src/new/**)', { realpath: fakeRealpath }).parsed.glob, '/r/src/new/**', 'a not-yet-existing tail is kept');
+});
+
+// ── KBT-T5243: a missing top-level directory must never canonicalise to the cwd ──
+//
+// The reviewer's reproduction (cwd C:/GitHub/Kanbantic, rule Write(C:/GitHub/**)):
+// path.posix.dirname('C:/x') is 'C:', fs.realpathSync.native('C:') is the
+// process cwd, so C:/brand-new-top/payload.txt canonicalised to
+// <cwd>/brand-new-top/payload.txt — inside the allowed tree. Root rule:
+//   * the parent of `X:/<name>` is the root `X:/`, never the drive-relative `X:`;
+//   * realpath is never handed a bare `X:`;
+//   * a missing drive root (`Z:/`) is null (no decision / rule refused);
+//   * a path whose closest existing ancestor is the drive root canonicalises to `X:/<tail>`.
+
+const OUTSIDE_CWD = WIN && fs.existsSync('C:/Windows') ? 'C:/Windows' : null;
+
+test('no decision: KBT-T5243 vectors with the router cwd OUTSIDE the allowed tree (the escape does not depend on the cwd)', async () => {
+  const outside = OUTSIDE_CWD || mkTmp('kbt-f741-outside-');
+  try {
+    const cases = [
+      [['Write(C:/GitHub/**)'], write('C:/brand-new-top/payload.txt')],
+      [['Write(C:/GitHub/**)'], write('C:/kbt-new/a/b.ps1')],
+      [['Write(C:/GitHub/**)'], write('Z:/nowhere/new.cs')],
+      [['Write(C:/GitHub/**)', 'Read(Z:/x/**)'], read('Z:/x/file.txt')],
+      [['Read(Z:/x/**)'], read('Z:/x/file.txt')],
+      [['Write(C:/kbt-no-such-top/**)'], write('C:/GitHub/Kanbantic/a.cs')],
+      [[`Write(${HERE}/**)`], write(`${NEW_TOP}/payload.txt`)],
+    ];
+    for (const [rules, tool] of cases) {
+      const r = await route(rules, tool, { cwd: outside });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim(), '', `${tool.tool_input.file_path} under ${rules}: router must stay silent, got: ${r.stdout}`);
+      assert.ok(!r.calls.some((c) => c.body && c.body.permissionDecision), 'no allow may be recorded');
+    }
+    // Positive control from the same cwd: a missing dir INSIDE the tree still allows.
+    const ok = await route(['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), { cwd: outside });
+    assert.deepEqual(decisionOf(ok), ALLOW_JSON);
+  } finally {
+    if (!OUTSIDE_CWD) rmTmp(outside);
+  }
+});
+
+test('canonicalizePath/canonicalGlob: a bare drive is never handed to realpath; the drive root is the top of the walk (injected realpath that answers the cwd for C:)', () => {
+  const { canonicalizePath, decide, validateRule } = parser();
+  const CWD = 'C:/GitHub/Kanbantic';
+  const calls = [];
+  // A fake Windows volume: C:/ , C:/GitHub, C:/GitHub/Kanbantic and C:/Windows exist; Z: is not mounted.
+  // The TRAP: realpath('C:') (drive-relative) answers the process cwd, like fs.realpathSync.native does.
+  const trap = (p) => {
+    calls.push(p);
+    if (/^[a-z]:$/i.test(p)) return CWD.replace(/\//g, '\\');
+    const vol = { 'C:/': 'C:\\', 'C:/GitHub': 'C:\\GitHub', 'C:/GitHub/Kanbantic': 'C:\\GitHub\\Kanbantic', 'C:/Windows': 'C:\\Windows' };
+    if (vol[p]) return vol[p];
+    throw enoent(p);
+  };
+  const opts = { caseInsensitive: true, realpath: trap };
+  const expectNull = (raw, why) => assert.equal(canonicalizePath(raw, CWD, trap), null, why);
+  if (WIN) { // on a POSIX host a drive path is not an OS path and skips realpath (unchanged design)
+    assert.equal(canonicalizePath('C:/brand-new-top/payload.txt', CWD, trap), 'C:/brand-new-top/payload.txt', 'closest existing ancestor is the drive root');
+    assert.equal(canonicalizePath('C:/kbt-new/a/b.ps1', CWD, trap), 'C:/kbt-new/a/b.ps1');
+    assert.equal(canonicalizePath('C:/GitHub/Kanbantic/brand-new-dir/new.cs', CWD, trap), 'C:/GitHub/Kanbantic/brand-new-dir/new.cs');
+    assert.equal(canonicalizePath('C:/', CWD, trap), 'C:/', 'the root itself');
+    assert.equal(canonicalizePath('c:\\', CWD, trap), 'C:/', 'the root itself, OS spelling');
+    expectNull('Z:/nowhere/new.cs', 'drive root does not exist');
+    expectNull('Z:/', 'missing drive root itself');
+    assert.equal(validateRule('Read(Z:/x/**)', { realpath: trap }).ok, false, 'rule on a non-existing drive is refused');
+    assert.equal(validateRule('Read(D:/GitHub/**)', { realpath: trap }).ok, false, 'rule on a drive this machine does not have is refused');
+    assert.equal(validateRule('Write(C:/brand-new-top/**)', { realpath: trap }).parsed.glob, 'C:/brand-new-top/**', 'a rule prefix whose top dir does not exist keeps its own prefix');
+    assert.equal(validateRule('Write(C:/GitHub/Kanbantic/brand-new-dir/**)', { realpath: trap }).parsed.glob, 'C:/GitHub/Kanbantic/brand-new-dir/**');
+    assert.equal(validateRule('Write(C:/GitHub/**)', { realpath: trap }).parsed.glob, 'C:/GitHub/**');
+  }
+  expectNull('C:foo/bar', 'drive-relative spelling');
+  expectNull('C:', 'bare drive');
+  expectNull('C:foo', 'drive-relative, single segment');
+  assert.equal(validateRule('Read(C:foo/**)', { realpath: trap }).ok, false, 'a drive-relative rule glob is refused');
+  assert.equal(validateRule('Read(C:**)', { realpath: trap }).ok, false, 'a drive-relative root glob is refused');
+  for (const p of ['C:/brand-new-top/payload.txt', 'C:/kbt-new/a/b.ps1', 'Z:/nowhere/new.cs', 'C:/Windows/new.txt', 'C:/', 'C:foo/bar', 'C:']) {
+    const d = decide(['Write(C:/GitHub/**)'], { ...write(p), cwd: CWD }, opts);
+    assert.equal(d.allow, false, `${p}: ${JSON.stringify(d)}`);
+  }
+  assert.equal(decide(['Write(C:/GitHub/**)', 'Read(Z:/x/**)'], { ...read('Z:/x/file.txt'), cwd: CWD }, opts).allow, false, 'rule on a non-existing drive never allows');
+  assert.equal(decide(['Write(C:/kbt-no-such-top/**)'], { ...write('C:/GitHub/Kanbantic/a.cs'), cwd: CWD }, opts).allow, false, 'a rule prefix with a missing top dir is not rewritten under the cwd');
+  assert.equal(decide(['Write(C:/brand-new-top/**)'], { ...write('C:/brand-new-top/x/y.txt'), cwd: CWD }, opts).allow, true, 'and still matches its own (not yet existing) tree');
+  assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), cwd: CWD }, opts).allow, true, 'positive control: missing dir inside the tree');
+  assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('brand-new-dir/new.cs'), cwd: CWD }, opts).allow, true, 'positive control: relative to the cwd');
+  assert.ok(!calls.some((p) => /^[a-z]:$/i.test(p)), `realpath must never see a bare drive, saw: ${calls.filter((p) => /^[a-z]:$/i.test(p))}`);
+  assert.ok(!calls.some((p) => /^[a-z]:[^/]/i.test(p)), 'nor any drive-relative spelling');
+});
+
+test('real fs: KBT-T5243 — process cwd INSIDE the allowed tree, a missing top-level dir on the same drive is not allowed; a missing dir inside the tree is', () => {
+  const { decide, validateRule } = parser();
+  const tmp = fs.realpathSync.native(mkTmp('kbt-f741-root-')).replace(/\\/g, '/');
+  const repo = `${tmp}/repo`;
+  const before = process.cwd();
+  fs.mkdirSync(repo, { recursive: true });
+  process.chdir(repo); // realpath('<drive>:') would answer THIS directory — inside the rule tree
+  try {
+    const rules = [`Write(${tmp}/**)`, `Read(${tmp}/**)`];
+    const d = (payload) => decide(rules, { ...payload, cwd: repo });
+    assert.equal(d(write(`${repo}/brand-new-dir/new.cs`)).allow, true, 'positive control: missing dir inside the tree');
+    assert.equal(d(write(`${repo}/a/b/c/new.cs`)).allow, true, 'positive control: several missing levels inside the tree');
+    assert.equal(d(write(`${NEW_TOP}/payload.txt`)).allow, false, `missing top-level dir ${NEW_TOP}`);
+    assert.equal(d(write(`${NEW_TOP}/a/b.ps1`)).allow, false, 'two missing levels under a missing top-level dir');
+    assert.equal(d(write('Z:/nowhere/new.cs')).allow, false, 'drive that does not exist');
+    assert.equal(d(write(`${NEW_TOP.slice(0, NEW_TOP.indexOf('/kbt-f741') + 1)}`)).allow, false, 'the root itself');
+    assert.equal(d(read('Z:/x/file.txt')).allow, false);
+    assert.equal(decide([...rules, 'Read(Z:/x/**)'], { ...read('Z:/x/file.txt'), cwd: repo }).allow, false, 'rule on a non-existing drive');
+    assert.equal(decide([`Write(${NEW_TOP}/**)`], { ...write(`${repo}/x.cs`), cwd: repo }).allow, false, 'a rule on a missing top-level dir does not cover the cwd');
+    const v = validateRule(`Write(${NEW_TOP}/**)`);
+    assert.equal(v.ok, true, 'a rule on a missing top-level dir of an existing drive is valid');
+    assert.equal(v.parsed.glob, `${NEW_TOP}/**`, 'and keeps its own prefix (not rewritten under the cwd)');
+    if (WIN) {
+      assert.equal(validateRule('Read(Z:/x/**)').ok, false, 'rule on a non-existing drive is refused');
+      const missingDrive = 'ZYXWVUTSRQPONMLKJIHGFEDCBA'.split('').find((l) => !fs.existsSync(`${l}:/`));
+      if (missingDrive) assert.equal(validateRule(`Read(${missingDrive}:/GitHub/**)`).ok, false, `rule on ${missingDrive}: (no such drive) is refused`);
+      if (fs.existsSync('C:/Windows')) assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('C:/Windows/new.txt'), cwd: repo }).allow, false, 'existing dir outside the tree');
+    }
+  } finally {
+    process.chdir(before);
+    rmTmp(tmp);
+  }
 });
 
 // ── KBT-T5238: the real filesystem — a junction/symlink and a real 8.3 name ──
