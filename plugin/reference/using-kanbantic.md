@@ -763,12 +763,13 @@ Beslisbak (uitkomst `DecisionRequested`). Een agent hoeft dus nooit zelf een
 account te kiezen of zichzelf te herstarten.
 
 Lees de stand met `get_account_pool` (read-only; geen verplichte parameters,
-optioneel `workspaceId` — zonder wordt de actieve workspace gebruikt). Het
+optioneel `workspaceId` — alleen mét `workspaceId` komen `policy` en
+`recentEvents` van die workspace mee; zonder ontbreken ze). Het
 antwoord is `{ accounts, assignments, loginStatus, policy?, recentEvents }`:
 `accounts` zijn de poolaccounts met hun limietstatus, `assignments` welk
 werkstation/agent op welk account draait, `loginStatus` per account en
-werkstation of er een geldige login is, `policy` (alleen aanwezig als er een
-beleid is ingesteld) de balanceringsregels en `recentEvents` de laatste
+werkstation of er een geldige login is, `policy` (alleen bij een
+`workspaceId`) de balanceringsregels en `recentEvents` de laatste
 balanceringsgebeurtenissen (herplaatsing, limiet bereikt, `DecisionRequested`).
 
 **Wat dit voor de lokale sessie betekent.** De daemon start elke spawn met
