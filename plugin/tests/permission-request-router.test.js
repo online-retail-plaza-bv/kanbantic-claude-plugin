@@ -999,7 +999,8 @@ test('canonicalizePath/canonicalGlob: a bare drive is never handed to realpath; 
     calls.push(p);
     if (/^[a-z]:$/i.test(p)) return CWD.replace(/\//g, '\\');
     const vol = { 'C:/': 'C:\\', 'C:/GitHub': 'C:\\GitHub', 'C:/GitHub/Kanbantic': 'C:\\GitHub\\Kanbantic', 'C:/Windows': 'C:\\Windows' };
-    if (vol[p]) return vol[p];
+    const key = p.replace(/^[a-z]:/i, (d) => d.toUpperCase()); // NTFS is case-insensitive: c:/ is C:/
+    if (vol[key]) return vol[key];
     throw enoent(p);
   };
   const opts = { caseInsensitive: true, realpath: trap };

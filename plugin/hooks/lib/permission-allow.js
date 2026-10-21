@@ -381,6 +381,7 @@ function validateRule(raw, { caseInsensitive = WIN, realpath = defaultRealpath }
     const glob = slashPath(spec);
     if (/(^|\/)\.\.(\/|$)/.test(glob)) return reject('path glob must not contain ..');
     if (isRootGlob(glob)) return reject('path glob on the filesystem root');
+    if (isDriveRelative(glob)) return reject('drive-relative path glob (X:name) — spell the root as X:/');
     if (glob.startsWith('//')) return reject('UNC, \\\\?\\ and \\\\.\\ paths are never an allow-tree');
     let canonical;
     try { canonical = canonicalGlob(glob, realpath); } catch (_) { canonical = null; }
@@ -506,7 +507,15 @@ const PROTECTED_IN_TEXT = new RegExp(
 //      (walk up on ENOENT/ENOTDIR, never past the root) — that expands short
 //      names, junctions and symlinks — and the non-existing tail is
 //      re-appended; any other error (EPERM, ENAMETOOLONG, ELOOP, …) or a chain
-//      of which not even the root exists (unmounted drive) is null;
+//      of which not even the root exists (unmounted drive) is null.
+//      Root rule (KBT-T5243): the top of the walk is the ROOT `X:/` (or `/`),
+//      never the drive-relative `X:` that path.posix.dirname('X:/name')
+//      yields — realpath('X:') is the process cwd on Windows, which would
+//      put C:/brand-new-top/payload.txt INSIDE the repo. So the parent of
+//      `X:/name` is `X:/`, realpath is never handed a bare `X:` (a
+//      drive-relative spelling is null before it gets that far), a missing
+//      root (`Z:/`) is null, and a path whose closest existing ancestor is
+//      the root canonicalises to `X:/<tail>`;
 //   4. a segment that still looks like a short name (`~<digit>`) could not be
 //      expanded and is null.
 // On a POSIX host a drive-letter path is not an OS path: steps 1, 2 and 4 only.
@@ -517,6 +526,12 @@ const PROTECTED_IN_TEXT = new RegExp(
 const defaultRealpath = (p) => fs.realpathSync.native(p);
 const isDrivePath = (p) => /^[a-z]:\//i.test(p);
 const isPathRoot = (p) => /^(?:[a-z]:)?\/$/i.test(p);
+const isDriveRelative = (p) => /^[a-z]:(?!\/)/i.test(p); // `C:` or `C:name` — the drive's cwd, never a path of our own
+/** The parent directory, with the drive root kept as `X:/` (path.posix.dirname('X:/a') is the drive-relative `X:`). */
+const parentDir = (p) => {
+  const d = path.posix.dirname(p);
+  return /^[a-z]:$/i.test(d) ? `${d}/` : d;
+};
 const SHORT_NAME = /~\d/;
 const DOT_SPACE_SEGMENT = (s) => /[. ]$/.test(s) && !/^\.{1,2}$/.test(s);
 
@@ -538,21 +553,22 @@ function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
   if (typeof raw !== 'string' || slashPath(raw).startsWith('//')) return null; // UNC, \\?\, \\.\ — before normalize folds the `//`
   const resolved = resolveInputPath(raw, cwd);
   if (resolved === null) return null;
-  const p = resolved.replace(/(.)\/$/, '$1');
-  if (pathSpellingProblem(p)) return null;
+  const p = isPathRoot(resolved) ? resolved : resolved.replace(/\/$/, ''); // `C:/` stays the root, never `C:`
+  if (isDriveRelative(p) || pathSpellingProblem(p)) return null;
   let canonical = p;
   if (WIN || !isDrivePath(p)) {
     let head = p;
     const tail = [];
     for (;;) {
       let real;
+      if (isDriveRelative(head)) return null; // never hand realpath a bare `X:` (it answers the process cwd)
       try {
         real = realpath(head);
       } catch (err) {
         if (!err || (err.code !== 'ENOENT' && err.code !== 'ENOTDIR')) return null; // EPERM, ENAMETOOLONG, ELOOP, …
         if (isPathRoot(head)) return null; // not even the root exists (unmounted drive)
         tail.unshift(path.posix.basename(head));
-        head = path.posix.dirname(head);
+        head = parentDir(head); // `X:/name` → `X:/`, not `X:`
         continue;
       }
       const base = resolveInputPath(String(real), '');
@@ -569,8 +585,11 @@ function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
  * A path-rule glob with its literal directory prefix canonicalised the same
  * way (a rule written as `C:/Users/ADMIN1~1/…/**` must match the long-form
  * path realpath produces for the file). null when the prefix cannot be
- * canonicalised — the rule is then refused (fail-closed). A relative prefix,
- * or one without a directory part, is left as is.
+ * canonicalised — the rule is then refused (fail-closed): a prefix on a drive
+ * that does not exist (`Z:/x/**`) is null, a prefix whose top directory does
+ * not exist yet (`C:/brand-new-top/**`) keeps its own spelling and is never
+ * rewritten under the process cwd (KBT-T5243). A relative prefix, or one
+ * without a directory part, is left as is.
  */
 function canonicalGlob(glob, realpath) {
   const literal = glob.split(/[*?[{]/)[0];
