@@ -77,10 +77,16 @@ const DECISIONS = {
   totalCount: 2,
   truncated: false,
   items: [
-    { id: '3a24-dr-42', code: 'KBT-DR042', kind: 'Choice', status: 'Open', question: 'Spec A of spec B?', recipientRole: 'ProductOwner', issueCode: 'KBT-F747', epicCode: 'KBT-E144', requestedBy: 'Axon 07', deadlineAt: '2026-10-20T09:00:00Z', remainingMinutes: 180, recommendedOptionKey: 'a', options: [{ key: 'a', title: 'Spec A' }, { key: 'b', title: 'Spec B' }] },
+    // DR042 carries the inbox deep-link the API builds (KBT-F742 `inboxUrl`); DR043 does not,
+    // so the mod has to fall back on its own link (appUrl + workspace) or on plain text.
+    { id: '3a24-dr-42', code: 'KBT-DR042', kind: 'Choice', status: 'Open', question: 'Spec A of spec B?', recipientRole: 'ProductOwner', issueCode: 'KBT-F747', epicCode: 'KBT-E144', requestedBy: 'Axon 07', deadlineAt: '2026-10-20T09:00:00Z', remainingMinutes: 180, recommendedOptionKey: 'a', options: [{ key: 'a', title: 'Spec A' }, { key: 'b', title: 'Spec B' }], inboxUrl: 'https://app.kanbantic.test/workspace/kanbantic/decisions/3a24-dr-42' },
     { id: '3a24-dr-43', code: 'KBT-DR043', kind: 'Approval', status: 'Open', question: 'Akkoord met de migratie?', recipientRole: 'ProductOwner', issueCode: 'KBT-F748', epicCode: 'KBT-E144', requestedBy: 'Axon 09', deadlineAt: null, remainingMinutes: null, recommendedOptionKey: 'yes', options: [{ key: 'yes', title: 'Ja' }, { key: 'no', title: 'Nee' }] },
   ],
 }
+
+// KBT-T5228 / KBT-SEC065 §1 — the mod is a thin READ client. Every $.mcp.call it
+// makes, in any cycle, must name one of these tools; nothing else.
+const READ_TOOLS = ['get_epic_children', 'get_fleet_overview', 'list_decisions', 'get_fleet_digest', 'get_issue']
 
 type Recorder = {
   registered: Array<Record<string, unknown>>
@@ -90,6 +96,7 @@ type Recorder = {
   statuses: string[]
   toasts: string[]
   prompts: string[]
+  sessionStarts: number
   store: Map<string, unknown>
   clock: ReturnType<typeof mock.clock>
 }
@@ -98,17 +105,26 @@ function mcpText(obj: unknown) {
   return { value: { content: [{ type: 'text', text: JSON.stringify(obj) }], isError: false } }
 }
 
+type ArrangeOptions = {
+  answers?: (tool: string, args: Record<string, unknown>) => unknown
+  env?: Record<string, string>
+  store?: Map<string, unknown>
+  clock?: boolean
+  /** Refusals at the engine's side: `open` refuses $.ui.open, `every` refuses $.clock.every. */
+  refuse?: { open?: string; every?: string }
+}
+
 /**
  * Every stub the mod can reach, registered before the test's first call on $.
  * `answers` decides what each $.mcp.call resolves to; `env` stands for the
  * process environment.
  */
-function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string, string>, store = new Map<string, unknown>(), clock = false } = {}): Recorder {
-  const rec = { registered: [], opened: [], timers: [], calls: [], statuses: [], toasts: [], prompts: [], store } as Recorder
-  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string, string>, store = new Map<string, unknown>(), clock = false, refuse = {} }: ArrangeOptions = {}): Recorder {
+  const rec = { registered: [], opened: [], timers: [], calls: [], statuses: [], toasts: [], prompts: [], sessionStarts: 0, store } as Recorder
+  on('session.start', (_: any, e: any) => { rec.sessionStarts += 1; return { cwd: e.cwd } })
   on('command.register', (_: any, e: any) => { rec.registered.push(e); return { value: undefined } })
-  on('ui.open', (_: any, e: any) => { rec.opened.push(e); return { value: { isPlaced: true } } })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', (_: any, e: any) => { rec.opened.push(e); return refuse.open ? { deny: refuse.open } : { value: { isPlaced: true } } })
+  on('ui.status', (_: any, e: any) => { if (e.text) rec.statuses.push(String(e.text)); return { value: undefined } })
   on('ui.toast', (_: any, e: any) => { rec.toasts.push(e.text); return { value: undefined } })
   on('ui.log', () => ({ value: undefined }))
   on('prompt.submit', (_: any, e: any) => { rec.prompts.push(e.text); return { text: e.text } })
@@ -116,10 +132,11 @@ function arrange(on: any, { answers = defaultAnswers, env = {} as Record<string,
   on('store.set', (_: any, e: any) => { rec.store.set(e.key, e.value); return { value: undefined } })
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'kanbantic' } }))
   on('mcp.call', (_: any, e: any) => { rec.calls.push({ tool: e.tool, args: e.args }); return answers(e.tool, e.args) })
-  // Either a clock the test advances (timer test), or a stub that only records
-  // which timers the mod starts — the kit allows one `clock.every` answer.
+  // Either a clock the test advances (timer tests, the start-up time-out), or a
+  // stub that only records which timers the mod starts — the kit allows one
+  // `clock.every` answer.
   if (clock) rec.clock = mock.clock(on)
-  else on('clock.every', (_: any, e: any) => { rec.timers.push(e.ms); return { value: undefined } })
+  else on('clock.every', (_: any, e: any) => { rec.timers.push(e.ms); return refuse.every ? { deny: refuse.every } : { value: undefined } })
   mock.env(on, env)
   return rec
 }
@@ -128,8 +145,12 @@ function defaultAnswers(tool: string) {
   if (tool === 'get_epic_children') return mcpText(EPIC_CHILDREN)
   if (tool === 'get_fleet_overview') return mcpText(FLEET)
   if (tool === 'list_decisions') return mcpText(DECISIONS)
-  if (tool === 'answer_decision') return mcpText({ success: true })
   return { deny: `unexpected tool ${tool}` }
+}
+
+/** A $.mcp.call that never settles: Kanbantic hangs instead of failing. */
+function neverAnswers() {
+  return new Promise(() => {})
 }
 
 const INTERACTIVE = { cwd: '/work', surface: 'terminal', isInteractive: true } as const
@@ -298,14 +319,104 @@ test('a failed $.mcp.call is fail-open: "niet bereikbaar" in the pane, no turn s
   await ui.unmount()
 })
 
-test('an option button answers the decision through answer_decision', async ($, on) => {
+// ── KBT-T5228 — read-only: no answering from the pane, deep-links instead ───
+
+test('KBT-T5228 — "Wacht op jou" shows a deep-link to the Beslisbak per decision and no answer buttons', async ($, on) => {
   const rec = arrange(on)
   await $.session.start(INTERACTIVE)
   await $.command.run({ command: 'epic', args: 'KBT-E144' })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'decision-3a24-dr-42-b' })
-  const call = rec.calls.find((c) => c.tool === 'answer_decision')
-  expect(call?.args).toMatchObject({ decisionRequestId: '3a24-dr-42', optionKey: 'b' })
+  // DR042: the inboxUrl the API gave, verbatim.
+  expect(await ui.find({ type: 'Text', text: /app\.kanbantic\.test\/workspace\/kanbantic\/decisions\/3a24-dr-42/ })).toBeDefined()
+  // DR043: no inboxUrl and no appUrl configured → the code plus the plain-text pointer.
+  expect(await ui.find({ type: 'Text', text: /KBT-DR043/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Open de Beslisbak in Kanbantic/ })).toBeDefined()
+  // No buttons at all: the pane never answers a decision under the agent identity.
+  expect(await ui.findAll({ type: 'Button' })).toEqual([])
+  expect(rec.calls.map((c) => c.tool).filter((t) => !READ_TOOLS.includes(t))).toEqual([])
   await ui.unmount()
+})
+
+test('KBT-T5228 — without inboxUrl the link is built from appUrl + workspace: <appUrl>/workspace/<workspace>/decisions/<id>', { options: { appUrl: 'https://kanbantic.example/', workspace: 'kanbantic' } }, async ($, on) => {
+  arrange(on)
+  await $.session.start(INTERACTIVE)
+  await $.command.run({ command: 'epic', args: 'KBT-E144' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^https:\/\/kanbantic\.example\/workspace\/kanbantic\/decisions\/3a24-dr-43$/ })).toBeDefined()
+  // The API's own inboxUrl still wins over the built one.
+  expect(await ui.find({ type: 'Text', text: /app\.kanbantic\.test\/workspace\/kanbantic\/decisions\/3a24-dr-42/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Open de Beslisbak in Kanbantic/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('KBT-T5228 — a full start/command/refresh/press cycle calls only read tools', { options: { refreshSeconds: 60 } }, async ($, on) => {
+  const rec = arrange(on, { clock: true, store: new Map<string, unknown>([['epic-pane.lastEpic', 'KBT-E144']]) })
+  await $.session.start(INTERACTIVE)
+  await rec.clock.advance(0)          // the start-up refresh
+  await $.command.run({ command: 'epic', args: 'KBT-E144' })
+  await rec.clock.advance(60_000)     // one timer round
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const b of await ui.findAll({ type: 'Button' })) await ui.press({ key: String(b.key) })
+  await ui.unmount()
+
+  expect(rec.calls.length > 0).toBe(true)
+  expect(rec.calls.map((c) => c.tool).filter((t) => !READ_TOOLS.includes(t))).toEqual([])
+  expect(rec.prompts).toEqual([])
+})
+
+// ── KBT-T5230 (8) — fail-open at session start ──────────────────────────────
+
+test('KBT-T5230 (8) — a $.mcp.call that never settles does not block session.start; after the 5 s time-out the pane says "niet bereikbaar"', { timeoutMs: 8_000 }, async ($, on) => {
+  const rec = arrange(on, { answers: neverAnswers, clock: true, store: new Map<string, unknown>([['epic-pane.lastEpic', 'KBT-E144']]) })
+  await $.session.start(INTERACTIVE)
+  // The start reached the engine (next(e)) and the command is there, MCP or not.
+  expect(rec.sessionStarts).toBe(1)
+  expect(rec.registered.map((r) => r.name)).toEqual(['epic'])
+  expect(rec.opened.length).toBe(1)
+
+  await rec.clock.advance(0)          // the start-up refresh is now in flight…
+  expect(rec.calls.length).toBe(3)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /laden/ })).toBeDefined()
+  await ui.unmount()
+
+  await rec.clock.advance(5_000)      // …and gives up after the time-out, without throwing.
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /niet bereikbaar/ })).toBeDefined()
+  await ui.unmount()
+  expect(rec.prompts).toEqual([])
+})
+
+test('KBT-T5230 (8) — a refused $.ui.open and $.clock.every do not block session.start nor /epic', async ($, on) => {
+  const rec = arrange(on, { refuse: { open: 'no surface', every: 'no timers' }, store: new Map<string, unknown>([['epic-pane.lastEpic', 'KBT-E144']]) })
+  await $.session.start(INTERACTIVE)
+  expect(rec.sessionStarts).toBe(1)
+  expect(rec.registered.map((r) => r.name)).toEqual(['epic'])
+
+  const answer = await $.command.run({ command: 'epic', args: 'KBT-E144' })
+  expect(answer).toEqual({})
+  // The refresh still ran even though the pane could not be opened.
+  expect(rec.calls.map((c) => c.tool).sort()).toEqual(['get_epic_children', 'get_fleet_overview', 'list_decisions'])
+  expect(rec.prompts).toEqual([])
+})
+
+test('KBT-T5230 (8) — a failed refresh keeps the previous state and sets a status line', { options: { refreshSeconds: 60 } }, async ($, on) => {
+  let offline = false
+  const rec = arrange(on, { clock: true, answers: (tool) => (offline ? { deny: 'Kanbantic offline' } : defaultAnswers(tool)) })
+  await $.session.start(INTERACTIVE)
+  await $.command.run({ command: 'epic', args: 'KBT-E144' })
+
+  offline = true
+  await rec.clock.advance(60_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /niet bereikbaar/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /KBT-F746/ })).toBeDefined()   // the last good data stays
+  expect(await ui.find({ type: 'Text', text: /5\/13 Done/ })).toBeDefined()
+  await ui.unmount()
+  expect(rec.statuses.some((s) => /niet bereikbaar/.test(s))).toBe(true)
+  expect(rec.prompts).toEqual([])
 })

@@ -9,11 +9,12 @@
 // runs as a child process against a stub MCP backend on 127.0.0.1.
 //
 //   1. register_agent_session → arrives at the backend with `modelId` read from
-//      `model` in `$CLAUDE_CONFIG_DIR/settings.json`; the lookup order of the
-//      F743 contract is `$CLAUDE_CONFIG_DIR/settings.json` → `~/.claude/settings.json`
-//      → `<cwd>/.claude/settings.local.json` → `<cwd>/.claude/settings.json` →
-//      env `ANTHROPIC_MODEL`. Without any of them the argument is ABSENT (never
-//      an empty string).
+//      `model`; the precedence (KBT-T5230 (9), mirroring Claude Code's own
+//      settings precedence, highest first) is env `ANTHROPIC_MODEL` →
+//      `<cwd>/.claude/settings.local.json` → `<cwd>/.claude/settings.json` →
+//      `$CLAUDE_CONFIG_DIR/settings.json` → `~/.claude/settings.json`. Aliases
+//      (`opus`, `sonnet`, …) pass through unchanged. Without any of them the
+//      argument is ABSENT (never an empty string).
 //   2. get_fleet_digest / get_fleet_overview pass through the proxy with exactly
 //      the arguments the host sent (no fromSessionId or other injection).
 //   3. Both tools are in known-mcp-tools.json and in the REQUIRED_PARAMS contract
@@ -174,21 +175,21 @@ async function registerThrough(pluginDir, stub, opts) {
 
 // ── 1 + 2: modelId from settings.json; fleet tools pass through unchanged ────
 
-test('KBT-TC4214 (a) — the real proxy registers with modelId from $CLAUDE_CONFIG_DIR/settings.json and passes get_fleet_digest/get_fleet_overview through unchanged', { timeout: 60000 }, async () => {
+test('KBT-TC4214 (a) — the real proxy registers with modelId from $CLAUDE_CONFIG_DIR/settings.json (over ~/.claude) and passes get_fleet_digest/get_fleet_overview through unchanged', { timeout: 60000 }, async () => {
   const root = mkTmp('kbt-f743-proxy-e2e-');
   const home = path.join(root, 'home');
   const work = path.join(root, 'work');
   const configDir = path.join(root, 'cfg');
   for (const d of [home, work, configDir]) fs.mkdirSync(d, { recursive: true });
   writeJson(path.join(configDir, 'settings.json'), { model: 'claude-sonnet-5-5' });
-  // A project-level and an env-level model must LOSE against the config dir.
-  writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'claude-haiku-4-5' });
+  // The user-level file must LOSE against the config dir (KBT-T5230 (9) precedence).
+  writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' });
 
   const stub = await startMcpStub();
   const pluginDir = pluginDirFor(root);
   let proxy;
   try {
-    const r = await registerThrough(pluginDir, stub, { home, cwd: work, configDir, extraEnv: { ANTHROPIC_MODEL: 'claude-opus-4-1' } });
+    const r = await registerThrough(pluginDir, stub, { home, cwd: work, configDir });
     proxy = r.proxy;
     assert.equal(r.forwarded.args.modelId, 'claude-sonnet-5-5', `modelId must come from $CLAUDE_CONFIG_DIR/settings.json; got ${JSON.stringify(r.forwarded.args)}`);
     assert.equal(r.forwarded.args.workspaceId, 'ws-e2e');
@@ -236,40 +237,54 @@ test('KBT-TC4214 (a) — without any settings.json or ANTHROPIC_MODEL the proxy 
   }
 });
 
-test('KBT-TC4214 (a) — lookup order: ~/.claude/settings.json, then <cwd>/.claude/settings.local.json, then <cwd>/.claude/settings.json, then ANTHROPIC_MODEL', { timeout: 120000 }, async () => {
+test('KBT-TC4214 (a) / KBT-T5230 (9) — precedence: ANTHROPIC_MODEL, then <cwd>/.claude/settings.local.json, then <cwd>/.claude/settings.json, then $CLAUDE_CONFIG_DIR/settings.json, then ~/.claude/settings.json', { timeout: 180000 }, async () => {
   const root = mkTmp('kbt-f743-proxy-order-');
   const stub = await startMcpStub();
   const pluginDir = pluginDirFor(root);
+  // Each case sets every layer beneath the one under test; the winner is the highest.
   const cases = [
     {
-      name: 'user settings beat project + env',
-      setup: (home, work) => { writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'claude-haiku-4-5' }); },
+      name: 'ANTHROPIC_MODEL beats every settings file',
+      setup: (home, work, cfg) => { writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(work, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(cfg, 'settings.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' }); },
       env: { ANTHROPIC_MODEL: 'claude-opus-4-1' },
-      expected: 'claude-sonnet-5-5',
+      expected: 'claude-opus-4-1',
     },
     {
-      name: 'project settings.local.json beats project settings.json + env',
-      setup: (home, work) => { writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(work, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); },
-      env: { ANTHROPIC_MODEL: 'claude-opus-4-1' },
+      name: 'project settings.local.json beats project settings.json, config dir and user',
+      setup: (home, work, cfg) => { writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(work, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); writeJson(path.join(cfg, 'settings.json'), { model: 'claude-sonnet-5-5' }); writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); },
+      env: {},
       expected: 'claude-haiku-4-5',
     },
     {
-      name: 'project settings.json beats env',
-      setup: (home, work) => { writeJson(path.join(work, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); },
-      env: { ANTHROPIC_MODEL: 'claude-opus-4-1' },
+      name: 'project settings.json beats config dir and user',
+      setup: (home, work, cfg) => { writeJson(path.join(work, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); writeJson(path.join(cfg, 'settings.json'), { model: 'claude-haiku-4-5' }); writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' }); },
+      env: {},
       expected: 'claude-sonnet-5-5',
     },
     {
-      name: 'ANTHROPIC_MODEL is the last resort',
-      setup: () => {},
-      env: { ANTHROPIC_MODEL: 'claude-opus-4-1' },
-      expected: 'claude-opus-4-1',
+      name: '$CLAUDE_CONFIG_DIR/settings.json beats ~/.claude/settings.json',
+      setup: (home, work, cfg) => { writeJson(path.join(cfg, 'settings.json'), { model: 'claude-sonnet-5-5' }); writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' }); },
+      env: {},
+      expected: 'claude-sonnet-5-5',
+    },
+    {
+      name: '~/.claude/settings.json is the last resort',
+      setup: (home) => { writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-haiku-4-5' }); },
+      env: {},
+      expected: 'claude-haiku-4-5',
     },
     {
       name: 'a settings.json without a string model is skipped',
-      setup: (home) => { writeJson(path.join(home, '.claude', 'settings.json'), { model: 42 }); },
-      env: { ANTHROPIC_MODEL: 'claude-opus-4-1' },
-      expected: 'claude-opus-4-1',
+      setup: (home, work) => { writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 42 }); writeJson(path.join(home, '.claude', 'settings.json'), { model: 'claude-sonnet-5-5' }); },
+      env: {},
+      expected: 'claude-sonnet-5-5',
+    },
+    {
+      // Documented limitation: no alias resolution in the proxy; KBT-F745 fills the real id from the transcript.
+      name: 'an alias (opusplan) passes through unchanged',
+      setup: (home, work) => { writeJson(path.join(work, '.claude', 'settings.local.json'), { model: 'opusplan' }); },
+      env: {},
+      expected: 'opusplan',
     },
   ];
   try {
@@ -278,7 +293,7 @@ test('KBT-TC4214 (a) — lookup order: ~/.claude/settings.json, then <cwd>/.clau
       const work = path.join(root, `work-${i}`);
       const configDir = path.join(root, `cfg-${i}`);
       for (const d of [home, work, configDir]) fs.mkdirSync(d, { recursive: true });
-      c.setup(home, work);
+      c.setup(home, work, configDir);
       const r = await registerThrough(pluginDir, stub, { home, cwd: work, configDir, extraEnv: c.env });
       await r.proxy.shutdown();
       assert.equal(r.forwarded.args.modelId, c.expected, `${c.name}: got ${JSON.stringify(r.forwarded.args)}`);
