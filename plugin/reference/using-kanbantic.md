@@ -585,7 +585,9 @@ memory-pad (`memory-path.js`) krijgt nooit `allow`, en evenmin iets onder
 en Bash-commando's die zo'n pad noemen); `.claude/worktrees/<naam>/…` is een
 checkout en wél gewoon toegestaan, maar niet diens eigen `.claude/` of `.git`.
 Geweigerde regels meldt de SessionStart-sync als
-`permission-allow-rejected: <regel>`.
+`permission-allow-rejected: <regel>` én, per regel, aan de sessie via
+`POST /api/app/agent-session/{id}/report-allow-rule-rejected` (`{rule ≤500,
+geredigeerd; reason ≤100}`, eigen API-key, fail-open, stil zonder sessiebestand).
 
 **curl.** Een `Bash(curl …)`-regel is meer dan een prefix (PO-besluit: curl
 stuurt nooit sleutels of data naar een ander adres). De regel noemt precies één

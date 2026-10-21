@@ -790,7 +790,7 @@ test('sync: the rule text is redacted before it leaves the machine', async () =>
   const { api } = await runSync([item]);
   const calls = rejectCalls(api);
   assert.equal(calls.length, 1);
-  assert.ok(calls[0].body.rule.includes('Bearer ***'), calls[0].body.rule);
+  assert.equal(calls[0].body.rule, 'Bash(curl -H "Authorization: ***" *)');
   assert.ok(!api.some((c) => c.raw.includes('abc123SECRET')), 'secret leaked to the API');
 });
 
