@@ -115,6 +115,8 @@ test('param-drift: positive — create_version requires applicationId → exit 0
     tool('get_fleet_overview', ['workspaceId']),
     // KBT-F745 — model policy joined the contract.
     tool('get_model_policy', ['workspaceId']),
+    // KBT-F753 — accountpool joined the contract.
+    tool('get_account_pool', []),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -225,6 +227,7 @@ test('param-drift: positive — the F742 decision tools satisfy the contract →
     tool('get_fleet_digest', ['workspaceId']),
     tool('get_fleet_overview', ['workspaceId']),
     tool('get_model_policy', ['workspaceId']),
+    tool('get_account_pool', []),
   ]);
   try {
     const result = await runScript(stub.port);
@@ -289,6 +292,8 @@ const F743_CONTRACT_TOOLS = [
   tool('get_fleet_overview', ['workspaceId']),
   // KBT-F745 — get_model_policy joined the contract; every positive stub exposes it.
   tool('get_model_policy', ['workspaceId']),
+  // KBT-F753 — get_account_pool joined the contract (no required params).
+  tool('get_account_pool', []),
 ];
 
 test('param-drift: positive — the F743 fleet tools satisfy the contract → exit 0', async () => {

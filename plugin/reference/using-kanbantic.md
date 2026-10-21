@@ -753,6 +753,34 @@ staan — ook als het werkstation onder de schijfdrempel van 20 GB zit; dan
 weigert de preflight nieuwe spawns tot er ruimte is, en staat er een
 `disk-low`-waarschuwing op het bord.
 
+### Accountpool (KBT-F753)
+
+Een workspace kan meerdere Claude-abonnementsaccounts in een pool hebben die
+dynamisch aan werkstations en agents worden toegewezen. Bij een usage-limit op
+één account herstart Kanbantic de getroffen agent automatisch op een ander
+ingelogd account met ruimte; is er geen, dan staat er een beslisverzoek in de
+Beslisbak (uitkomst `DecisionRequested`). Een agent hoeft dus nooit zelf een
+account te kiezen of zichzelf te herstarten.
+
+Lees de stand met `get_account_pool` (read-only; geen verplichte parameters,
+optioneel `workspaceId` — alleen mét `workspaceId` komen `policy` en
+`recentEvents` van die workspace mee; zonder ontbreken ze). Het
+antwoord is `{ accounts, assignments, loginStatus, policy?, recentEvents }`:
+`accounts` zijn de poolaccounts met hun limietstatus, `assignments` welk
+werkstation/agent op welk account draait, `loginStatus` per account en
+werkstation of er een geldige login is, `policy` (alleen bij een
+`workspaceId`) de balanceringsregels en `recentEvents` de laatste
+balanceringsgebeurtenissen (herplaatsing, limiet bereikt, `DecisionRequested`).
+
+**Wat dit voor de lokale sessie betekent.** De daemon start elke spawn met
+`CLAUDE_CONFIG_DIR` op de configuratiemap van het toegewezen account. De
+MCP-proxy respecteert die variabele al voor `settings.json` (zie de
+volgorde onder "Het model dat je draait, meldt de proxy zelf"), dus het
+model-id en de rest van de instellingen komen uit de map van dat account. De
+sessie-administratie (transcripts, projecten, geschiedenis) blijft daarentegen
+in `~/.claude`: wissel van account verandert dus niet waar je sessies terug te
+vinden zijn, en een herstart op een ander account kan dezelfde sessie hervatten.
+
 ## Herkomst
 
 Samengesteld in **KBT-F623** (F7 van KBT-E114) uit 17 gotchas van de
