@@ -33,6 +33,12 @@
       "title": "Workspace voor het /epic-paneel",
       "description": "Workspace-slug of -GUID voor get_fleet_overview en list_decisions; leeg = KANBANTIC_WORKSPACE_ID uit de omgeving, anders 'kanbantic'.",
       "default": "kanbantic"
+    },
+    "appUrl": {
+      "type": "string",
+      "title": "Kanbantic-URL voor deep-links",
+      "description": "Basis-URL van de Kanbantic-UI (bijv. https://app.kanbantic.nl) waarmee het /epic-paneel een beslisverzoek zonder inboxUrl linkt als <appUrl>/workspace/<workspace>/decisions/<id>; leeg = KANBANTIC_APP_URL uit de omgeving, anders alleen de tekst 'Open de Beslisbak in Kanbantic'. Het paneel beantwoordt nooit zelf (KBT-T5228).",
+      "default": ""
     }
   }
 }

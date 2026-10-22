@@ -6,10 +6,20 @@
 // beslisverzoeken (list_decisions, KBT-F742). De Kanbantic-UI blijft de
 // primaire bron; dit paneel is voor de PO/operator die al in Claude Code zit.
 //
-// Afspraken (KBT-T5185):
+// Afspraken (KBT-T5185, aangescherpt in KBT-T5228 en KBT-T5230):
 //   - alles via `$.mcp` → de proxy regelt auth; geen API-sleutel in de mod;
-//   - fail-open: een mislukte `$.mcp.call` toont "niet bereikbaar" en start
-//     nooit een beurt (geen `$.prompt.submit`);
+//   - ALLEEN LEZEN (KBT-SEC065 §1, KBT-T5228): de mod roept uitsluitend
+//     get_epic_children, get_fleet_overview en list_decisions aan en muteert
+//     nooit — een beslisverzoek wordt niet vanuit het paneel beantwoord (dat
+//     zou onder de agent-identiteit gebeuren), het paneel toont per verzoek
+//     een deep-link naar de Beslisbak: de `inboxUrl` die de API meegeeft,
+//     anders `<appUrl>/workspace/<workspace>/decisions/<id>` (optie appUrl of
+//     KANBANTIC_APP_URL), anders de tekst "Open de Beslisbak in Kanbantic";
+//   - fail-open (KBT-T5230 punt 8): `session.start` wacht nooit op Kanbantic —
+//     de eerste refresh draait in een eigen dispatch (`$.clock.after(0)`), elke
+//     refresh is begrensd op REFRESH_TIMEOUT_MS en toont daarna "niet
+//     bereikbaar"; `$.clock.every`, `$.ui.open` en elke handler slikken hun
+//     eigen fouten (statusregel), er wordt nooit een beurt gestart;
 //   - alleen tekenen in terminal, Desktop-app en VS Code; op een niet-
 //     interactieve surface (`claude -p`, SDK) of een door de daemon gespawnde
 //     VM-sessie (KANBANTIC_SPAWN_COMMAND_ID) geen timers en geen paneel;
@@ -22,9 +32,10 @@
 // (state + opties als argument) in plaats van closures in `register`.
 //
 // Opties (plugin.json `userConfig`): defaultEpic, refreshSeconds (60),
-// stillAfterMinutes (10), workspace ("kanbantic").
+// stillAfterMinutes (10), workspace ("kanbantic"), appUrl ("").
 //
-// Tests: plugin/hooks/epic-pane.test.ts via `claude plugin test plugin/`.
+// Tests: plugin/hooks/epic-pane.test.ts via `claude plugin test plugin/`;
+// statische alleen-lezen-scan in plugin/tests/epic-pane-readonly.test.js (npm test).
 
 const PANE_ID = 'kanbantic-epic';
 const MCP_SERVER = 'kanbantic';
@@ -37,6 +48,10 @@ const BAR_WIDTH = 10;
 const STATUS_ORDER = ['New', 'Triaged', 'Ready', 'InProgress', 'Review', 'InDeployment', 'Done', 'Blocked', 'OnHold', 'WaitingForInput', 'Cancelled'];
 const ROLE_LABEL = { Unspecified: 'rol?', Orchestrator: 'orchestr.', Developer: 'developer', Reviewer: 'reviewer', Tester: 'tester', Designer: 'designer', Operator: 'operator' };
 const STATUS_LABEL = { Working: 'werkt', Silent: 'stil', WaitingForInput: 'wacht op mens', Blocked: 'geblokkeerd', Idle: 'idle', Done: 'klaar', Stale: 'verlopen' };
+// KBT-T5230 (8): één refresh (verbinden + de drie leestools) mag zo lang duren;
+// daarna meldt het paneel "niet bereikbaar" en blijft de vorige staat staan.
+const REFRESH_TIMEOUT_MS = 5000;
+const DECISIONS_FALLBACK_TEXT = 'Open de Beslisbak in Kanbantic';
 
 export function register(on, options) {
   const ctx = {
@@ -44,23 +59,37 @@ export function register(on, options) {
     state: {
       interactive: false,
       server: MCP_SERVER,
+      connected: false,    // $.mcp.connect geslaagd (gebeurt lui, in de eerste refresh)
       epic: null,          // 'KBT-E144'
       data: null,          // { children, fleet, decisions } — laatste geslaagde refresh
       error: null,         // tekst bij een mislukte refresh
       refreshedAt: null,
       summary: null,       // uit $.store, tot de eerste refresh
       workspaceLabel: '',
+      appUrl: '',          // basis voor de deep-link naar de Beslisbak (optie of KANBANTIC_APP_URL)
     },
   };
 
-  // Sessiestart: alleen op een interactieve, tekenbare surface.
+  // Sessiestart: alleen op een interactieve, tekenbare surface. Fail-open
+  // (KBT-T5230 punt 8): hier wordt nergens op Kanbantic gewacht en een fout in
+  // de opzet houdt de start niet tegen — `next(e)` volgt altijd.
   on('session.start', async ($, e, next) => {
-    await startSession($, e, ctx);
+    try {
+      await startSession($, e, ctx);
+    } catch (err) {
+      safeStatus($, `epic-paneel: ${clip(messageOf(err), 100)}`);
+    }
     return next(e);
   });
 
   // /epic [KBT-E###]
-  on('command.run', { command: 'epic' }, async ($, e) => runEpicCommand($, e, ctx));
+  on('command.run', { command: 'epic' }, async ($, e) => {
+    try {
+      return await runEpicCommand($, e, ctx);
+    } catch (err) {
+      return { text: `epic-paneel: ${clip(messageOf(err), 120)}` };
+    }
+  });
 
   // Het paneel.
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => renderPane($, e, ctx));
@@ -81,20 +110,20 @@ async function startSession($, e, ctx) {
   state.interactive = await isDrawable($, e);
   if (!state.interactive) return;
 
-  try {
-    const c = await $.mcp.connect(MCP_SERVER);
-    if (c && c.isConnected && c.server) state.server = c.server;
-  } catch {
-    // Geen verbinding bij de start: elke $.mcp.call meldt dat straks als "niet bereikbaar".
-  }
-
+  // Alleen lokale bronnen (store, opties): geen $.mcp.connect en geen $.mcp.call
+  // vóór next(e) — die horen bij de eerste refresh, in een eigen dispatch.
   state.epic = parseEpicCode(await storeGet($, STORE_LAST_EPIC)) || parseEpicCode(cfg.defaultEpic);
   const summary = await storeGet($, STORE_SUMMARY);
   state.summary = summary && typeof summary === 'object' && summary.code === state.epic ? summary : null;
 
-  $.clock.every(cfg.refreshSeconds * 1000, () => { refresh($, ctx).catch(() => {}); });
+  try {
+    $.clock.every(cfg.refreshSeconds * 1000, () => { refresh($, ctx).catch(() => {}); });
+  } catch (err) {
+    // Geen timers op deze surface: /epic blijft werken, alleen zonder automatische verversing.
+    safeStatus($, `epic-paneel: geen verversing (${clip(messageOf(err), 80)})`);
+  }
 
-  // Het commando als laatste: een geweigerde naam mag de rest niet overslaan.
+  // Het commando: een geweigerde naam mag de rest niet overslaan.
   try {
     await $.command.register({ name: 'epic', description: 'Toon epic-voortgang, vloot en beslisbak', argumentHint: '[KBT-E###]', immediate: true });
   } catch {
@@ -104,7 +133,14 @@ async function startSession($, e, ctx) {
   if (state.epic) {
     // Ongevraagd geopend: de engine plaatst het paneel pas vanaf 144 kolommen (110 na een eerdere /epic).
     await openPane($, state.epic);
-    await refresh($, ctx);
+    // De eerste refresh buiten deze dispatch, zodat een trage of hangende
+    // Kanbantic de sessiestart nooit ophoudt; tot die tijd toont het paneel
+    // "laden…" of de samenvatting uit de store.
+    try {
+      $.clock.after(0, () => { refresh($, ctx).catch(() => {}); });
+    } catch (err) {
+      safeStatus($, `epic-paneel: ${clip(messageOf(err), 100)}`);
+    }
   }
 }
 
@@ -134,7 +170,7 @@ async function runEpicCommand($, e, ctx) {
 
 async function renderPane($, e, ctx) {
   const { state, cfg } = ctx;
-  const { Box, Text, Button } = $.ui.resolve(e);
+  const { Box, Text } = $.ui.resolve(e);
   const width = Math.max(40, Number(e.props && e.props.bodyColumns) || 80);
   const lines = [];
 
@@ -176,18 +212,11 @@ async function renderPane($, e, ctx) {
   lines.push(Text({ weight: 'semibold', children: [`Wacht op jou (${view.decisions.length})`] }));
   if (view.decisions.length === 0) lines.push(Text({ dimColor: true, children: ['— niets —'] }));
   for (const d of view.decisions) {
-    lines.push(Text({ color: 'yellow', children: [clip(`${d.code} · ${d.question} · ${d.role}${d.issueCode ? ' · ' + d.issueCode : ''}${d.remaining}`, width)] }));
-    const buttons = d.options.map((o) => Button({
-      key: `decision-${d.id}-${o.key}`,
-      label: o.key === d.recommendedOptionKey ? `${o.title} ✓` : o.title,
-      onPress: () => answerDecision($, ctx, d, o),
-    }));
-    buttons.push(Button({
-      key: `decision-${d.id}-open`,
-      label: 'Open',
-      onPress: () => showDecision($, ctx, d),
-    }));
-    lines.push(Box({ flexDirection: 'row', columnGap: 1, children: buttons }));
+    lines.push(Text({ color: 'yellow', children: [clip(`${d.code} · ${d.question} · ${d.role}${d.issueCode ? ' · ' + d.issueCode : ''}${d.remaining}${d.optionsLabel}`, width)] }));
+    // KBT-T5228: geen knoppen — beantwoorden gebeurt in de Beslisbak onder de
+    // eigen identiteit van de PO. Een link wordt niet afgekapt (een halve link is niets waard).
+    const link = decisionLink(d, state);
+    lines.push(Text({ dimColor: true, children: [link || `${d.code}: ${DECISIONS_FALLBACK_TEXT}`] }));
   }
 
   // Vloot
@@ -204,22 +233,29 @@ async function renderPane($, e, ctx) {
 
 // ── acties ─────────────────────────────────────────────────────────────────
 
+/** Opent het paneel; een geweigerde open (geen surface, te smal) houdt niets tegen. */
 async function openPane($, code) {
-  await $.ui.open({ id: PANE_ID, title: code, closeOnEscape: true });
+  try {
+    await $.ui.open({ id: PANE_ID, title: code, closeOnEscape: true });
+  } catch (err) {
+    safeStatus($, `${shortEpic(code)}: paneel niet geopend (${clip(messageOf(err), 80)})`);
+  }
 }
 
+/**
+ * Eén verversing: verbinden (lui, eenmalig) + de drie leestools, samen begrensd
+ * op REFRESH_TIMEOUT_MS. Een fout of time-out laat de vorige staat staan, zet
+ * `state.error` en een statusregel, en gooit nooit (KBT-T5230 punt 8).
+ */
 async function refresh($, ctx) {
   const { state, cfg } = ctx;
   const code = state.epic;
   if (!code) return;
-  const workspaceId = cfg.workspace || (await envWorkspaceId($)) || 'kanbantic';
-  state.workspaceLabel = workspaceId;
   try {
-    const [children, fleet, decisions] = await Promise.all([
-      callTool($, ctx, 'get_epic_children', { epicId: code, maxResults: 100 }),
-      callTool($, ctx, 'get_fleet_overview', { workspaceId, maxResults: 100 }),
-      callTool($, ctx, 'list_decisions', { workspaceId, status: 'Open', maxResults: 50 }),
-    ]);
+    const workspaceId = cfg.workspace || (await envWorkspaceId($)) || 'kanbantic';
+    state.workspaceLabel = workspaceId;
+    state.appUrl = cfg.appUrl || (await envAppUrl($)) || '';
+    const [children, fleet, decisions] = await withTimeout($, fetchAll($, ctx, code, workspaceId), REFRESH_TIMEOUT_MS);
     if (state.epic !== code) return; // intussen van epic gewisseld
     state.data = { children, fleet, decisions };
     state.error = null;
@@ -227,12 +263,58 @@ async function refresh($, ctx) {
     const s = currentSummary(ctx);
     state.summary = s;
     await storeSet($, STORE_SUMMARY, s);
-    $.ui.status(statusLine(s, derive(state.data, cfg)));
+    safeStatus($, statusLine(s, derive(state.data, cfg)));
   } catch (err) {
-    state.error = clip(messageOf(err), 160);
-    $.ui.status(`${shortEpic(code)}: Kanbantic niet bereikbaar`);
+    if (state.epic === code) state.error = clip(messageOf(err), 160);
+    safeStatus($, `${shortEpic(code)}: Kanbantic niet bereikbaar`);
   }
-  $.ui.invalidate('ui.render');
+  try {
+    $.ui.invalidate('ui.render');
+  } catch {
+    // Niets om te hertekenen (geen surface): de volgende render leest de staat toch.
+  }
+}
+
+async function fetchAll($, ctx, code, workspaceId) {
+  await ensureConnected($, ctx);
+  return Promise.all([
+    callTool($, ctx, 'get_epic_children', { epicId: code, maxResults: 100 }),
+    callTool($, ctx, 'get_fleet_overview', { workspaceId, maxResults: 100 }),
+    callTool($, ctx, 'list_decisions', { workspaceId, status: 'Open', maxResults: 50 }),
+  ]);
+}
+
+/** $.mcp.connect, eenmalig en lui: een mislukking is geen fout — de eerste $.mcp.call meldt dat dan. */
+async function ensureConnected($, ctx) {
+  const { state } = ctx;
+  if (state.connected) return;
+  try {
+    const c = await $.mcp.connect(MCP_SERVER);
+    if (c && c.isConnected) {
+      state.connected = true;
+      if (c.server) state.server = c.server;
+    }
+  } catch {
+    // Zie boven.
+  }
+}
+
+/**
+ * Begrenst `work` op `ms` via `$.clock.after`; de timer wordt geannuleerd zodra
+ * `work` klaar is. Zonder klok (de dispatch geweigerd) loopt de timer nooit af
+ * en geldt alleen de eigen afloop van `work`.
+ */
+function withTimeout($, work, ms) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    try {
+      timer = $.clock.after(ms, () => reject(new Error(`geen antwoord binnen ${Math.round(ms / 1000)} s`)));
+    } catch {
+      timer = null;
+    }
+  });
+  const settle = () => { if (timer && typeof timer.cancel === 'function') try { timer.cancel(); } catch { /* al afgelopen */ } };
+  return Promise.race([work, timeout]).finally(settle);
 }
 
 async function callTool($, ctx, tool, args) {
@@ -240,19 +322,26 @@ async function callTool($, ctx, tool, args) {
   return parseToolResult(tool, result);
 }
 
-async function answerDecision($, ctx, decision, option) {
-  try {
-    await callTool($, ctx, 'answer_decision', { decisionRequestId: decision.id, optionKey: option.key });
-    $.ui.toast(`${decision.code} beantwoord: ${option.title}`);
-  } catch (err) {
-    $.ui.toast(`Antwoord op ${decision.code} mislukt: ${clip(messageOf(err), 120)}`, { timeoutMs: 8000 });
-  }
-  await refresh($, ctx);
+/**
+ * De deep-link naar het beslisverzoek in de Beslisbak (KBT-T5228): de `inboxUrl`
+ * van de API (altijd op basis van de workspace-slug) wint; anders bouwt de mod
+ * `<appUrl>/workspace/<workspace>/decisions/<id>` — dezelfde Angular-route als
+ * de Telegram-/e-mailmeldingen van KBT-F742. Geen van beide → null (de aanroeper
+ * toont dan de tekst "Open de Beslisbak in Kanbantic").
+ */
+function decisionLink(decision, state) {
+  if (decision.inboxUrl) return decision.inboxUrl;
+  const base = String(state.appUrl || '').trim().replace(/\/+$/, '');
+  if (!base || !state.workspaceLabel || !decision.id) return null;
+  return `${base}/workspace/${encodeURIComponent(state.workspaceLabel)}/decisions/${encodeURIComponent(decision.id)}`;
 }
 
-function showDecision($, ctx, decision) {
-  const where = ctx.state.workspaceLabel ? ` Beslisbak van workspace ${ctx.state.workspaceLabel}.` : '';
-  $.ui.toast(`${decision.code}: ${decision.question} — gevraagd door ${decision.requestedBy}, rol ${decision.role}.${where}`, { timeoutMs: 8000 });
+function safeStatus($, text) {
+  try {
+    $.ui.status(text);
+  } catch {
+    // De statusregel is bijzaak; nooit een reden om een handler te laten falen.
+  }
 }
 
 async function isDrawable($, e) {
@@ -297,6 +386,16 @@ async function envSpawnCommandId($) {
   }
 }
 
+// Basis-URL van de Kanbantic-UI voor de deep-link naar de Beslisbak (KBT-T5228),
+// als de API geen `inboxUrl` meegeeft en de optie appUrl leeg is.
+async function envAppUrl($) {
+  try {
+    return nonEmpty(await $.env.get('KANBANTIC_APP_URL'));
+  } catch {
+    return undefined;
+  }
+}
+
 function nonEmpty(v) {
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
@@ -324,6 +423,7 @@ function readOptions(options) {
     refreshSeconds: num(o.refreshSeconds, 60, 10),
     stillAfterMinutes: num(o.stillAfterMinutes, 10, 1),
     workspace: typeof o.workspace === 'string' ? o.workspace.trim() : '',
+    appUrl: typeof o.appUrl === 'string' ? o.appUrl.trim() : '',
   };
 }
 
@@ -411,9 +511,10 @@ function derive(data, cfg) {
     role: roleShort(d.recipientRole),
     issueCode: d.issueCode || '',
     requestedBy: String(d.requestedBy || '?'),
-    recommendedOptionKey: d.recommendedOptionKey || null,
     remaining: d.remainingMinutes != null && Number.isFinite(Number(d.remainingMinutes)) ? ` · nog ${d.remainingMinutes} min` : '',
-    options: (Array.isArray(d.options) ? d.options : []).map((o) => ({ key: String(o.key), title: String(o.title || o.key) })),
+    // Alleen ter informatie (de aanbevolen optie met ✓); kiezen gebeurt in de Beslisbak.
+    optionsLabel: optionsLabel(d),
+    inboxUrl: typeof d.inboxUrl === 'string' && d.inboxUrl.trim() ? d.inboxUrl.trim() : null,
   }));
 
   const first = issues.find((i) => i.parentTitle || i.epicTitle);
@@ -438,6 +539,13 @@ function listOf(obj, keys) {
 function roleShort(role) {
   if (role === 'ProductOwner') return 'PO';
   return String(role || '?');
+}
+
+/** " · opties: Spec A ✓ / Spec B" — de aanbevolen optie gemarkeerd, niets om te drukken. */
+function optionsLabel(d) {
+  const options = (Array.isArray(d.options) ? d.options : [])
+    .map((o) => `${String(o.title || o.key)}${d.recommendedOptionKey && o.key === d.recommendedOptionKey ? ' ✓' : ''}`);
+  return options.length ? ` · opties: ${options.join(' / ')}` : '';
 }
 
 function bar(done, total) {

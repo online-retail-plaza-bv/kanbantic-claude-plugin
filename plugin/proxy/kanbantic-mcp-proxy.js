@@ -536,18 +536,30 @@ function attachClaudeCliSessionIdToRegisterCall(msg) {
 //
 // The Vloot page shows per agent which model it runs on. The proxy is the one
 // place that can read it at registration time without the model's cooperation:
-// `model` in Claude Code's settings files, in the order the F743 contract fixes:
+// `model` in Claude Code's settings files and environment. The review of F743
+// (KBT-T5230 point 9) caught the original order running user → project, the
+// reverse of what Claude Code itself applies, so the Vloot could show a model
+// the session does not run, labelled "bron: settings". Decided precedence,
+// highest first, mirroring Claude Code's own settings precedence (command line
+// / env > local project > project > user; the spec KBT-SR646 follows):
 //
-//   1. $CLAUDE_CONFIG_DIR/settings.json   (per-account config dir, KBT-F753)
-//   2. ~/.claude/settings.json            (user)
-//   3. <cwd>/.claude/settings.local.json  (project, personal)
-//   4. <cwd>/.claude/settings.json        (project, shared)
-//   5. env ANTHROPIC_MODEL
+//   1. env ANTHROPIC_MODEL                (what `claude --model` / the shell set)
+//   2. <cwd>/.claude/settings.local.json  (project, personal)
+//   3. <cwd>/.claude/settings.json        (project, shared)
+//   4. $CLAUDE_CONFIG_DIR/settings.json   (per-account config dir, KBT-F753)
+//   5. ~/.claude/settings.json            (user)
 //
-// The first file whose `model` is a non-empty string wins. Nothing found → the
+// The first source whose `model` is a non-empty string wins. Nothing found → the
 // argument is OMITTED (never an empty string): the server then records
 // ModelSource Unknown and KBT-F745 may later fill it from the transcript.
 // A `modelId` the caller already set is never clobbered.
+//
+// Aliases (`opus`, `sonnet`, `haiku`, `opusplan`, …) are deliberately NOT
+// resolved here: the wire contract stays `modelId` only (no `modelSource` on
+// the wire), the alias goes through as-is, and the F745 transcript watch — which
+// sees the real model id in the session's own messages — corrects it later.
+// Tests: plugin/tests/proxy-model-precedence.test.js (per layer + aliases) and
+// plugin/tests/fleet-proxy-e2e.test.js (the real proxy as a child process).
 // ---------------------------------------------------------------------------
 const MODEL_ID_ARGUMENT = 'modelId';
 
@@ -562,17 +574,21 @@ function readModelFromSettingsFile(file) {
 }
 
 function readConfiguredModelId() {
-  const candidates = [];
+  // 1. env — highest, exactly as Claude Code lets the command line/shell win.
+  const fromEnv = process.env.ANTHROPIC_MODEL;
+  if (typeof fromEnv === 'string' && fromEnv.trim()) return fromEnv.trim();
+  // 2..5. settings files, most specific first.
+  const candidates = [
+    path.join(process.cwd(), '.claude', 'settings.local.json'),
+    path.join(process.cwd(), '.claude', 'settings.json'),
+  ];
   if (process.env.CLAUDE_CONFIG_DIR) candidates.push(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'));
   candidates.push(path.join(os.homedir(), '.claude', 'settings.json'));
-  candidates.push(path.join(process.cwd(), '.claude', 'settings.local.json'));
-  candidates.push(path.join(process.cwd(), '.claude', 'settings.json'));
   for (const file of candidates) {
-    const model = readModelFromSettingsFile(file);
+    const model = readModelFromSettingsFile(file); // an alias comes back verbatim
     if (model) return model;
   }
-  const fromEnv = process.env.ANTHROPIC_MODEL;
-  return fromEnv && fromEnv.trim() ? fromEnv.trim() : undefined;
+  return undefined;
 }
 
 function attachModelIdToRegisterCall(msg) {
