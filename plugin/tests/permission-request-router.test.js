@@ -1789,7 +1789,8 @@ test('proposeAllowRule: derives the exact rule in the allow-list syntax', () => 
   const { proposeAllowRule } = router();
   assert.equal(typeof proposeAllowRule, 'function', 'router must export proposeAllowRule');
   for (const [name, tool, rule] of PROPOSE_CASES) {
-    assert.equal(proposeAllowRule({ hook_event_name: 'PermissionRequest', session_id: 's1', ...tool }), rule, name);
+    // KBT-T5248: the same cell on the tree THIS host has (TR is the identity on Windows).
+    assert.equal(proposeAllowRule({ hook_event_name: 'PermissionRequest', session_id: 's1', ...TR_PAYLOAD(tool) }), TR(rule), name);
   }
 });
 
@@ -1797,8 +1798,9 @@ test('proposeAllowRule: every proposed rule allows exactly the payload it was de
   const { proposeAllowRule } = router();
   const { decide } = parser();
   for (const [name, tool] of PROPOSE_CASES) {
-    const payload = { hook_event_name: 'PermissionRequest', session_id: 's1', ...tool };
+    const payload = { hook_event_name: 'PermissionRequest', session_id: 's1', ...TR_PAYLOAD(tool) };
     const rule = proposeAllowRule(payload);
+    assert.ok(rule, `${name}: a rule must be proposed on this host`);
     assert.deepEqual(decide([rule], payload), { allow: true, rule }, name);
   }
 });
@@ -1806,7 +1808,8 @@ test('proposeAllowRule: every proposed rule allows exactly the payload it was de
 test('proposeAllowRule: no rule for compound, forbidden, wildcard, protected-path, secret-carrying or unsupported calls', () => {
   const { proposeAllowRule } = router();
   for (const [name, tool] of NO_PROPOSE_CASES) {
-    assert.equal(proposeAllowRule({ hook_event_name: 'PermissionRequest', session_id: 's1', ...tool }), null, name);
+    assert.equal(proposeAllowRule({ hook_event_name: 'PermissionRequest', session_id: 's1', ...TR_PAYLOAD(tool) }), null, name);
+    assert.equal(proposeAllowRule({ hook_event_name: 'PermissionRequest', session_id: 's1', ...tool }), null, `${name} (verbatim spelling)`);
   }
 });
 
@@ -1829,8 +1832,8 @@ test('decision: a valid rule → proposedAllowRule in the request and the rule l
     assert.equal(r.stdout.trim(), '', 'never a decision on stdout');
     const dr = r.calls.find((c) => c.url === DECISION_ROUTE);
     assert.ok(dr, `decision-request expected, got ${urls(r)}`);
-    assert.equal(dr.body.proposedAllowRule, rule);
-    assert.deepEqual(dr.body.options, [ALLOW_ONCE, allowAlways(rule), DENY]);
+    assert.equal(dr.body.proposedAllowRule, TR(rule)); // route() hands the router TR_PAYLOAD(tool)
+    assert.deepEqual(dr.body.options, [ALLOW_ONCE, allowAlways(TR(rule)), DENY]);
     assert.equal(dr.body.recommendedOptionKey, 'allow-once');
     assert.equal(dr.body.question, `Permissie voor ${tool.tool_name}?`);
   }
