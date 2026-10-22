@@ -138,7 +138,7 @@ Draait deze sequencer-run naast een andere agent die aan een gerelateerd issue w
 
 1. Ontdek de andere sessie via `list_agents(workspaceId, onlyActive: true)`.
 2. Post de vraag in HAAR channel, gecorreleerd met de issue-code (`send_message(channelId: <target.channelId>, content: "[KBT-Fxxx] ...")`); verwacht het antwoord in je eigen channel.
-3. **Maximaal 3 heen-en-weer-rondes** zonder mens; daarna verplicht escaleren (`send_message` + `wait_for_user` naar een mens, of het issue op `Blocked` zetten) — nooit zelf verder onderhandelen.
+3. **Maximaal 3 heen-en-weer-rondes** zonder mens; daarna verplicht escaleren — nooit zelf verder onderhandelen. Is de escalatie een **keuze met opties** (welke van twee specs wint, wel/niet doorgaan), dan is dat een beslisverzoek: `request_decision(workspaceId, question, optionsJson, recipientRole, recommendedOptionKey, rationale, issueId)` + `wait_for_user(sessionId, prompt: "Beslisverzoek <code>")` (KBT-F742, KBT-RL275; het antwoord komt als `DecisionAnswer`-bericht in je eigen kanaal en zet de sessie weer op `Working`). Een vrije vraag zonder opties gaat zoals voorheen via `send_message` + `wait_for_user` naar een mens; of zet het issue op `Blocked`.
 
 Dit is **optioneel** en vervangt de bestaande status-/Comment-gebaseerde coördinatie niet — het is een extra kanaal voor een hand-off die anders op een polling-interval van "opnieuw `get_issue`" zou wachten. Volledig protocol (identiteitsverificatie, geen-push-fallback, etiquette): Toolkit **Rule KBT-TRUL041**, geladen in Step 2 via `bootstrap_agent`/`get_context` en expliciet doorzoekbaar via `list_toolkit_items(category: "Rule", search: "chat-protocol")`.
 

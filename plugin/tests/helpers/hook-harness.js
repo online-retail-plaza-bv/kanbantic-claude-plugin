@@ -35,9 +35,14 @@ function rmTmp(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-/** Local API stub. `respond(call)` may return { status, body }. */
+/**
+ * Local API stub. `respond(call)` may return { status, body }, or { hang: true }
+ * to never answer (KBT-F742: the router's 5 s time-out on the decision-create).
+ * Hung sockets are destroyed when the stub closes.
+ */
 function startApiStub(respond) {
   const calls = [];
+  const sockets = new Set();
   const server = http.createServer((req, res) => {
     let raw = '';
     req.setEncoding('utf8');
@@ -48,10 +53,12 @@ function startApiStub(respond) {
       const call = { method: req.method, url: req.url, headers: req.headers, body, raw };
       calls.push(call);
       const out = (respond && respond(call)) || { status: 200, body: {} };
+      if (out.hang) return; // never answered — the client has to time out
       res.writeHead(out.status || 200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(out.body === undefined ? {} : out.body));
     });
   });
+  server.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -59,7 +66,7 @@ function startApiStub(respond) {
         calls,
         port,
         url: `http://127.0.0.1:${port}`,
-        close: () => new Promise((r) => server.close(() => r())),
+        close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
       });
     });
   });

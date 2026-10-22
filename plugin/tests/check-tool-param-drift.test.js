@@ -107,6 +107,9 @@ test('param-drift: positive — create_version requires applicationId → exit 0
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
     tool('report_tool_activity', ['sessionId', 'toolUseId']),
+    // KBT-F742 — the contract grew; a positive stub must expose every contract tool.
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -131,6 +134,8 @@ test('param-drift: negative — create_version drops applicationId → exit 1', 
     // applicationId intentionally removed from required
     tool('create_version', ['workspaceId', 'name']),
     tool('report_tool_activity', ['sessionId', 'toolUseId']),
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -172,6 +177,8 @@ test('param-drift: negative — report_tool_activity drops toolUseId (KBT-F741) 
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
     tool('report_tool_activity', ['sessionId']),
+    tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+    tool('answer_decision', ['decisionRequestId', 'optionKey']),
   ]);
   try {
     const result = await runScript(stub.port);
@@ -189,6 +196,72 @@ test('param-drift: negative — report_tool_activity missing entirely (KBT-F741)
     const result = await runScript(stub.port);
     assert.strictEqual(result.code, 1);
     assert.match(result.stderr, /report_tool_activity/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+// ── KBT-F742 / KBT-SR643 §Registry — decision tools in the required-parameter contract ──
+//
+//   request_decision → ["workspaceId","question","optionsJson","recipientRole"]
+//   answer_decision  → ["decisionRequestId","optionKey"]
+
+const F742_CONTRACT_TOOLS = [
+  tool('create_version', ['workspaceId', 'applicationId', 'name']),
+  tool('report_tool_activity', ['sessionId', 'toolUseId']),
+  tool('request_decision', ['workspaceId', 'question', 'optionsJson', 'recipientRole']),
+  tool('answer_decision', ['decisionRequestId', 'optionKey']),
+];
+
+test('param-drift: positive — the F742 decision tools satisfy the contract → exit 0', async () => {
+  const stub = await startStub(F742_CONTRACT_TOOLS);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 0, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stdout, /request_decision/, 'the report names request_decision as a checked tool');
+    assert.match(result.stdout, /answer_decision/, 'the report names answer_decision as a checked tool');
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — request_decision drops optionsJson (KBT-F742) → exit 1', async () => {
+  const stub = await startStub([
+    ...F742_CONTRACT_TOOLS.filter((t) => t.name !== 'request_decision'),
+    tool('request_decision', ['workspaceId', 'question', 'recipientRole']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /request_decision/);
+    assert.match(result.stderr, /optionsJson/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — answer_decision drops optionKey (KBT-F742) → exit 1', async () => {
+  const stub = await startStub([
+    ...F742_CONTRACT_TOOLS.filter((t) => t.name !== 'answer_decision'),
+    tool('answer_decision', ['decisionRequestId']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /answer_decision/);
+    assert.match(result.stderr, /optionKey/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — request_decision missing entirely (KBT-F742) → exit 1', async () => {
+  const stub = await startStub(F742_CONTRACT_TOOLS.filter((t) => t.name !== 'request_decision'));
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /request_decision/);
+    assert.match(result.stderr, /not exposed by the live registry/);
   } finally {
     stub.server.close();
   }
