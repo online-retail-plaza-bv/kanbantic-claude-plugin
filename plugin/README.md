@@ -207,6 +207,24 @@ Hij past dat bestand **niet** zelf aan. Het zijn jouw instellingen; een hook die
 
 Let op: een handgeschreven hook die de items via de **REST-API** ophaalde, leverde `category` en `model` als integers aan. Dat is precies hoe elke subagent op het verkeerde model terechtkwam (**KBT-B531**). De meegeleverde hook gebruikt de MCP-endpoint, die de enum-namen al als string levert — daarmee bestaat de mappingstap niet meer, en dus ook niet de plek om hem te vergeten.
 
+## Schijfruimte: waarschuwing bij sessiestart en `/kanbantic-disk-cleanup` (KBT-F754)
+
+Een dev-werkstation loopt vol met build-afval dat niemand ziet: agent-worktrees onder `.claude/worktrees/` die geen enkele run opruimt, een temp-map vol installers, npm-/NuGet-/pip-caches, Playwright-browserbuilds per revisie, een Docker-datadisk die wel groeit en nooit krimpt. Een volle schijf meldt zich niet netjes — hij meldt zich als een `restore` die halverwege klapt of een worktree-checkout met halve bestanden. De plugin levert daarom twee dingen:
+
+**1. Een `SessionStart`-hook** (`hooks/session-start-disk-space.js`) die bij elke sessiestart de vrije ruimte van het volume van de sessie meet en **één regel** zegt als die onder de drempel zit — standaard 20 GB, met "kritiek"-bewoording onder 12 GB. Erboven zwijgt hij; een hook die elke sessie "alles in orde" meldt, leert iedereen zijn uitvoer te negeren. Hij blokkeert nooit een sessie: elk foutpad eindigt in exit 0 zonder uitvoer.
+
+| Variabele | Effect |
+|---|---|
+| `KANBANTIC_DISK_WARN_GB` | waarschuwen onder dit aantal GB (standaard 20); `0` schakelt de hook uit |
+| `KANBANTIC_DISK_CRITICAL_GB` | "kritiek" onder dit aantal GB (standaard 12) |
+| `KANBANTIC_SKIP_DISK_CHECK=1` | hook volledig overslaan |
+
+**2. De skill `kanbantic-disk-cleanup`** (`/kanbantic-disk-cleanup [--dry-run] [--full] [--repos <root,root>] [--siblings]`), met als enige regel: **meten, dan pas verwijderen**. Het meetscript `scripts/disk-space.js` inventariseert de posten — per agent-worktree of hij schoon, volledig gepusht en ongelockt is; wat er in de temp-map ouder is dan twee dagen; hoe groot elke package-cache is — en verwijdert zelf niets. De skill verwijdert daarna per post, legt vóór het verwijderen van worktrees een refs-backup in `.git/` vast, meet opnieuw en rapporteert de **gemeten** winst.
+
+Wat de skill **nooit** doet, hoe vol de schijf ook is: Docker-containers, -volumes of -images aanraken (alleen de build cache, en alleen bij een lege `docker ps -a`); een worktree met niet-gecommit of niet-gepusht werk verwijderen; `node_modules`/`bin`/`obj`/`dist` van actieve repo's weggooien; `git branch -D`; zelf eleveren. Het deel dat verhoogde rechten vereist (datadisk compacteren, component store, update-cache) schrijft hij met `--full` als script voor een mens en draait hij niet.
+
+De plugin is generiek (KBT-B499). Wat per workspace verschilt — drempels, repo-roots, beschermde paden, een eigen maintenance-subagent, de bron van het elevated script — staat in het optionele Toolkit-item `disk-cleanup-policy` (categorie Custom, markdown-tabel `Setting | Value`), geparseerd door `scripts/disk-cleanup-policy.js`. Bestaat in de repo een mirror `.claude/agents/maintenance-agent.md` (of noemt de policy een `delegate-to`), dan delegeert de skill het hele opruimen aan die subagent — workspace-kennis wint van generieke kennis.
+
 ## `filePath` — lokale bestandssubstitutie voor grote content (KBT-F464)
 
 De proxy draait lokaal met filesystem-toegang. Voor tools met een grote `content`-parameter (bijv. `add_wireframe_version` met een 154KB HTML-wireframe) hoeft Claude de inhoud niet langer in zijn context te laden: geef in plaats van `content` een **`filePath`** mee en de proxy resolvet het bestand vóór doorsturen.
