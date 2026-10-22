@@ -292,19 +292,33 @@ function slashPath(p) {
 }
 
 const isAbsolutePath = (p) => /^(?:[a-z]:)?\//i.test(p);
+const isPathRoot = (p) => /^(?:[a-z]:)?\/$/i.test(p);
+/** `C:`, `C:foo`, `C:..` — relative to the drive's own cwd, never a path of ours (KBT-T5246). */
+const isDriveRelative = (p) => /^[a-z]:(?!\/)/i.test(p);
 
-/** Absolute, `..`-collapsed, forward-slash path; null when it escapes the root. */
+/**
+ * Absolute, `..`-collapsed, forward-slash path; null when it escapes the root,
+ * when the cwd is not absolute, or when the spelling is drive-relative. A
+ * drive-relative form (`C:foo`, `C:..\\..\\x`, `C:`) is refused BEFORE any
+ * joining or `..` collapsing — otherwise `C:GitHub/../../x` would shed its
+ * `C:GitHub` segment and come out as a clean absolute path (KBT-T5246). A
+ * drive-letter path is Windows-absolute on every platform (KBT-T5248).
+ */
 function resolveInputPath(raw, cwd) {
   if (typeof raw !== 'string' || !raw.trim()) return null;
   let p = slashPath(raw);
+  if (isDriveRelative(p)) return null;
   if (!isAbsolutePath(p)) {
     if (typeof cwd !== 'string' || !cwd) return null;
-    p = `${slashPath(cwd).replace(/\/$/, '')}/${p}`;
+    const base = slashPath(cwd);
+    if (!isAbsolutePath(base) || isDriveRelative(base)) return null;
+    p = `${base.replace(/\/$/, '')}/${p}`;
   }
   const drive = /^[a-z]:/i.test(p) ? p.slice(0, 2) : '';
   const rest = path.posix.normalize(p.slice(drive.length));
   if (/(^|\/)\.\.(\/|$)/.test(rest)) return null;
-  return drive + rest;
+  const out = drive + rest;
+  return isAbsolutePath(out) ? out : null; // never drive-relative after collapsing either
 }
 
 /** True when the literal part before the first wildcard is a filesystem root. */
@@ -383,9 +397,15 @@ function validateRule(raw, { caseInsensitive = WIN, realpath = defaultRealpath }
     if (isRootGlob(glob)) return reject('path glob on the filesystem root');
     if (isDriveRelative(glob)) return reject('drive-relative path glob (X:name) — spell the root as X:/');
     if (glob.startsWith('//')) return reject('UNC, \\\\?\\ and \\\\.\\ paths are never an allow-tree');
+    // Defence in depth (KBT-T5246): decide() already vetoes such paths, but a rule
+    // that names .git/, .claude/ or .mcp.json — raw or once canonicalised (8.3
+    // name, junction) — is refused at load time too, for every path tool
+    // (Read included: the decide-time veto applies to Read as well).
+    if (isProtectedPath(globLiteral(glob))) return reject(PROTECTED_RULE_REASON);
     let canonical;
     try { canonical = canonicalGlob(glob, realpath); } catch (_) { canonical = null; }
-    if (canonical === null) return reject('path glob prefix cannot be canonicalised (short name, stream, missing drive or realpath error)');
+    if (canonical === null) return reject('path glob prefix cannot be canonicalised (short name, stream, missing drive, non-Windows host or realpath error)');
+    if (isProtectedPath(globLiteral(canonical))) return reject(PROTECTED_RULE_REASON);
     return { ok: true, rule, parsed: { kind: 'path', tool, glob: canonical, rawGlob: glob, re: globToRegExp(canonical, caseInsensitive) } };
   }
 
@@ -518,15 +538,23 @@ const PROTECTED_IN_TEXT = new RegExp(
 //      the root canonicalises to `X:/<tail>`;
 //   4. a segment that still looks like a short name (`~<digit>`) could not be
 //      expanded and is null.
-// On a POSIX host a drive-letter path is not an OS path: steps 1, 2 and 4 only.
+// A drive-letter path (`X:…`) is Windows-absolute on EVERY platform: never
+// resolved against the cwd, win32 root `X:/`, drive-relative spellings
+// (`X:foo`, `X:..`) refused before any `..` collapsing (KBT-T5246). On a
+// non-Windows host no drive exists, so step 3 cannot consult the filesystem:
+// defaultRealpath answers ENOENT for a drive path, the walk ends at the root
+// and the path is null — fail-closed, never a POSIX fallback (KBT-T5248).
 // The protected-path veto runs on the RAW spelling (a `.git` that does not
 // exist yet) AND on the canonical one; the rule glob is matched against the
 // canonical path. null always means: no decision, the human decides.
 
-const defaultRealpath = (p) => fs.realpathSync.native(p);
+const defaultRealpath = (p) => {
+  // On a non-Windows host there is no drive `X:` — fs would open `<cwd>/X:/…` instead. ENOENT
+  // lets the walk run up to the root `X:/`, which then "does not exist" → null (KBT-T5248).
+  if (!WIN && /^[a-z]:/i.test(p)) throw Object.assign(new Error(`no drive ${p.slice(0, 2)} on a ${process.platform} host`), { code: 'ENOENT' });
+  return fs.realpathSync.native(p);
+};
 const isDrivePath = (p) => /^[a-z]:\//i.test(p);
-const isPathRoot = (p) => /^(?:[a-z]:)?\/$/i.test(p);
-const isDriveRelative = (p) => /^[a-z]:(?!\/)/i.test(p); // `C:` or `C:name` — the drive's cwd, never a path of our own
 /** The parent directory, with the drive root kept as `X:/` (path.posix.dirname('X:/a') is the drive-relative `X:`). */
 const parentDir = (p) => {
   const d = path.posix.dirname(p);
@@ -551,33 +579,33 @@ function pathSpellingProblem(p) {
  */
 function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
   if (typeof raw !== 'string' || slashPath(raw).startsWith('//')) return null; // UNC, \\?\, \\.\ — before normalize folds the `//`
-  const resolved = resolveInputPath(raw, cwd);
+  const resolved = resolveInputPath(raw, cwd); // null for a drive-relative spelling, before any `..` collapsing
   if (resolved === null) return null;
   const p = isPathRoot(resolved) ? resolved : resolved.replace(/\/$/, ''); // `C:/` stays the root, never `C:`
   if (isDriveRelative(p) || pathSpellingProblem(p)) return null;
-  let canonical = p;
-  if (WIN || !isDrivePath(p)) {
-    let head = p;
-    const tail = [];
-    for (;;) {
-      let real;
-      if (isDriveRelative(head)) return null; // never hand realpath a bare `X:` (it answers the process cwd)
-      try {
-        real = realpath(head);
-      } catch (err) {
-        if (!err || (err.code !== 'ENOENT' && err.code !== 'ENOTDIR')) return null; // EPERM, ENAMETOOLONG, ELOOP, …
-        if (isPathRoot(head)) return null; // not even the root exists (unmounted drive)
-        tail.unshift(path.posix.basename(head));
-        head = parentDir(head); // `X:/name` → `X:/`, not `X:`
-        continue;
-      }
-      const base = resolveInputPath(String(real), '');
-      if (base === null || pathSpellingProblem(base)) return null;
-      canonical = tail.length ? [base.replace(/\/$/, ''), ...tail].join('/') : base;
-      break;
+  // The walk runs on every platform; on a non-Windows host defaultRealpath
+  // answers ENOENT for a drive path, so it ends at the root and yields null.
+  let head = p;
+  const tail = [];
+  let canonical;
+  for (;;) {
+    if (isDriveRelative(head)) return null; // never hand realpath a bare `X:` (it answers the process cwd)
+    let real;
+    try {
+      real = realpath(head);
+    } catch (err) {
+      if (!err || (err.code !== 'ENOENT' && err.code !== 'ENOTDIR')) return null; // EPERM, ENAMETOOLONG, ELOOP, …
+      if (isPathRoot(head)) return null; // not even the root exists (unmounted drive, or a drive letter on a non-Windows host)
+      tail.unshift(path.posix.basename(head));
+      head = parentDir(head); // `X:/name` → `X:/`, not `X:`
+      continue;
     }
+    const base = resolveInputPath(String(real), '');
+    if (base === null || pathSpellingProblem(base)) return null;
+    canonical = tail.length ? [base.replace(/\/$/, ''), ...tail].join('/') : base;
+    break;
   }
-  if (canonical.split('/').some((s) => SHORT_NAME.test(s))) return null; // an 8.3 name that did not expand
+  if (canonical.split('/').some((seg) => SHORT_NAME.test(seg))) return null; // an 8.3 name that did not expand
   return canonical;
 }
 
@@ -591,8 +619,12 @@ function canonicalizePath(raw, cwd, realpath = defaultRealpath) {
  * rewritten under the process cwd (KBT-T5243). A relative prefix, or one
  * without a directory part, is left as is.
  */
+/** The literal part of a glob, before its first wildcard. */
+const globLiteral = (glob) => glob.split(/[*?[{]/)[0];
+const PROTECTED_RULE_REASON = 'path glob is or lies under .claude/, .git/ or .mcp.json — never an allow-tree';
+
 function canonicalGlob(glob, realpath) {
-  const literal = glob.split(/[*?[{]/)[0];
+  const literal = globLiteral(glob);
   const cut = literal.lastIndexOf('/');
   if (cut < 1) return glob;
   const dir = literal.slice(0, cut);
@@ -605,7 +637,7 @@ function canonicalGlob(glob, realpath) {
 
 const PROTECTED_REASON = '.claude/, .git/ and .mcp.json are never auto-allowed';
 const MEMORY_REASON = 'local memory path is never auto-allowed';
-const CANON_REASON = 'path cannot be canonicalised safely (8.3 name, NTFS stream, UNC/\\\\?\\ prefix, trailing dot/space, missing drive or realpath error)';
+const CANON_REASON = 'path cannot be canonicalised safely (8.3 name, NTFS stream, UNC/\\\\?\\ prefix, trailing dot/space, drive-relative spelling, missing drive, non-Windows host or realpath error)';
 
 /** Reason one path field may never be allowed, or null. */
 function vetoPath(raw, cwd, realpath) {
@@ -631,7 +663,7 @@ const URL_WORD = /^[a-z][a-z0-9+.-]*:\/\//i;
 const OPTION_VALUE = /^--?[\w-]+=(.+)$/;
 const STREAM_IN_WORD = /::|:\$/;
 
-/** Words of a command that could name a file: with a separator, a short-name marker (`~<digit>`) or a stream marker. */
+/** Words of a command that could name a file: with a separator, a drive letter (`X:…`), a short-name marker (`~<digit>`) or a stream marker. */
 function bashPathWords(cmd) {
   const out = [];
   for (let w of shellWords(cmd) || cmd.trim().split(/\s+/)) {
@@ -639,7 +671,7 @@ function bashPathWords(cmd) {
     if (m) w = m[1];
     if (!w || URL_WORD.test(w)) continue;
     const sep = /[\\/]/.test(w);
-    if (sep || SHORT_NAME.test(w) || STREAM_IN_WORD.test(w)) out.push({ word: w, sep });
+    if (sep || /^[a-z]:/i.test(w) || SHORT_NAME.test(w) || STREAM_IN_WORD.test(w)) out.push({ word: w, sep });
   }
   return out;
 }
@@ -648,6 +680,7 @@ function bashPathWords(cmd) {
 function vetoBashWord({ word, sep }, cwd, realpath) {
   const s = slashPath(word);
   if (s.startsWith('//') || STREAM_IN_WORD.test(s)) return CANON_REASON;
+  if (isDriveRelative(s)) return CANON_REASON; // `C:foo`, `C:..\\..\\x`, `C:` — relative to the drive's cwd, refused before any collapsing
   if (isDrivePath(s) ? pathSpellingProblem(s) : sep && s.split('/').some(DOT_SPACE_SEGMENT)) return CANON_REASON;
   if (isProtectedPath(s)) return PROTECTED_REASON;
   if (!isDrivePath(s) && s.includes(':')) return null; // host:path, HEAD:refs/… — not a local path
