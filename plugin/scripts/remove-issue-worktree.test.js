@@ -246,3 +246,146 @@ test('missing selector or non-git cwd is reported as a reason, not as a crash', 
   assert.equal(r.json && r.json.removed, false, r.stdout);
   assert.equal(r.json.reason, 'not-a-git-repo');
 });
+
+// ── 5. KBT-T5233 (Axon 09 finding I10): never destroy uncommitted work ────────
+//
+// `git worktree remove --force` used to run unconditionally, so uncommitted
+// changes, untracked files and ignored files such as `.env` were wiped. The
+// script now (a) refuses with `dirty` when `git status --porcelain --ignored`
+// reports anything (reproducible build output such as node_modules excepted),
+// (b) refuses with `in-use` when the worktree is locked or a live process holds
+// a directory inside it, and (c) runs a PLAIN `git worktree remove`. The
+// operator-only `--force` flag restores the old behaviour; the review-skill
+// never passes it.
+
+function assertRefused(r, reason, wt, repo) {
+  assert.equal(r.code, 0, `fail-open: exit 0 even when refusing; stderr: ${r.stderr}`);
+  assert.ok(r.json, r.stdout);
+  assert.equal(r.json.removed, false, r.stdout);
+  assert.equal(r.json.reason, reason, r.stdout);
+  assert.equal(norm(r.json.path), norm(wt));
+  assert.equal(fs.existsSync(path.join(wt, 'README.md')), true, 'nothing removed');
+  assert.ok(worktreePaths(repo).includes(norm(wt)), 'worktree still registered');
+}
+
+test('dirty: a modified tracked file refuses with reason dirty and lists the path', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/D1', 'D1');
+  fs.writeFileSync(path.join(wt, 'README.md'), 'uncommitted work\n');
+
+  const r = runScript(['--branch', 'feature/D1'], repo);
+
+  assertRefused(r, 'dirty', wt, repo);
+  assert.ok(Array.isArray(r.json.paths), 'paths array in JSON');
+  assert.ok(r.json.paths.some((p) => /README\.md$/.test(p)), JSON.stringify(r.json.paths));
+  assert.equal(fs.readFileSync(path.join(wt, 'README.md'), 'utf8'), 'uncommitted work\n', 'work survives');
+  assert.match(r.stderr, /dirty/i);
+});
+
+test('dirty: an untracked file refuses with reason dirty', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/D2', 'D2');
+  fs.writeFileSync(path.join(wt, 'notes.txt'), 'scratch\n');
+
+  const r = runScript(['--branch', 'feature/D2'], repo);
+
+  assertRefused(r, 'dirty', wt, repo);
+  assert.ok(r.json.paths.some((p) => /notes\.txt$/.test(p)), JSON.stringify(r.json.paths));
+  assert.equal(fs.existsSync(path.join(wt, 'notes.txt')), true, 'untracked file survives');
+});
+
+test('dirty: an IGNORED .env refuses with reason dirty (ignored files are work too)', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/D3', 'D3');
+  fs.writeFileSync(path.join(wt, '.gitignore'), '.env\nnode_modules/\n');
+  git(['add', '.gitignore'], wt);
+  git(['commit', '-q', '-m', 'ignore'], wt);
+  fs.writeFileSync(path.join(wt, '.env'), 'SECRET=1\n');
+  assert.equal(git(['status', '--porcelain'], wt).trim(), '', 'precondition: plain status is clean');
+
+  const r = runScript(['--branch', 'feature/D3'], repo);
+
+  assertRefused(r, 'dirty', wt, repo);
+  assert.ok(r.json.paths.some((p) => /\.env$/.test(p)), JSON.stringify(r.json.paths));
+  assert.equal(fs.readFileSync(path.join(wt, '.env'), 'utf8'), 'SECRET=1\n', '.env survives');
+});
+
+test('dirty: paths are capped at 10 with the full count alongside', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/D4', 'D4');
+  for (let i = 0; i < 12; i++) fs.writeFileSync(path.join(wt, `u${String(i).padStart(2, '0')}.txt`), 'x\n');
+
+  const r = runScript(['--branch', 'feature/D4'], repo);
+
+  assertRefused(r, 'dirty', wt, repo);
+  assert.equal(r.json.paths.length, 10);
+  assert.equal(r.json.pathCount, 12);
+});
+
+test('ignored reproducible build output (node_modules) alone does not count as dirty', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/D5', 'D5');
+  fs.writeFileSync(path.join(wt, '.gitignore'), 'node_modules/\n');
+  git(['add', '.gitignore'], wt);
+  git(['commit', '-q', '-m', 'ignore'], wt);
+  fs.mkdirSync(path.join(wt, 'node_modules', 'left-pad'), { recursive: true });
+  fs.writeFileSync(path.join(wt, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+
+  const r = runScript(['--branch', 'feature/D5'], repo);
+
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json && r.json.removed, true, r.stdout);
+  assert.equal(fs.existsSync(wt), false, 'worktree gone');
+});
+
+test('in-use: a locked worktree is refused with reason in-use', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/L1', 'L1');
+  git(['worktree', 'lock', '--reason', 'agent still running', wt], repo);
+
+  const r = runScript(['--branch', 'feature/L1'], repo);
+
+  assertRefused(r, 'in-use', wt, repo);
+  assert.match(r.stderr, /lock/i);
+});
+
+test('in-use: a live process whose cwd is inside the worktree is refused (Windows)', async (t) => {
+  if (!IS_WIN) {
+    t.skip('cwd-handle rename probe is Windows-only');
+    return;
+  }
+  const { spawn } = require('node:child_process');
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/L2', 'L2');
+  const sub = path.join(wt, 'src');
+  fs.mkdirSync(sub);
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { cwd: sub, stdio: 'ignore' });
+  t.after(() => { try { child.kill(); } catch { /* already gone */ } });
+  await new Promise((res) => setTimeout(res, 400)); // let the child settle on its cwd
+
+  const r = runScript(['--branch', 'feature/L2'], repo);
+
+  assertRefused(r, 'in-use', wt, repo);
+  assert.equal(fs.existsSync(wt), true, 'worktree directory still at its original name after the probe');
+  assert.match(r.stderr, /in-use|process/i);
+
+  child.kill();
+  await new Promise((res) => setTimeout(res, 400));
+  const again = runScript(['--branch', 'feature/L2'], repo);
+  assert.equal(again.json && again.json.removed, true, `removed once the process is gone: ${again.stdout}`);
+});
+
+test('--force (operator-only) removes a dirty worktree the old way', (t) => {
+  const { repo } = makeRepo(t);
+  const wt = addWorktree(repo, 'feature/F1', 'F1');
+  fs.writeFileSync(path.join(wt, 'README.md'), 'uncommitted work\n');
+  fs.writeFileSync(path.join(wt, 'notes.txt'), 'scratch\n');
+
+  const r = runScript(['--branch', 'feature/F1', '--force'], repo);
+
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json && r.json.removed, true, r.stdout);
+  assert.equal(r.json.forced, true, 'JSON flags that --force was used');
+  assert.equal(fs.existsSync(wt), false, 'worktree gone');
+  assert.ok(!worktreePaths(repo).includes(norm(wt)));
+});
