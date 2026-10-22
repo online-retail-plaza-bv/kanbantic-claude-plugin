@@ -56,9 +56,29 @@ const read = (file_path) => ({ tool_name: 'Read', tool_input: { file_path } });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path } });
 const edit = (file_path) => ({ tool_name: 'Edit', tool_input: { file_path } });
 
+// KBT-T5248 — the platform tree. A drive-letter path or rule is Windows-absolute on
+// EVERY platform (win32 semantics, root X:/, drive-relative refused); on a non-Windows
+// host no drive exists, so with the real filesystem it is fail-closed (no decision /
+// rule refused) rather than resolved against the POSIX cwd. The positive controls
+// therefore live under `/GitHub` there: TR drops a leading `C:` of a drive-ABSOLUTE
+// spelling (also inside `Tool(C:/…)` and ```allow blocks) and leaves drive-relative
+// `C:foo`, other drives (`Z:`) and everything else verbatim. On Windows TR is the identity,
+// so every reviewer vector runs letter for letter; on Linux the same cell states the same
+// requirement (inside / outside the tree, refused spelling) on the tree that host has.
+const TR = (x) => (WIN || typeof x !== 'string' ? x : x.replace(/(^|\(|\n)[cC]:(?=[\\/])/g, '$1'));
+const TR_INPUT = (input) => {
+  const o = { ...input };
+  for (const k of ['file_path', 'filePath', 'path', 'pattern', 'notebook_path']) if (typeof o[k] === 'string') o[k] = TR(o[k]);
+  return o;
+};
+const TR_PAYLOAD = (p) => ({ ...p, tool_input: TR_INPUT(p.tool_input || {}), ...(typeof p.cwd === 'string' ? { cwd: TR(p.cwd) } : {}) });
+/** Payload with its own cwd INSIDE / OUTSIDE the allowed tree (KBT-T5246: the escape must not depend on it). */
+const IN_TREE = (p) => ({ ...p, cwd: 'C:/GitHub/Kanbantic' });
+const OUT_TREE = (p) => ({ ...p, cwd: 'C:/Windows' });
+
 // KBT-T5243 — this checkout (the router child inherits it as process cwd) and a
 // top-level directory on the same drive that does not exist (and is never created).
-const HERE = fs.realpathSync.native(process.cwd()).replace(/\\/g, '/');
+const HERE = TR(fs.realpathSync.native(process.cwd()).replace(/\\/g, '/'));
 const NEW_TOP = `${/^[a-z]:/i.test(HERE) ? HERE.slice(0, 2) : ''}/kbt-f741-new-top-${process.pid}`;
 assert.ok(!fs.existsSync(NEW_TOP), `${NEW_TOP} must not exist`);
 
@@ -78,13 +98,13 @@ async function route(rules, tool, { extraEnv = {}, stubResponder, payloadExtra =
     writeSessionFile(dir);
     const allowFile = path.join(dir, 'allow.json');
     if (rules !== null) {
-      fs.writeFileSync(allowFile, JSON.stringify({ allowList: rules, allowListFetchedAt: new Date().toISOString() }));
+      fs.writeFileSync(allowFile, JSON.stringify({ allowList: rules.map(TR), allowListFetchedAt: new Date().toISOString() }));
     }
     const env = hookEnv(dir, stub, { KANBANTIC_ALLOWLIST_FILE: allowFile, ...extraEnv });
     const r = await runScript(script, {
       env,
       cwd, // the ROUTER PROCESS cwd (what a drive-relative `C:` would resolve to) — not the payload cwd
-      stdin: { hook_event_name: 'PermissionRequest', session_id: 's1', cwd: dir, ...tool, ...payloadExtra },
+      stdin: { hook_event_name: 'PermissionRequest', session_id: 's1', cwd: dir, ...TR_PAYLOAD(tool), ...payloadExtra },
     });
     return { ...r, calls: stub.calls, dir };
   } finally {
@@ -136,6 +156,12 @@ const ALLOW_CASES = [
   // KBT-T5243 — a not-yet-existing directory INSIDE the allowed tree still allows (the walk ends at an existing ancestor inside the tree).
   ['Write C:/GitHub/Kanbantic/brand-new-dir/new.cs (non-existing dir inside the tree)', ['Write(C:/GitHub/**)'], write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), 'Write(C:/GitHub/**)'],
   ['Write into a rule tree whose top dir does not exist yet, matched on its own prefix', [`Write(${NEW_TOP}/**)`], write(`${NEW_TOP}/payload.txt`), `Write(${NEW_TOP}/**)`],
+  // KBT-T5246 — narrow rules that do NOT name a protected directory stay valid.
+  ['Write under the narrow rule Write(C:/GitHub/Kanbantic/src/**)', ['Write(C:/GitHub/Kanbantic/src/**)'], write('C:/GitHub/Kanbantic/src/a.ts'), 'Write(C:/GitHub/Kanbantic/src/**)'],
+  ['Write under a rule on .github (not .git)', ['Write(C:/GitHub/Kanbantic/.github/**)'], write('C:/GitHub/Kanbantic/.github/workflows/ci.yml'), 'Write(C:/GitHub/Kanbantic/.github/**)'],
+  ['Write under a rule on a .claude/worktrees/<name> checkout root', ['Write(C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/**)'], write('C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/src/a.ts'), 'Write(C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/**)'],
+  ['Write .gitignore under a rule that names the file', ['Write(C:/GitHub/Kanbantic/.gitignore)'], write('C:/GitHub/Kanbantic/.gitignore'), 'Write(C:/GitHub/Kanbantic/.gitignore)'],
+  ['Write with a payload cwd inside the tree and a plain relative path', ['Write(C:/GitHub/**)'], IN_TREE(write('src/new/x.ts')), 'Write(C:/GitHub/**)'],
   // KBT-T5239 / KBT-T5241 — positive controls for the new forbidden git forms.
   ['git checkout -b of a new branch', ['Bash(git checkout*)'], bash('git checkout -b feature/y'), 'Bash(git checkout*)'],
   ['git checkout -- of one named file (not the whole tree)', ['Bash(git checkout*)'], bash('git checkout -- src/file.ts'), 'Bash(git checkout*)'],
@@ -166,7 +192,7 @@ for (const [name, rules, tool, rule] of ALLOW_CASES) {
     // Every allow is recorded as tool-activity with the rule that granted it.
     const act = r.calls.find((c) => c.url.endsWith('/tool-activity'));
     assert.ok(act, `tool-activity expected, got ${urls(r)}`);
-    assert.equal(act.body.permissionDecision, `allow-list: ${rule}`);
+    assert.equal(act.body.permissionDecision, `allow-list: ${TR(rule)}`);
     assert.equal(act.body.toolName, tool.tool_name);
     assert.ok(act.body.toolUseId, 'toolUseId must be set (fallback when the payload has none)');
     assert.ok(!r.calls.some((c) => c.url.endsWith('/wait-for-user')), 'an allow must not mark the session as waiting');
@@ -408,6 +434,55 @@ const NEGATIVE_CASES = [
   [`Write ${NEW_TOP}/payload.txt (top dir of THIS checkout's drive, rule on the checkout)`, [`Write(${HERE}/**)`], write(`${NEW_TOP}/payload.txt`), null],
   [`Write ${NEW_TOP}/a/b.ps1 (two missing levels, rule on the checkout)`, [`Write(${HERE}/**)`], write(`${NEW_TOP}/a/b.ps1`), null],
   ['Glob with pattern C:/*.txt and no path (literal part is the drive root)', ['Glob(C:/GitHub/**)'], { tool_name: 'Glob', tool_input: { pattern: 'C:/*.txt' } }, null],
+
+  // ── KBT-T5246: drive-relative spellings (`X:` not followed by a separator) are refused BEFORE
+  // any `..` collapsing — otherwise `C:GitHub/../../x` sheds its `C:GitHub` segment and comes
+  // out as a clean absolute path. Reviewer's vectors verbatim (payload cwd C:/GitHub/Kanbantic):
+  ['Write C:../../Users/admin123/.bashrc (drive-relative, climbs out)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:../../Users/admin123/.bashrc')), null],
+  ['Write C:..\\..\\Windows\\x.txt (drive-relative, backslashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:..\\..\\Windows\\x.txt')), null],
+  ['Write C:src/../../../Windows/x (drive-relative, no leading ..)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:src/../../../Windows/x')), null],
+  ['Write c:/GitHub/../Windows/x (absolute, .. out of the tree)', ['Write(C:/GitHub/**)'], IN_TREE(write('c:/GitHub/../Windows/x')), null],
+  ['Write C:/GitHub/Kanbantic/../../Windows/x (absolute, .. out of the tree)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:/GitHub/Kanbantic/../../Windows/x')), null],
+  ['Write C:new-rel.txt (drive-relative, plain)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:new-rel.txt')), null],
+  // more spellings, cwd inside the tree
+  ['Write C:GitHub/../../x (drive-relative, forward slashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:GitHub/../../x')), null],
+  ['Write C:GitHub\\..\\..\\Windows\\new.txt (drive-relative, backslashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:GitHub\\..\\..\\Windows\\new.txt')), null],
+  ['Write C:../../../Windows/x.txt (leading .., forward slashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:../../../Windows/x.txt')), null],
+  ['Write C:..\\..\\..\\Windows\\x.txt (leading .., backslashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:..\\..\\..\\Windows\\x.txt')), null],
+  ['Write C:..\\..\\GitHub\\Kanbantic\\.git\\hooks\\pre-commit (drive-relative into .git)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:..\\..\\GitHub\\Kanbantic\\.git\\hooks\\pre-commit')), null],
+  ['Write C:../../GitHub/Kanbantic/.git/x (drive-relative into .git, forward slashes)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:../../GitHub/Kanbantic/.git/x')), null],
+  ['Write C:src/a.ts (drive-relative, inside the tree in OS terms — still refused)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:src/a.ts')), null],
+  ['Write C:.. (drive-relative parent)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:..')), null],
+  ['Write C: (bare drive, cwd inside the tree)', ['Write(C:/GitHub/**)'], IN_TREE(write('C:')), null],
+  ['Edit filePath C:GitHub/../../x (other field spelling)', ['Edit(C:/GitHub/**)'], IN_TREE({ tool_name: 'Edit', tool_input: { filePath: 'C:GitHub/../../x' } }), null],
+  ['Glob with a drive-relative path', ['Glob(C:/GitHub/**)'], IN_TREE({ tool_name: 'Glob', tool_input: { path: 'C:GitHub/../../Kanbantic', pattern: 'src/**' } }), null],
+  ['Glob with a drive-relative pattern', ['Glob(C:/GitHub/**)'], IN_TREE({ tool_name: 'Glob', tool_input: { path: 'C:/GitHub/Kanbantic', pattern: 'C:src/**' } }), null],
+  ['Grep with a drive-relative path (backslashes)', ['Grep(C:/GitHub/**)'], IN_TREE({ tool_name: 'Grep', tool_input: { path: 'C:GitHub\\..\\..\\Kanbantic', pattern: 'token' } }), null],
+  // the same with the payload cwd OUTSIDE the tree (the OS form would land inside it)
+  ['Write C:Windows/../../GitHub/Kanbantic/src/a.ts (drive-relative, cwd C:/Windows)', ['Write(C:/GitHub/**)'], OUT_TREE(write('C:Windows/../../GitHub/Kanbantic/src/a.ts')), null],
+  ['Write C:..\\..\\GitHub\\Kanbantic\\src\\a.ts (drive-relative, cwd C:/Windows)', ['Write(C:/GitHub/**)'], OUT_TREE(write('C:..\\..\\GitHub\\Kanbantic\\src\\a.ts')), null],
+  ['Write C:../GitHub/Kanbantic/src/a.ts (drive-relative, cwd C:/Windows)', ['Write(C:/GitHub/**)'], OUT_TREE(write('C:../GitHub/Kanbantic/src/a.ts')), null],
+  ['Write C:../../Users/admin123/.bashrc (drive-relative, cwd C:/Windows)', ['Write(C:/GitHub/**)'], OUT_TREE(write('C:../../Users/admin123/.bashrc')), null],
+  // Bash path words
+  ['Bash cp a C:GitHub/../../x (drive-relative word)', ['Bash(cp *)'], IN_TREE(bash('cp a C:GitHub/../../x')), null],
+  ['Bash cp a C:GitHub\\..\\..\\Windows\\new.txt (drive-relative word, backslashes)', ['Bash(cp *)'], IN_TREE(bash('cp a C:GitHub\\..\\..\\Windows\\new.txt')), null],
+  ['Bash cp a C:..\\..\\Windows\\x.txt', ['Bash(cp *)'], IN_TREE(bash('cp a C:..\\..\\Windows\\x.txt')), null],
+  ['Bash cat C:../../Users/admin123/.bashrc', ['Bash(cat *)'], IN_TREE(bash('cat C:../../Users/admin123/.bashrc')), null],
+  ['Bash cat C:foo (bare drive-relative word)', ['Bash(cat *)'], IN_TREE(bash('cat C:foo')), null],
+  ['Bash cat C:.. (bare drive-relative word)', ['Bash(cat *)'], IN_TREE(bash('cat C:..')), null],
+  ['Bash dir C: (bare drive)', ['Bash(dir *)'], IN_TREE(bash('dir C:')), null],
+  ['Bash git diff --output=C:..\\..\\x (drive-relative option value)', ['Bash(git *)'], IN_TREE(bash('git diff --output=C:..\\..\\x')), null],
+  ['Bash cp a C:Windows/../../GitHub/Kanbantic/src/b (drive-relative word, cwd C:/Windows)', ['Bash(cp *)'], OUT_TREE(bash('cp a C:Windows/../../GitHub/Kanbantic/src/b')), null],
+
+  // ── KBT-T5246: a rule whose prefix is or lies under a protected directory is refused at load time ──
+  ['rule Write(C:/GitHub/Kanbantic/.git/**)', ['Write(C:/GitHub/Kanbantic/.git/**)'], write('C:/GitHub/Kanbantic/.git/hooks/pre-commit'), null],
+  ['rule Write(C:/GitHub/Kanbantic/.git/hooks/**) (under a protected dir)', ['Write(C:/GitHub/Kanbantic/.git/hooks/**)'], write('C:/GitHub/Kanbantic/.git/hooks/pre-commit'), null],
+  ['rule Edit(C:/GitHub/Kanbantic/.git/hooks/*)', ['Edit(C:/GitHub/Kanbantic/.git/hooks/*)'], edit('C:/GitHub/Kanbantic/.git/hooks/pre-commit'), null],
+  ['rule Write(C:/GitHub/Kanbantic/GIT~1/**) (8.3 spelling of .git)', ['Write(C:/GitHub/Kanbantic/GIT~1/**)'], write('C:/GitHub/Kanbantic/GIT~1/hooks/pre-commit'), null],
+  ['rule Write(C:/GitHub/Kanbantic/.claude/settings.local.json)', ['Write(C:/GitHub/Kanbantic/.claude/settings.local.json)'], write('C:/GitHub/Kanbantic/.claude/settings.local.json'), null],
+  ['rule Write(C:/GitHub/Kanbantic/.mcp.json)', ['Write(C:/GitHub/Kanbantic/.mcp.json)'], write('C:/GitHub/Kanbantic/.mcp.json'), null],
+  ['rule Read(C:/GitHub/Kanbantic/.git/**) (Read follows the same policy as the decide-time veto)', ['Read(C:/GitHub/Kanbantic/.git/**)'], read('C:/GitHub/Kanbantic/.git/config'), null],
+  ['rule Glob(C:/GitHub/Kanbantic/.git/**)', ['Glob(C:/GitHub/Kanbantic/.git/**)'], { tool_name: 'Glob', tool_input: { path: 'C:/GitHub/Kanbantic/.git', pattern: '**/*' } }, null],
 
   // ── KBT-T5239: data-loss git forms ──────────────────────────────────────────
   ['git checkout .', ['Bash(git checkout*)'], bash('git checkout .'), null],
@@ -723,14 +798,14 @@ test('parseAllowBlock: only the fenced ```allow block counts; prose and other fe
     '# a comment',
     '',
     'Bash(git *)',
-    '  Read(C:/GitHub/**)  ',
+    TR('  Read(C:/GitHub/**)  '),
     'mcp__kanbantic__*',
     '```',
     '',
     'trailing prose: Bash(*)',
   ].join('\n');
   const { rules, rejected } = parseAllowBlock(md);
-  assert.deepEqual(rules, ['Bash(git *)', 'Read(C:/GitHub/**)', 'mcp__kanbantic__*']);
+  assert.deepEqual(rules, ['Bash(git *)', TR('Read(C:/GitHub/**)'), 'mcp__kanbantic__*']);
   assert.deepEqual(rejected, []);
 });
 
@@ -788,7 +863,7 @@ test('validateRule: the forbidden list from SEC063 §2', () => {
     'Bash(curl -s https://staging.kanbantic.com*)', 'Bash(curl -sS https://staging.kanbantic.com*)',
     'Bash(curl -s https://staging.kanbantic.com/api/app/version)', 'Bash(curl -s -H "Accept: application/json" https://staging.kanbantic.com*)',
   ]) {
-    assert.equal(validateRule(good).ok, true, `${good} must be accepted`);
+    assert.equal(validateRule(TR(good)).ok, true, `${good} must be accepted`);
   }
 });
 
@@ -868,14 +943,14 @@ const probeName = (p) => `${p.tool_name} ${JSON.stringify(p.tool_input)}`;
 for (const payload of PROBE_DENY) {
   test(`probe (reviewer, no allow): ${probeName(payload)}`, () => {
     const { decide } = parser();
-    const v = decide(PROBE_RULES, { ...payload, cwd: PROBE_CWD }, { caseInsensitive: true });
+    const v = decide(PROBE_RULES.map(TR), { ...TR_PAYLOAD(payload), cwd: TR(PROBE_CWD) }, { caseInsensitive: true });
     assert.equal(v.allow, false, `must not allow: ${v.rule || ''}`);
   });
 }
 for (const payload of PROBE_ALLOW) {
   test(`probe (reviewer, allow): ${probeName(payload)}`, () => {
     const { decide } = parser();
-    const v = decide(PROBE_RULES, { ...payload, cwd: PROBE_CWD }, { caseInsensitive: true });
+    const v = decide(PROBE_RULES.map(TR), { ...TR_PAYLOAD(payload), cwd: TR(PROBE_CWD) }, { caseInsensitive: true });
     assert.equal(v.allow, true, v.reason);
   });
 }
@@ -989,23 +1064,39 @@ test('no decision: KBT-T5243 vectors with the router cwd OUTSIDE the allowed tre
   }
 });
 
-test('canonicalizePath/canonicalGlob: a bare drive is never handed to realpath; the drive root is the top of the walk (injected realpath that answers the cwd for C:)', () => {
-  const { canonicalizePath, decide, validateRule } = parser();
-  const CWD = 'C:/GitHub/Kanbantic';
-  const calls = [];
-  // A fake Windows volume: C:/ , C:/GitHub, C:/GitHub/Kanbantic and C:/Windows exist; Z: is not mounted.
-  // The TRAP: realpath('C:') (drive-relative) answers the process cwd, like fs.realpathSync.native does.
-  const trap = (p) => {
+/**
+ * A fake Windows volume: C:/, C:/GitHub, C:/GitHub/Kanbantic, C:/GitHub/Kanbantic/src and
+ * C:/Windows exist; Z: is not mounted. The TRAP: realpath('C:') (drive-relative) answers
+ * the process cwd, like fs.realpathSync.native does. Records every call in `calls`.
+ */
+function cVolume(calls = [], cwd = 'C:/GitHub/Kanbantic') {
+  return (p) => {
     calls.push(p);
-    if (/^[a-z]:$/i.test(p)) return CWD.replace(/\//g, '\\');
-    const vol = { 'C:/': 'C:\\', 'C:/GitHub': 'C:\\GitHub', 'C:/GitHub/Kanbantic': 'C:\\GitHub\\Kanbantic', 'C:/Windows': 'C:\\Windows' };
+    if (/^[a-z]:$/i.test(p)) return cwd.replace(/\//g, '\\');
+    const vol = { 'C:/': 'C:\\', 'C:/GitHub': 'C:\\GitHub', 'C:/GitHub/Kanbantic': 'C:\\GitHub\\Kanbantic', 'C:/GitHub/Kanbantic/src': 'C:\\GitHub\\Kanbantic\\src', 'C:/Windows': 'C:\\Windows' };
     const key = p.replace(/^[a-z]:/i, (d) => d.toUpperCase()); // NTFS is case-insensitive: c:/ is C:/
     if (vol[key]) return vol[key];
     throw enoent(p);
   };
+}
+
+/** The lib loaded as if on `platform` (its WIN constant is read at load); the cache is reset afterwards. */
+function libOnPlatform(platform) {
+  const id = require.resolve('../hooks/lib/permission-allow.js');
+  const saved = Object.getOwnPropertyDescriptor(process, 'platform');
+  delete require.cache[id];
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try { return require(id); } finally { delete require.cache[id]; Object.defineProperty(process, 'platform', saved); }
+}
+
+test('canonicalizePath/canonicalGlob: a bare drive is never handed to realpath; the drive root is the top of the walk (injected realpath that answers the cwd for C:)', () => {
+  const { canonicalizePath, decide, validateRule } = parser();
+  const CWD = 'C:/GitHub/Kanbantic';
+  const calls = [];
+  const trap = cVolume(calls, CWD);
   const opts = { caseInsensitive: true, realpath: trap };
   const expectNull = (raw, why) => assert.equal(canonicalizePath(raw, CWD, trap), null, why);
-  if (WIN) { // on a POSIX host a drive path is not an OS path and skips realpath (unchanged design)
+  { // an injected realpath is consulted on every platform (KBT-T5248): the same forms hold on Linux and Windows
     assert.equal(canonicalizePath('C:/brand-new-top/payload.txt', CWD, trap), 'C:/brand-new-top/payload.txt', 'closest existing ancestor is the drive root');
     assert.equal(canonicalizePath('C:/kbt-new/a/b.ps1', CWD, trap), 'C:/kbt-new/a/b.ps1');
     assert.equal(canonicalizePath('C:/GitHub/Kanbantic/brand-new-dir/new.cs', CWD, trap), 'C:/GitHub/Kanbantic/brand-new-dir/new.cs');
@@ -1059,7 +1150,7 @@ test('real fs: KBT-T5243 — process cwd INSIDE the allowed tree, a missing top-
     const v = validateRule(`Write(${NEW_TOP}/**)`);
     assert.equal(v.ok, true, 'a rule on a missing top-level dir of an existing drive is valid');
     assert.equal(v.parsed.glob, `${NEW_TOP}/**`, 'and keeps its own prefix (not rewritten under the cwd)');
-    if (WIN) {
+    {
       assert.equal(validateRule('Read(Z:/x/**)').ok, false, 'rule on a non-existing drive is refused');
       const missingDrive = 'ZYXWVUTSRQPONMLKJIHGFEDCBA'.split('').find((l) => !fs.existsSync(`${l}:/`));
       if (missingDrive) assert.equal(validateRule(`Read(${missingDrive}:/GitHub/**)`).ok, false, `rule on ${missingDrive}: (no such drive) is refused`);
@@ -1068,6 +1159,125 @@ test('real fs: KBT-T5243 — process cwd INSIDE the allowed tree, a missing top-
   } finally {
     process.chdir(before);
     rmTmp(tmp);
+  }
+});
+
+// ── KBT-T5246: drive-relative spellings and protected rule prefixes ──────────
+
+test('resolveInputPath/canonicalizePath/decide: every drive-relative spelling is refused BEFORE .. collapsing, in every field and Bash word, cwd inside and outside the tree', () => {
+  const { resolveInputPath, canonicalizePath, decide } = parser();
+  const trap = cVolume();
+  const opts = { caseInsensitive: true, realpath: trap };
+  const spellings = [
+    'C:../../Users/admin123/.bashrc', 'C:..\\..\\Windows\\x.txt', 'C:src/../../../Windows/x', 'C:new-rel.txt',
+    'C:GitHub/../../x', 'C:GitHub\\..\\..\\Windows\\new.txt', 'C:../../../Windows/x.txt', 'C:..\\..\\..\\Windows\\x.txt',
+    'C:..\\..\\GitHub\\Kanbantic\\.git\\hooks\\pre-commit', 'C:../../GitHub/Kanbantic/.git/x', 'C:src/a.ts', 'C:..', 'C:.', 'C:',
+    'c:GitHub/../../x', 'C:Windows/../../GitHub/Kanbantic/src/a.ts', 'C:../GitHub/Kanbantic/src/a.ts', 'C:GitHub/Kanbantic/src/a.ts',
+  ];
+  for (const cwd of ['C:/GitHub/Kanbantic', 'C:/Windows', 'C:/']) {
+    for (const p of spellings) {
+      assert.equal(resolveInputPath(p, cwd), null, `resolveInputPath(${p}, ${cwd}) must refuse before collapsing`);
+      assert.equal(canonicalizePath(p, cwd, trap), null, `canonicalizePath(${p}, ${cwd})`);
+      for (const rules of [['Write(C:/GitHub/**)'], ['Write(C:/**)', 'Write(C:/GitHub/**)', 'Edit(C:/GitHub/**)']]) {
+        assert.equal(decide(rules, { ...write(p), cwd }, opts).allow, false, `Write ${p} (cwd ${cwd})`);
+      }
+      assert.equal(decide(['Edit(C:/GitHub/**)'], { tool_name: 'Edit', tool_input: { filePath: p }, cwd }, opts).allow, false, `Edit filePath ${p}`);
+      assert.equal(decide(['Glob(C:/GitHub/**)'], { tool_name: 'Glob', tool_input: { path: p, pattern: 'src/**' }, cwd }, opts).allow, false, `Glob path ${p}`);
+      assert.equal(decide(['Grep(C:/GitHub/**)'], { tool_name: 'Grep', tool_input: { path: p, pattern: 'x' }, cwd }, opts).allow, false, `Grep path ${p}`);
+      assert.equal(decide(['Bash(cp *)'], { ...bash(`cp a ${p}`), cwd }, opts).allow, false, `Bash word ${p}`);
+      assert.equal(decide(['Bash(git *)'], { ...bash(`git diff --output=${p}`), cwd }, opts).allow, false, `Bash option value ${p}`);
+    }
+  }
+  // a drive-relative cwd never makes a relative path absolute
+  assert.equal(canonicalizePath('x.ts', 'C:GitHub', trap), null, 'drive-relative cwd');
+  assert.equal(resolveInputPath('x.ts', 'C:GitHub'), null);
+  // positive controls with the same volume: drive-ABSOLUTE and plain relative paths behave as before
+  assert.equal(canonicalizePath('C:/GitHub/Kanbantic/src/a.ts', 'C:/Windows', trap), 'C:/GitHub/Kanbantic/src/a.ts');
+  assert.equal(canonicalizePath('src/a.ts', 'C:/GitHub/Kanbantic', trap), 'C:/GitHub/Kanbantic/src/a.ts');
+  assert.equal(canonicalizePath('c:\\GitHub\\Kanbantic\\src\\a.ts', '', trap), 'C:/GitHub/Kanbantic/src/a.ts');
+  assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('src/new/x.ts'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, true);
+  assert.equal(decide(['Bash(cp *)'], { ...bash('cp src/a.ts src/b.ts'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, true);
+  assert.equal(decide(['Bash(git push*)'], { ...bash('git push origin HEAD:refs/heads/x'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, true, 'a refspec colon is not a drive');
+  assert.equal(decide(['Bash(git *)'], { ...bash('git log HEAD~1'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, true);
+  assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('C:/GitHub/../Windows/x'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, false, 'absolute .. out of the tree');
+  assert.equal(decide(['Write(C:/GitHub/**)'], { ...write('C:/GitHub/Kanbantic/../../Windows/x'), cwd: 'C:/GitHub/Kanbantic' }, opts).allow, false, 'absolute .. out of the tree (deeper)');
+});
+
+test('validateRule: a path rule whose prefix is or lies under .git/, .claude/ or .mcp.json is refused — raw and canonicalised (8.3 name, junction), every path tool', () => {
+  const { validateRule, parseAllowBlock } = parser();
+  const cRoot = (p) => { if (/^[a-z]:\/$/i.test(p)) return `${p.slice(0, 2)}\\`; throw enoent(p); }; // only the drive roots exist
+  for (const bad of [
+    'Write(C:/GitHub/Kanbantic/.git/**)', 'Write(C:/GitHub/Kanbantic/.git/hooks/**)', 'Edit(C:/GitHub/Kanbantic/.git/hooks/*)',
+    'Write(C:/GitHub/Kanbantic/GIT~1/**)', 'Write(C:/GitHub/Kanbantic/.claude/**)', 'Write(C:/GitHub/Kanbantic/.claude/settings.local.json)',
+    'Write(C:/GitHub/Kanbantic/.mcp.json)', 'Write(C:/GitHub/Kanbantic/.git)', 'Write(C:/GitHub/Kanbantic/.GIT/**)', 'Write(C:/GitHub/Kanbantic/.git./**)',
+    'Write(C:/GitHub/Kanbantic/.claude/worktrees/**)', 'Write(C:/GitHub/Kanbantic/.claude/worktrees/x/.claude/**)',
+    'Read(C:/GitHub/Kanbantic/.git/**)', 'Glob(C:/GitHub/Kanbantic/.git/**)', 'Grep(C:/GitHub/Kanbantic/.claude/**)', 'Edit(C:\\GitHub\\Kanbantic\\.git\\**)',
+    'Write(/r/.git/**)', 'Write(/r/GIT~1/**)', 'Write(/r/link/**)',
+  ]) {
+    const v = validateRule(bad, { realpath: /^\w+\(\/r\//.test(bad) ? fakeRealpath : cRoot });
+    assert.equal(v.ok, false, `${bad} must be refused`);
+    assert.match(v.reason, /\.git|canonicalised/, `${bad}: ${v.reason}`);
+  }
+  for (const good of [
+    'Write(C:/GitHub/Kanbantic/src/**)', 'Write(C:/GitHub/Kanbantic/.github/**)', 'Write(C:/GitHub/Kanbantic/.gitignore)',
+    'Write(C:/GitHub/Kanbantic/.claude/worktrees/KBT-F741/**)', 'Edit(C:/GitHub/Kanbantic/docs/claude-notes.md)', 'Read(C:/GitHub/**)',
+    'Write(/r/src/**)', 'Write(/r/long-name-dir/**)',
+  ]) {
+    const v = validateRule(good, { realpath: /^\w+\(\/r\//.test(good) ? fakeRealpath : cRoot });
+    assert.equal(v.ok, true, `${good} must stay valid: ${v.reason || ''}`);
+  }
+  // sync time (parseAllowBlock → validateRule with the real filesystem): the protected rule is dropped, the plain one kept
+  const md = TR('```allow\nWrite(C:/GitHub/Kanbantic/.git/**)\nWrite(C:/GitHub/Kanbantic/src/**)\nRead(C:/GitHub/Kanbantic/.mcp.json)\n```');
+  const { rules, rejected } = parseAllowBlock(md);
+  assert.deepEqual(rules, [TR('Write(C:/GitHub/Kanbantic/src/**)')]);
+  assert.deepEqual(rejected.map((x) => x.rule), [TR('Write(C:/GitHub/Kanbantic/.git/**)'), TR('Read(C:/GitHub/Kanbantic/.mcp.json)')]);
+});
+
+// ── KBT-T5248: a drive-letter path or rule on a non-Windows host ─────────────
+
+test('KBT-T5248: on a non-Windows host a drive-letter path/rule is Windows-absolute (never resolved against the cwd) and fail-closed with the real filesystem; an injected realpath gives the same win32 forms on every platform', () => {
+  const linux = libOnPlatform('linux');
+  const win = libOnPlatform('win32');
+  const CWD = 'C:/GitHub/Kanbantic';
+  // lexical: no cwd resolution, win32 root, drive-relative refused — on both
+  for (const lib of [linux, win]) {
+    assert.equal(lib.resolveInputPath('C:/GitHub/x', '/home/u'), 'C:/GitHub/x', 'absolute, not /home/u/C:/GitHub/x');
+    assert.equal(lib.resolveInputPath('C:/GitHub/../x', '/home/u'), 'C:/x');
+    assert.equal(lib.resolveInputPath('C:/GitHub/../../x', '/home/u'), 'C:/x', 'clamped at the drive root');
+    assert.equal(lib.resolveInputPath('C:GitHub/../../x', '/home/u'), null, 'drive-relative');
+    assert.equal(lib.resolveInputPath('x', 'C:/GitHub'), 'C:/GitHub/x');
+  }
+  // the real filesystem on a non-Windows host: no drive exists → null / rule refused, never a POSIX fallback
+  assert.equal(linux.canonicalizePath('C:/GitHub/Kanbantic/src/a.ts', CWD), null);
+  assert.equal(linux.canonicalizePath('Z:/nowhere/new.cs', CWD), null);
+  assert.equal(linux.canonicalizePath('C:/', CWD), null, 'not even the root');
+  assert.equal(linux.canonicalizePath('src/a.ts', CWD), null, 'relative to a drive cwd');
+  assert.equal(linux.validateRule('Read(C:/GitHub/**)').ok, false, 'a drive-letter rule is refused on a non-Windows host');
+  assert.equal(linux.validateRule('Read(Z:/x/**)').ok, false);
+  assert.equal(linux.validateRule('Write(C:/brand-new-top/**)').ok, false);
+  const lopts = { caseInsensitive: true };
+  assert.equal(linux.decide(['Read(Z:/x/**)'], { ...read('Z:/x/file.txt'), cwd: CWD }, lopts).allow, false);
+  assert.equal(linux.decide(['Write(C:/GitHub/**)'], { ...write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), cwd: CWD }, lopts).allow, false, 'fail-closed: no decision, not allow');
+  assert.equal(linux.decide(['Write(C:/GitHub/**)'], { ...write('C:/brand-new-top/payload.txt'), cwd: CWD }, lopts).allow, false);
+  assert.equal(linux.decide(['Write(C:/GitHub/**)'], { ...write('C:GitHub/../../x'), cwd: CWD }, lopts).allow, false);
+  assert.equal(linux.decide(['Bash(cat *)'], { ...bash('cat C:/GitHub/Kanbantic/README.md'), cwd: '/home/u' }, lopts).allow, false, 'a drive-letter Bash word is fail-closed too');
+  // a POSIX tree works on the non-Windows host with the real filesystem
+  assert.equal(linux.decide(['Write(/GitHub/**)'], { ...write('/GitHub/Kanbantic/brand-new-dir/new.cs'), cwd: '/GitHub/Kanbantic' }, lopts).allow, true);
+  assert.equal(linux.decide(['Write(/GitHub/**)'], { ...write('/brand-new-top/payload.txt'), cwd: '/GitHub/Kanbantic' }, lopts).allow, false);
+  // with an injected realpath the win32 forms are identical on both platforms
+  for (const lib of [linux, win]) {
+    const calls = [];
+    const opts = { caseInsensitive: true, realpath: cVolume(calls, CWD) };
+    assert.equal(lib.canonicalizePath('C:/GitHub/Kanbantic/brand-new-dir/new.cs', CWD, opts.realpath), 'C:/GitHub/Kanbantic/brand-new-dir/new.cs');
+    assert.equal(lib.canonicalizePath('C:/brand-new-top/payload.txt', CWD, opts.realpath), 'C:/brand-new-top/payload.txt');
+    assert.equal(lib.canonicalizePath('Z:/nowhere/new.cs', CWD, opts.realpath), null);
+    assert.equal(lib.canonicalizePath('C:GitHub/../../x', CWD, opts.realpath), null);
+    assert.equal(lib.decide(['Write(C:/GitHub/**)'], { ...write('C:/GitHub/Kanbantic/brand-new-dir/new.cs'), cwd: CWD }, opts).allow, true);
+    assert.equal(lib.decide(['Write(C:/GitHub/**)'], { ...write('C:/brand-new-top/payload.txt'), cwd: CWD }, opts).allow, false);
+    assert.equal(lib.decide(['Write(C:/GitHub/**)', 'Read(Z:/x/**)'], { ...read('Z:/x/file.txt'), cwd: CWD }, opts).allow, false);
+    assert.equal(lib.validateRule('Write(C:/brand-new-top/**)', { realpath: opts.realpath }).parsed.glob, 'C:/brand-new-top/**');
+    assert.equal(lib.validateRule('Read(Z:/x/**)', { realpath: opts.realpath }).ok, false);
+    assert.ok(!calls.some((p) => /^[a-z]:(?!\/)/i.test(p)), 'never a bare/drive-relative spelling to realpath');
   }
 });
 
@@ -1179,9 +1389,10 @@ async function runSync(items, { existingSessionFile = true, extraEnv = {}, apiRe
 const REJECT_ROUTE = '/api/app/agent-session/SESS-1/report-allow-rule-rejected';
 const rejectCalls = (api) => api.filter((c) => c.url === REJECT_ROUTE);
 
+const SYNC_ALLOW = ['Bash(git *)', TR('Read(C:/GitHub/**)')]; // what the sync keeps out of ALLOW_ITEM
 const ALLOW_ITEM = {
   code: 'KBT-CUST001', title: 'Permission allow-list', category: 'Custom', tags: ['permission-allow'],
-  content: 'Tekst vóór het blok: Bash(*)\n\n```allow\n# lokaal\nBash(git *)\nBash(*)\nBash(rm -rf *)\nRead(C:/GitHub/**)\n```\n\nBash(curl *) staat buiten het blok.\n',
+  content: TR('Tekst vóór het blok: Bash(*)\n\n```allow\n# lokaal\nBash(git *)\nBash(*)\nBash(rm -rf *)\nRead(C:/GitHub/**)\n```\n\nBash(curl *) staat buiten het blok.\n'),
 };
 
 test('sync: fetches the Custom item tagged permission-allow (includeContent) and writes allowList + allowListFetchedAt', async () => {
@@ -1191,9 +1402,9 @@ test('sync: fetches the Custom item tagged permission-allow (includeContent) and
   assert.ok(call, 'list_toolkit_items(Custom) expected');
   assert.equal(call.name, 'list_toolkit_items');
   assert.equal(call.arguments.includeContent, true);
-  assert.deepEqual(session.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(session.allowList, SYNC_ALLOW);
   assert.ok(!Number.isNaN(Date.parse(session.allowListFetchedAt)));
-  assert.deepEqual(cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(cache.allowList, SYNC_ALLOW);
   // the proxy's own fields survive the merge
   assert.equal(session.sessionId, 'SESS-1');
   assert.equal(session.channelId, 'CHAN-1');
@@ -1210,7 +1421,7 @@ test('sync: without a session file the cache file ~/.claude-kanbantic-allowlist-
   const { r, session, cache } = await runSync([ALLOW_ITEM], { existingSessionFile: false });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(session, null);
-  assert.deepEqual(cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(cache.allowList, SYNC_ALLOW);
 });
 
 test('sync: no tagged item → no cache file is created (and nothing is rejected)', async () => {
@@ -1244,7 +1455,7 @@ test('sync: every rejected rule is reported once via POST …/report-allow-rule-
   assert.match(calls.find((c) => c.body.rule === 'Bash(*)').body.reason, /every command/);
   // the local SessionStart output is unchanged, and so is the cache
   assert.match(r.stdout, /permission-allow-rejected: Bash\(\*\)/);
-  assert.deepEqual(cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(cache.allowList, SYNC_ALLOW);
 });
 
 test('sync: nothing rejected → nothing reported', async () => {
@@ -1274,18 +1485,18 @@ test('sync: no session file → no report, cache still written; API down or 500 
   const none = await runSync([ALLOW_ITEM], { existingSessionFile: false });
   assert.equal(none.r.status, 0);
   assert.equal(rejectCalls(none.api).length, 0);
-  assert.deepEqual(none.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(none.cache.allowList, SYNC_ALLOW);
 
   const port = await closedPort();
   const down = await runSync([ALLOW_ITEM], { extraEnv: { KANBANTIC_API_URL: `http://127.0.0.1:${port}` } });
   assert.equal(down.r.status, 0, down.r.stderr);
-  assert.deepEqual(down.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(down.cache.allowList, SYNC_ALLOW);
   assert.match(down.r.stdout, /permission-allow-rejected: Bash\(\*\)/);
 
   const boom = await runSync([ALLOW_ITEM], { apiResponder: () => ({ status: 500 }) });
   assert.equal(boom.r.status, 0, boom.r.stderr);
   assert.equal(rejectCalls(boom.api).length, 2);
-  assert.deepEqual(boom.cache.allowList, ['Bash(git *)', 'Read(C:/GitHub/**)']);
+  assert.deepEqual(boom.cache.allowList, SYNC_ALLOW);
 });
 
 test('sync: {recorded:false} (session without workstation) is not an error — nothing is retried', async () => {
