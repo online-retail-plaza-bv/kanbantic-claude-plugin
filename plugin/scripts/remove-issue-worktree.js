@@ -20,20 +20,54 @@
 //                 under any `<worktree>/**/node_modules` first — `rmdir` on the
 //                 link itself, never touching what it points to.
 //
+// And — KBT-T5233 (review finding I10) — it never destroys work that is not
+// committed. Before anything is removed it checks, in this order:
+//
+//   dirty   — `git -C <worktree> status --porcelain=v1 -z --ignored`. ANY entry
+//             (modified/staged tracked file, untracked file, ignored file such
+//             as `.env`) ⇒ refuse with reason `dirty`; the first 10 paths are
+//             in the JSON (`paths`), the full count in `pathCount`. The only
+//             exception is reproducible build output — ignored/untracked
+//             entries with a directory named in REPRODUCIBLE_IGNORED
+//             (node_modules, bin, obj, dist, .angular) anywhere in their path:
+//             those are never "work" and would otherwise make every built
+//             worktree un-removable.
+//   in-use  — the worktree is `locked` in `git worktree list --porcelain`
+//             (an agent/operator deliberately pinned it), OR — Windows only —
+//             the directory cannot be renamed. Heuristic: rename the worktree
+//             root to `<root>.kbt-rm-probe-<pid>` and straight back. Windows
+//             refuses (EPERM/EBUSY) to rename a directory that is the current
+//             directory of a live process or that holds an open handle, so a
+//             shell / Claude session / dev-server still sitting in the worktree
+//             makes the probe fail ⇒ refuse with reason `in-use`. Needs no
+//             admin rights and no `handle.exe`. On a failed rename-back the
+//             probe retries a few times and reports `error` with the temp name.
+//
+// Only when both pass does it run a PLAIN `git worktree remove` (no --force)
+// followed by `git worktree prune`. Git's own refusal is thereby a second net.
+//
+// `--force` (operator-only, NEVER passed by the review-skill) skips the dirty
+// and in-use checks and restores the old `git worktree remove --force`. The
+// JSON then carries `forced: true`.
+//
 // Usage:
-//   node remove-issue-worktree.js --branch <name>  [--repo <root>]
-//   node remove-issue-worktree.js --path <worktree> [--repo <root>]
+//   node remove-issue-worktree.js --branch <name>  [--repo <root>] [--force]
+//   node remove-issue-worktree.js --path <worktree> [--repo <root>] [--force]
 //
 //   --repo defaults to the git toplevel of the current directory. The branch
 //   may be given as `feature/x` or `refs/heads/feature/x`.
 //
 // Output: ONE JSON object on stdout, `{ removed, path, reason, detached }`:
-//   removed  — true only when `git worktree remove --force` succeeded.
-//   path     — the worktree path as git reports it (null when none matched).
-//   reason   — null on success; otherwise one of
-//              usage | not-a-git-repo | no-worktree | main-worktree |
-//              cwd-inside-worktree | git-worktree-remove-failed | error
-//   detached — the junctions/symlinks unlinked before the removal.
+//   removed   — true only when `git worktree remove` succeeded.
+//   path      — the worktree path as git reports it (null when none matched).
+//   reason    — null on success; otherwise one of
+//               usage | not-a-git-repo | no-worktree | main-worktree |
+//               cwd-inside-worktree | dirty | in-use |
+//               git-worktree-remove-failed | error
+//   detached  — the junctions/symlinks unlinked before the removal.
+//   paths     — (reason dirty) up to 10 offending paths; pathCount — all of them.
+//   detail    — (reason in-use) `locked` | `process` plus a human hint.
+//   forced    — true when --force was given.
 //
 // Exit code is ALWAYS 0 (fail-open): a failed cleanup must never block the
 // merge → InDeployment transition. The reason is in the JSON and a warning is
@@ -88,7 +122,7 @@ function parseWorktreeList(porcelain) {
     }
     if (line.startsWith('worktree ')) {
       if (cur) entries.push(cur);
-      cur = { path: line.slice('worktree '.length), head: null, branch: null, bare: false, detached: false };
+      cur = { path: line.slice('worktree '.length), head: null, branch: null, bare: false, detached: false, locked: false, lockReason: null };
     } else if (!cur) {
       continue;
     } else if (line.startsWith('HEAD ')) {
@@ -99,6 +133,9 @@ function parseWorktreeList(porcelain) {
       cur.bare = true;
     } else if (line === 'detached') {
       cur.detached = true;
+    } else if (line === 'locked' || line.startsWith('locked ')) {
+      cur.locked = true;
+      cur.lockReason = line.length > 'locked '.length ? line.slice('locked '.length) : null;
     }
   }
   if (cur) entries.push(cur);
@@ -225,11 +262,104 @@ function detachLinksUnderNodeModules(worktree, warn) {
 }
 
 // ---------------------------------------------------------------------------
+// KBT-T5233 — dirty check: uncommitted work is never removed
+// ---------------------------------------------------------------------------
+
+/** Ignored top-level directories that are reproducible build output, not work. */
+const REPRODUCIBLE_IGNORED = new Set(['node_modules', 'bin', 'obj', 'dist', '.angular']);
+const MAX_LISTED_PATHS = 10;
+
+/**
+ * Parse `git status --porcelain=v1 -z --ignored` output into
+ * `[{ code, path }]`. In -z mode entries are NUL-separated and a rename/copy
+ * carries the ORIGINAL path as an extra NUL-terminated field after the entry.
+ */
+function parseStatusZ(raw) {
+  const fields = String(raw).split('\0');
+  const out = [];
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!f) continue;
+    const code = f.slice(0, 2);
+    const p = f.slice(3);
+    out.push({ code, path: p });
+    if (code[0] === 'R' || code[0] === 'C') i++; // skip the "from" path
+  }
+  return out;
+}
+
+function isReproducibleIgnored(entry) {
+  // Ignored (`!!`) or untracked (`??`) — tracked changes under these names
+  // still count. A node_modules junction in a repo without .gitignore shows up
+  // as `?? node_modules/...` (the KBT-GTCH187 shape).
+  if (entry.code !== '!!' && entry.code !== '??') return false;
+  // Any segment: `sub/node_modules/...`, `src/Foo/obj/...` (monorepo shapes).
+  const segments = entry.path.replace(/\\/g, '/').split('/');
+  segments.pop(); // the file itself never counts; only a directory in its prefix
+  return segments.some((s) => REPRODUCIBLE_IGNORED.has(s));
+}
+
+/**
+ * Returns `{ ok, entries, error }`. `entries` are the status lines that count
+ * as work (reproducible ignored output filtered out). `ok:false` means status
+ * itself failed — the caller treats that as "cannot prove it is clean".
+ */
+function dirtyEntries(worktree) {
+  const r = spawnSync('git', ['-C', worktree, 'status', '--porcelain=v1', '-z', '--ignored', '--untracked-files=all'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    windowsHide: true,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.status !== 0) {
+    return { ok: false, entries: [], error: (r.stderr || '').trim() || (r.error && r.error.message) || `exit ${r.status}` };
+  }
+  const entries = parseStatusZ(r.stdout || '').filter((e) => !isReproducibleIgnored(e));
+  return { ok: true, entries, error: null };
+}
+
+// ---------------------------------------------------------------------------
+// KBT-T5233 — in-use check: locked worktree or a live process inside it
+// ---------------------------------------------------------------------------
+
+function sleepMs(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* best effort */ }
+}
+
+/**
+ * Windows-only live-process heuristic. Renames the worktree root to a sibling
+ * temp name and immediately back. A directory that is the cwd of a running
+ * process (or has any open handle without FILE_SHARE_DELETE) cannot be renamed
+ * on Windows — the rename throws EPERM/EBUSY/EACCES. No admin rights needed.
+ *
+ * Returns `{ inUse, error }`. `error` is set only when the rename-BACK failed
+ * after retries; the directory then sits at `error.tempPath` and the caller
+ * must surface that loudly.
+ */
+function probeDirectoryInUse(worktree) {
+  if (!IS_WIN) return { inUse: false, error: null };
+  const temp = `${worktree.replace(/[\\/]+$/, '')}.kbt-rm-probe-${process.pid}`;
+  try {
+    fs.renameSync(worktree, temp);
+  } catch (e) {
+    if (e && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES')) return { inUse: true, error: null };
+    // ENOENT or anything else: nothing to hold on to, let git decide.
+    return { inUse: false, error: null };
+  }
+  let lastErr = null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try { fs.renameSync(temp, worktree); return { inUse: false, error: null }; } catch (e) { lastErr = e; sleepMs(100 * (attempt + 1)); }
+  }
+  return { inUse: false, error: { tempPath: temp, message: lastErr ? lastErr.message : 'rename back failed' } };
+}
+
+// ---------------------------------------------------------------------------
 // main flow
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { branch: null, path: null, repo: null, help: false };
+  const out = { branch: null, path: null, repo: null, force: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const eq = a.indexOf('=');
@@ -238,6 +368,7 @@ function parseArgs(argv) {
     if (key === '--branch') out.branch = val();
     else if (key === '--path') out.path = val();
     else if (key === '--repo') out.repo = val();
+    else if (key === '--force' || key === '-f') out.force = true;
     else if (key === '--help' || key === '-h') out.help = true;
   }
   return out;
@@ -245,16 +376,18 @@ function parseArgs(argv) {
 
 /**
  * Run the removal. Returns the result object; never throws.
- * @param {{branch?:string, path?:string, repo?:string, cwd?:string, warn?:(m:string)=>void}} opts
+ * @param {{branch?:string, path?:string, repo?:string, force?:boolean, cwd?:string, warn?:(m:string)=>void}} opts
  */
 function removeIssueWorktree(opts) {
   const warn = opts.warn || (() => {});
   const cwd = opts.cwd || process.cwd();
+  const force = Boolean(opts.force);
   const result = { removed: false, path: null, reason: null, detached: [] };
+  if (force) result.forced = true;
 
   if (!opts.branch && !opts.path) {
     result.reason = 'usage';
-    warn('usage: remove-issue-worktree.js --branch <name> | --path <worktree> [--repo <root>]');
+    warn('usage: remove-issue-worktree.js --branch <name> | --path <worktree> [--repo <root>] [--force]');
     return result;
   }
 
@@ -300,18 +433,71 @@ function removeIssueWorktree(opts) {
     return result;
   }
 
+  const dirExists = fs.existsSync(entry.path);
+
+  // KBT-T5233 — refuse to destroy uncommitted work or a worktree in use.
+  // Skipped only with the operator-only --force.
+  if (!force) {
+    if (dirExists) {
+      const st = dirtyEntries(entry.path);
+      if (!st.ok) {
+        result.reason = 'dirty';
+        result.paths = [];
+        result.pathCount = 0;
+        result.detail = `git status failed: ${st.error}`;
+        warn(`dirty: cannot prove ${entry.path} is clean (git status failed: ${st.error}) — refusing; inspect it, or --force as operator`);
+        return result;
+      }
+      if (st.entries.length > 0) {
+        result.reason = 'dirty';
+        result.paths = st.entries.slice(0, MAX_LISTED_PATHS).map((e) => `${e.code} ${e.path}`);
+        result.pathCount = st.entries.length;
+        warn(`dirty: ${entry.path} has ${st.entries.length} uncommitted/untracked/ignored path(s) — refusing. ` +
+             `First ${Math.min(st.entries.length, MAX_LISTED_PATHS)}: ${result.paths.join(', ')}. ` +
+             `Inspect with: git -C "${entry.path}" status --ignored  (operator-only override: --force)`);
+        return result;
+      }
+    }
+
+    if (entry.locked) {
+      result.reason = 'in-use';
+      result.detail = `locked${entry.lockReason ? `: ${entry.lockReason}` : ''}`;
+      warn(`in-use: ${entry.path} is locked in git worktree list${entry.lockReason ? ` (${entry.lockReason})` : ''} — ` +
+           `refusing; \`git worktree unlock "${entry.path}"\` once the owner is done`);
+      return result;
+    }
+
+    if (dirExists) {
+      const probe = probeDirectoryInUse(entry.path);
+      if (probe.error) {
+        result.reason = 'error';
+        result.detail = `rename probe could not restore the directory; it is at ${probe.error.tempPath}: ${probe.error.message}`;
+        warn(`error: ${result.detail}`);
+        return result;
+      }
+      if (probe.inUse) {
+        result.reason = 'in-use';
+        result.detail = 'process: a live process holds the worktree directory (cwd or open handle)';
+        warn(`in-use: ${entry.path} is held by a live process (cwd or open handle: a shell, Claude session or dev-server still inside it) — ` +
+             `refusing; close it and run again (operator-only override: --force)`);
+        return result;
+      }
+    }
+  }
+
   // KBT-GTCH187
-  if (fs.existsSync(entry.path)) {
+  if (dirExists) {
     result.detached = detachLinksUnderNodeModules(entry.path, warn);
   }
 
-  const rm = git(['worktree', 'remove', '--force', entry.path], repo);
+  const rmArgs = force ? ['worktree', 'remove', '--force', entry.path] : ['worktree', 'remove', entry.path];
+  const rm = git(rmArgs, repo);
   const prune = git(['worktree', 'prune'], repo);
   if (!prune.ok) warn(`git worktree prune: ${prune.stderr}`);
 
   if (!rm.ok) {
     result.reason = 'git-worktree-remove-failed';
-    warn(`git worktree remove --force failed: ${rm.stderr || (rm.error && rm.error.message) || `exit ${rm.status}`}`);
+    warn(`git ${rmArgs.slice(0, 3).join(' ')} failed: ${rm.stderr || (rm.error && rm.error.message) || `exit ${rm.status}`}`);
     return result;
   }
 
@@ -328,10 +514,10 @@ function main() {
   let result;
   if (args.help) {
     result = { removed: false, path: null, reason: 'usage', detached: [] };
-    warn('usage: remove-issue-worktree.js --branch <name> | --path <worktree> [--repo <root>]');
+    warn('usage: remove-issue-worktree.js --branch <name> | --path <worktree> [--repo <root>] [--force]');
   } else {
     try {
-      result = removeIssueWorktree({ branch: args.branch, path: args.path, repo: args.repo, warn });
+      result = removeIssueWorktree({ branch: args.branch, path: args.path, repo: args.repo, force: args.force, warn });
     } catch (e) {
       result = { removed: false, path: null, reason: 'error', detached: [], error: String(e && e.message || e) };
       warn(`unexpected error: ${e && e.stack || e}`);
@@ -346,7 +532,11 @@ module.exports = {
   findWorktree,
   isInside,
   detachLinksUnderNodeModules,
+  parseStatusZ,
+  dirtyEntries,
+  probeDirectoryInUse,
   removeIssueWorktree,
+  REPRODUCIBLE_IGNORED,
 };
 
 if (require.main === module) main();
