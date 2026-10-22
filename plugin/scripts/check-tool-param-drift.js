@@ -47,6 +47,8 @@ const API_KEY = process.env.KANBANTIC_API_KEY;
 // applicationId is mandatory (PR #242).
 const REQUIRED_PARAMS = {
   create_version: ['applicationId'], // KBT-B392 / PR #242 — app-scoped Versions
+  // KBT-F741 — session-state reporting: the hooks pair PreToolUse/PostToolUse on toolUseId.
+  report_tool_activity: ['sessionId', 'toolUseId'],
 };
 
 function fatal(code, msg) {

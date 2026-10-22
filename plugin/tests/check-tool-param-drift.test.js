@@ -106,6 +106,7 @@ const tool = (name, required) => ({
 test('param-drift: positive — create_version requires applicationId → exit 0', async () => {
   const stub = await startStub([
     tool('create_version', ['workspaceId', 'applicationId', 'name']),
+    tool('report_tool_activity', ['sessionId', 'toolUseId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -129,6 +130,7 @@ test('param-drift: negative — create_version drops applicationId → exit 1', 
   const stub = await startStub([
     // applicationId intentionally removed from required
     tool('create_version', ['workspaceId', 'name']),
+    tool('report_tool_activity', ['sessionId', 'toolUseId']),
     tool('list_versions', ['workspaceId']),
   ]);
   try {
@@ -161,6 +163,32 @@ test('param-drift: negative — create_version missing entirely → exit 1', asy
       `expected exit 1; got ${result.code}. stdout: ${result.stdout}, stderr: ${result.stderr}`
     );
     assert.match(result.stderr, /not exposed by the live registry/, 'stderr flags missing tool');
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — report_tool_activity drops toolUseId (KBT-F741) → exit 1', async () => {
+  const stub = await startStub([
+    tool('create_version', ['workspaceId', 'applicationId', 'name']),
+    tool('report_tool_activity', ['sessionId']),
+  ]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1, `stdout: ${result.stdout}, stderr: ${result.stderr}`);
+    assert.match(result.stderr, /report_tool_activity/);
+    assert.match(result.stderr, /toolUseId/);
+  } finally {
+    stub.server.close();
+  }
+});
+
+test('param-drift: negative — report_tool_activity missing entirely (KBT-F741) → exit 1', async () => {
+  const stub = await startStub([tool('create_version', ['workspaceId', 'applicationId', 'name'])]);
+  try {
+    const result = await runScript(stub.port);
+    assert.strictEqual(result.code, 1);
+    assert.match(result.stderr, /report_tool_activity/);
   } finally {
     stub.server.close();
   }

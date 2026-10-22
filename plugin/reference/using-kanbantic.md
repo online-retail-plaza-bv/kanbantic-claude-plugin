@@ -36,7 +36,7 @@ lopen gegarandeerd uit elkaar; dat is precies de drift die KBT-F623 opruimde.
 | **execute** | [isReadyToClaim is afgeleid](#isreadytoclaim-is-afgeleid-nooit-zelf-zetten) · [Claim gaat via Ready](#claimen-kan-alleen-vanuit-ready-niet-vanuit-triaged) · [Worktree in een subagent](#enterworktree-werkt-niet-in-een-subagent) |
 | **review** | [Gate-overzicht](#welke-gate-blokkeert-wat) · [InDeployment ≠ Done](#indeployment-is-niet-done) · [Self-approve werkt](#approve_review-checkt-alleen-dat-er-een-rij-bestaat) · [Merge-step worktree](#de-merge-step-heeft-een-eigen-worktree-nodig) |
 | **specialists** | [De agent is de executor](#bij-een-specialist-run-ben-jij-de-executor) |
-| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Weglaten is veilig](#weglaten-is-veilig--stuur-niet-meer-terug-dan-je-wilt-wijzigen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) |
+| **altijd** | [MCP-flakiness](#mcp-flakiness-retry-voor-je-concludeert) · [Deterministische 500's](#niet-elke-500-is-transiënt--sommige-zijn-deterministisch) · [GUID-only tools](#verschillende-entity-tools-accepteren-alleen-een-guid-geen-code) · [Stille drops](#twee-tools-laten-stil-vallen-wat-je-meegeeft) · [Deployer 503](#als-de-deployer-503-geeft) · [Weglaten is veilig](#weglaten-is-veilig--stuur-niet-meer-terug-dan-je-wilt-wijzigen) · [Lege registry-sweep](#een-lege-registry-sweep-bewijst-niets) · [Tool-cache na deploy](#een-nieuwe-tool-verschijnt-pas-na-een-app-herstart) · [Groene CI dekt niet alles](#een-groene-ci-dekt-niet-alles--weet-wat-er-draait) · [Hangdetectie-hooks](#hangdetectie-en-permissie-afhandeling-via-hooks-kbt-f741) |
 
 ---
 
@@ -521,6 +521,127 @@ Wat op dit moment geldt in de Kanbantic-monorepo:
 De algemene les: een groene CI betekent "de checks die draaiden zijn geslaagd",
 niet "alles is getest". Kijk welke jobs daadwerkelijk liepen voordat je conclusies
 trekt uit het vinkje.
+
+### Hangdetectie en permissie-afhandeling via hooks (KBT-F741)
+
+De plugin meldt via Claude Code-hooks aan Kanbantic wat een sessie op dit moment
+doet, zodat een *hang* (wacht op een permissievraag, tool die nooit eindigt, stil
+na een turn) te onderscheiden is van echt werk. De hooks praten rechtstreeks met
+de REST-API (`X-Api-Key`), **niet** via de MCP-proxy: tijdens een permissievraag
+is het model — en dus de proxy — niet aanspreekbaar.
+
+| Event | Script | Meldt |
+|---|---|---|
+| `Notification` (`permission_prompt\|idle_prompt\|agent_needs_input`) | `notification-session-state.js` | `wait-for-user` met `[<type>] <titel>: <bericht>` (max 2000) |
+| `PermissionRequest` | `permission-request-router.js` | allow-list-match → `allow` + tool-activity; anders `wait-for-user` + kanaalbericht, **geen** beslissing |
+| `PreToolUse` / `PostToolUse` | `tool-activity.js --pre` / `--post` | `tool-activity` `{toolName, toolUseId, startedAt}` / `{toolUseId, endedAt}` |
+| `UserPromptSubmit` | `turn-start.js` | `turn-start` `{at}` |
+| `Stop` | `stop-session-idle.js` | `heartbeat` `{status: Idle, summary (300, geredigeerd), activeBackgroundTasks}` |
+
+Alle hooks zijn **fail-open**: geen sessiebestand, geen `KANBANTIC_API_KEY`,
+netwerkfout, niet-2xx of 5 s time-out ⇒ exit 0 en lege stdout. Nooit een `deny`,
+en bij een storing nooit een `allow`. `KANBANTIC_SYNC_DEBUG=1` schrijft de
+skip-reden naar stderr (nooit de key, het sessiebestand of de payload). Vrije
+tekst die de machine verlaat (commando's, notificatietekst, laatste
+assistentbericht) wordt eerst geredigeerd: waarden van sleutels met
+`token|secret|password|api[_-]?key|authorization|bearer` worden `***`, evenals
+`Bearer <x>`, `--password=<x>` en `token=<x>` in tekst.
+
+**De allow-list.** De workspace beheert hem als `Custom`-Toolkit-item met tag
+`permission-allow`. Alleen het fenced codeblok met taal `allow` telt (tekst
+eromheen is toelichting); lege regels en regels met `#` worden overgeslagen:
+
+````
+```allow
+# MCP-tool-glob (alleen met servernaam; mcp__* is niet toegestaan)
+mcp__kanbantic__*
+# prefix-match op het getrimde commando
+Bash(git status*)
+# glob op file_path/filePath (ook Edit, Write, Glob, Grep)
+Read(C:/GitHub/**)
+# host van tool_input.url
+WebFetch(domain:docs.anthropic.com)
+```
+````
+
+Commentaar staat op een eigen regel; een `#` achter een regel hoort bij de regel
+zelf en laat hem falen. Een `Bash`-regel zonder `*` is een exacte match. Pad-globs gebruiken `/`, `**`
+(over mappen heen) en `*`; paden worden genormaliseerd (`\` → `/`, `..` weggewerkt)
+en op Windows hoofdletterongevoelig vergeleken. Een samengesteld commando (`;`,
+`&`, `|`, `` ` ``, `$(`, `<`, `>`, newline) valt nooit onder een prefix-regel.
+
+**Wat nooit gaat** — als regel geweigerd *en* als commando, ook onder een bredere
+regel (`Bash(git push*)` staat `git push --force` niet toe): `rm` met recursieve
+vlag, `Remove-Item … -Recurse`, `rmdir`/`rd /s`, `del /s`, `git push --force`
+(`-f`, `--force-with-lease`, `+refspec`), `git reset --hard`, `git clean -f…`,
+`DROP `, `TRUNCATE `; sinds de review van KBT-F741 (KBT-T5218) ook `git push -d`
+/ `:<ref>` (lege bron = verwijderen), `git checkout`/`switch -f`/`--force`/
+`--discard-changes`, `git branch -D`, `git -c <config-override>` en — in elk
+commando — `--delete`, `--mirror`, `--upload-pack`, `--receive-pack`,
+`--output[-dir]`, `--exec[-path]`/`-exec`. Verder `Bash(*)` / kale `Bash`, kale
+pad-tools en pad-globs op de root (`/**`, `C:/**`, `*:/**`). Een lokaal
+memory-pad (`memory-path.js`) krijgt nooit `allow`, en evenmin iets onder
+`.claude/` of `.git/` of een bestand `.mcp.json` (elke map, elk tool, ook Read
+en Bash-commando's die zo'n pad noemen); `.claude/worktrees/<naam>/…` is een
+checkout en wél gewoon toegestaan, maar niet diens eigen `.claude/` of `.git`.
+
+**Canonicalisatie en de her-review (KBT-T5238, KBT-T5239, KBT-T5241).** Windows
+opent één bestand onder meer spellingen dan de string toont (8.3-korte namen als
+`GIT~1`, NTFS-streams als `.git::$INDEX_ALLOCATION`, een punt of spatie achter
+een segment, `\\?\`/`\\.\`-prefixen, junctions). Daarom wordt elk pad — padvelden,
+de letterlijke basis van een Glob-patroon en padwoorden in een Bash-commando —
+vóór de match gecanonicaliseerd: absoluut en `..`-vrij, dan de dichtstbijzijnde
+*bestaande* voorouder via `fs.realpathSync.native` (korte namen, symlinks en
+junctions uitgeklapt) met de niet-bestaande staart er weer achter. Het veto op
+`.claude/`, `.git/` en `.mcp.json` draait op de ruwe én de canonieke vorm, en de
+regel-glob wordt tegen de canonieke vorm gelegd — het letterlijke mapdeel van
+de regel zelf wordt met hetzelfde algoritme gecanonicaliseerd (een regel op
+`C:/Users/ADMIN1~1/…/**` matcht de lange vorm van het pad; lukt dat niet, dan
+wordt de regel geweigerd). Geen beslissing (de mens
+beslist) bij: een `:` buiten de driveletter, een `//`-prefix (UNC, `\\?\`), een
+segment eindigend op punt/spatie, een korte naam die niet uit te klappen is, een
+ontbrekende drive of welke realpath-fout dan ook (fail-closed). Nieuw verboden,
+als regel én commando: `git checkout`/`restore` van de hele boom (`.`, `..`,
+`./`, `*`, `:/` — één genoemd pad mag wel), `git stash drop`/`clear`, `git reset
+--merge`/`--keep`, `git clean -x`/`--force`, `git push --prune`, `git worktree
+remove -f`/`--force` en `git branch -f`/`--force` (ook `-d -f`); een
+checkout/restore-regel die op `--` eindigt wordt geweigerd. Pad-globs op `//`
+zijn nooit een allow-boom.
+Geweigerde regels meldt de SessionStart-sync als
+`permission-allow-rejected: <regel>` én, per regel, aan de sessie via
+`POST /api/app/agent-session/{id}/report-allow-rule-rejected` (`{rule ≤500,
+geredigeerd; reason ≤100}`, eigen API-key, fail-open, stil zonder sessiebestand).
+
+**curl.** Een `Bash(curl …)`-regel is meer dan een prefix (PO-besluit: curl
+stuurt nooit sleutels of data naar een ander adres). De regel noemt precies één
+`https://`-URL; het commando mag dan alleen door als het precies één URL heeft
+waarvan de host (`new URL()`, inclusief poort) exact gelijk is aan de host van
+de regel — geen userinfo-`@`, geen look-alike (`staging.kanbantic.com.evil.example`),
+geen tweede URL, geen `$`, `\`, `{}` of `[]` — en alleen opties van de positieve
+lijst gebruikt: `-s -S -i -I -f -v --compressed …`, `-H`, `-A`, `-m`, `-w`,
+`-e`, `-u`, `--retry*` en `-X` met uitsluitend `GET`/`HEAD`. Alles wat data
+stuurt, bestanden schrijft of het adres verlegt (`-d`/`--data*`, `--json`,
+`-T`, `-F`, `-o`/`-O`/`--output`, `-K`, `--url`, `--resolve`, `--connect-to`,
+`-x`, `-L`, `-c`, `-D`, `-k`, een `@bestand`-waarde, een `Host:`-header) en elke
+onbekende optie gaat naar de mens. Een regel die hier niet aan voldoet
+(`Bash(curl *)`, `http://`, `-X POST`) wordt bij de sync geweigerd.
+
+**Waar de lijst staat.** `session-start-toolkit-sync.js` haalt het item op
+(`list_toolkit_items`, `category: "Custom"`, `includeContent: true`, selectie op
+tag) en schrijft `allowList` + `allowListFetchedAt` in het sessiebestand
+(gemerged) **én** in `~/.claude-kanbantic-allowlist-<CLAUDE_CODE_SESSION_ID>.json`.
+De dubbele plek is bewust: bij SessionStart bestaat het sessiebestand meestal nog
+niet (de proxy schrijft het pas na `register_agent_session`) en de proxy
+herschrijft het hele bestand bij elke `writeSessionFile()`. De router leest alleen
+die cache — geen netwerk op het hete pad — en neemt de nieuwste van beide.
+
+> **Valkuil.** `PermissionRequest` en `Notification(permission_prompt)` vuren
+> allebei voor dezelfde vraag, en `PermissionRequest` heeft in de payload **geen
+> `tool_use_id`**. De router haalt het id uit de bijbehorende `PreToolUse`
+> (lokale scratch-state), anders een synthetische `<session_id>:<tool>:<ts>`.
+> Het `timeout`-veld in `hooks.json` is volgens de Claude Code-docs in
+> **seconden**; de bestaande hooks gebruiken `8000`/`20000` — de scripts begrenzen
+> zichzelf (HTTP 5 s, stdin 3 s), dus de waarde is geen werkende bovengrens.
 
 ## Herkomst
 

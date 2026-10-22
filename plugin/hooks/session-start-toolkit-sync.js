@@ -48,8 +48,15 @@ const {
   resolveApiKey,
 } = require('../scripts/mcp-toolkit-fetch.js');
 
+const { parseAllowBlock } = require('./lib/permission-allow.js');
+const { writeAllowList } = require('./lib/allow-cache.js');
+const sessionApi = require('./lib/session-api.js');
+
 const SYNC_SCRIPT = path.resolve(__dirname, '..', 'scripts', 'sync-workspace-skills.js');
 const PREFIX = '[kanbantic-toolkit-sync]';
+const PERMISSION_ALLOW_TAG = 'permission-allow';
+const REJECTED_RULE_MAX = 500;
+const REJECTED_REASON_MAX = 100;
 
 function note(msg) {
   process.stdout.write(`${PREFIX} ${msg}\n`);
@@ -140,6 +147,83 @@ function looksKanbanticManaged(rootDir, manifest) {
   }
 }
 
+/**
+ * Allow-list for the PermissionRequest router — KBT-F741 / KBT-T5189 (KBT-SR638).
+ *
+ * The workspace declares it as a `Custom` Toolkit item tagged `permission-allow`
+ * (selection by TAG, never by code or content — same reasoning as the
+ * memory-guard, KBT-SR611). Only the fenced ```allow block of that item is
+ * parsed; every line is validated against the forbidden list (permission-allow.js)
+ * and refused lines are reported as `permission-allow-rejected: <rule>`.
+ * The accepted rules go to the session file + a cache file (allow-cache.js).
+ *
+ * Needs CLAUDE_CODE_SESSION_ID: it names the cache file, and stdin is not read
+ * here (this hook never has). Without it there is nothing to write — skip.
+ *
+ * Fail-open and independent of the Skill/Subagent sync below: a failure here
+ * keeps the previous cache (stale rules over no rules is the safe direction for
+ * a hook whose worst case is "ask the user as before") and never blocks it.
+ */
+async function syncPermissionAllowList({ workspace, client }) {
+  try {
+    if (!process.env.CLAUDE_CODE_SESSION_ID && !process.env.KANBANTIC_ALLOWLIST_FILE) {
+      debug('permission allow-list: no CLAUDE_CODE_SESSION_ID to key the cache on');
+      return;
+    }
+    const payload = await client.call('list_toolkit_items', {
+      workspaceId: workspace,
+      category: 'Custom',
+      includeContent: true,
+      maxResults: 200,
+    });
+    if (!payload || !Array.isArray(payload.items) || payload.truncated === true) {
+      debug('permission allow-list: Custom items list missing or truncated — keeping the old cache');
+      return;
+    }
+    const tagged = payload.items.filter(
+      (item) => item && Array.isArray(item.tags) && item.tags.includes(PERMISSION_ALLOW_TAG)
+    );
+    if (tagged.length > 1) {
+      debug(`permission allow-list: ${tagged.length} items tagged "${PERMISSION_ALLOW_TAG}" `
+        + `(${tagged.map((t) => t.code || '?').join(', ')}) — using the first`);
+    }
+    const { rules, rejected } = tagged.length
+      ? parseAllowBlock(tagged[0].content || '')
+      : { rules: [], rejected: [] };
+
+    for (const r of rejected) note(`permission-allow-rejected: ${r.rule}`);
+    writeAllowList(rules, { env: process.env, workspace });
+    await reportRejectedRules(rejected);
+  } catch (err) {
+    debug('permission allow-list sync failed', err);
+  }
+}
+
+/**
+ * Tell the session about every refused rule — KBT-T5221 (SEC063 §2).
+ *
+ * POST /api/app/agent-session/{id}/report-allow-rule-rejected, one call per
+ * rule, body `{ rule (≤500, redacted), reason (≤100) }`, with the agent's own
+ * API key over the same REST transport and session-file resolution as the
+ * session-state hooks (session-api.js). The answer `{ recorded: false }`
+ * (session without a workstation) is not an error and nothing is retried.
+ *
+ * Fail-open: no session file or API key → silent skip (at SessionStart the
+ * session file usually does not exist yet); network error, non-2xx or the 5 s
+ * deadline → swallowed. Runs after the cache write, so it can never block or
+ * change the sync itself.
+ */
+async function reportRejectedRules(rejected) {
+  if (!Array.isArray(rejected) || rejected.length === 0) return;
+  const ctx = sessionApi.loadContext({}, process.env);
+  if (!ctx) return;
+  const route = sessionApi.sessionRoute(ctx, 'report-allow-rule-rejected');
+  await Promise.all(rejected.map((r) => sessionApi.postQuietly(ctx, route, {
+    rule: sessionApi.truncate(sessionApi.redactText(String(r.rule)), REJECTED_RULE_MAX),
+    reason: sessionApi.truncate(String(r.reason || 'rejected'), REJECTED_REASON_MAX),
+  }, 'report-allow-rule-rejected')));
+}
+
 async function main() {
   const rootDir = process.cwd();
 
@@ -190,6 +274,8 @@ async function main() {
     }
     return;
   }
+
+  await syncPermissionAllowList({ workspace: detected.workspace, client });
 
   // ── Fetch ───────────────────────────────────────────────────────────────
   let items;

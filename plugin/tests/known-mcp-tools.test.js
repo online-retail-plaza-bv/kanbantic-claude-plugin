@@ -111,3 +111,13 @@ test('KBT-TC3292 — the 4 deprecated release tools are curated out, not merely 
     assert.ok(!tools.has(name), `${name} must not appear in tools`);
   }
 });
+
+// KBT-F741 — the two session-state report tools exist live and are name-only in the snapshot.
+test('KBT-F741 — snapshot lists report_tool_activity and report_turn_start (alphabetical, not curated out)', () => {
+  for (const name of ['report_tool_activity', 'report_turn_start']) {
+    assert.ok(tools.has(name), `snapshot must contain ${name}`);
+    assert.ok(!snapshot.curatedOut.includes(name));
+  }
+  const sorted = [...snapshot.tools].sort();
+  assert.deepStrictEqual(snapshot.tools, sorted, 'tools must stay alphabetical');
+});
